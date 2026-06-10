@@ -705,7 +705,9 @@ function renderLiveChannels() {
       <div class="name">${escapeHtml(ch.name)}</div>`;
     card.addEventListener("click", async () => {
       try {
-        await post("/api/live/play", "id=" + encodeURIComponent(ch.id));
+        // Server reads params from the query string only (NanoHTTPD doesn't
+        // auto-parse form bodies). Match the /api/play VOD pattern.
+        await post("/api/live/play?id=" + encodeURIComponent(ch.id));
         showToast(`Playing ${ch.name}`);
       } catch (e) {
         showToast("Couldn't play");
