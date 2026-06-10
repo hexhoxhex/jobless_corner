@@ -112,6 +112,10 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
     var scrubbing by remember { mutableStateOf(false) }
     var scrubTo by remember { mutableLongStateOf(0L) }
     var exoRef by remember { mutableStateOf<androidx.media3.common.Player?>(null) }
+    // Live stream health — VideoPlayer reports stall recovery actions so
+    // PlayerScreen can surface a small "Stabilising…" indicator instead of
+    // staying silent while the buffer rebuilds.
+    var stabilising by remember { mutableStateOf<String?>(null) }
 
     // Auto-hide controls after 3.5s idle. Any tap resets the timer.
     LaunchedEffect(controlsVisible, playing) {
@@ -221,6 +225,7 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                 onBuffering = { buffering = it },
                 onPlayingChanged = { playing = it },
                 onExoReady = { exoRef = it },
+                onStabilising = { stabilising = it },
                 tryDowngrade = vm::downgradeQuality,
                 resumeMs = if (play.isLive) 0L else state.resumeMs,
                 onProgress = { pos, dur ->
@@ -265,6 +270,27 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
             state.playLoading && !controlsVisible
         ) {
             Box(Modifier.fillMaxSize(), Alignment.Center) { LoadingPulse() }
+        }
+
+        // Stabilising pill — only on live streams when the resilience tracker
+        // takes an action (drops bitrate / re-prepares the manifest). Sits
+        // slightly above the transient status pill so they don't collide.
+        AnimatedVisibility(
+            visible = stabilising != null,
+            modifier = Modifier.align(Alignment.TopCenter)
+                .statusBarsPadding().padding(top = 18.dp),
+        ) {
+            Box(
+                Modifier.clip(RoundedCornerShape(20.dp))
+                    .background(Color(0xCCE8B341))  // warm amber so it reads
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
+            ) {
+                Text(
+                    "↻  ${stabilising ?: ""}",
+                    color = Color.Black, fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
         }
 
         // Transient status pill: confirms what's happening when the user taps.
@@ -594,6 +620,9 @@ private fun VideoPlayer(
     /** Hand the underlying ExoPlayer back to PlayerScreen so the custom
      *  controls overlay can read currentPosition for the scrubber and seek. */
     onExoReady: (androidx.media3.common.Player) -> Unit = {},
+    /** Live-stream resilience — emit a short message (or null to clear) when
+     *  the tracker forces a bitrate drop or re-prepares the source. */
+    onStabilising: (String?) -> Unit = {},
     /** If a decoder/render error fires, ask the VM to drop one quality notch. */
     tryDowngrade: () -> Boolean = { false },
     resumeMs: Long,
@@ -615,8 +644,18 @@ private fun VideoPlayer(
     val downgradeState = rememberUpdatedState(tryDowngrade)
     val progressState = rememberUpdatedState(onProgress)
     val liveErrorState = rememberUpdatedState(onLiveError)
+    val stabilisingState = rememberUpdatedState(onStabilising)
     var lastKey by remember { mutableStateOf<String?>(null) }
     val liveState = rememberUpdatedState(isLive)
+
+    // Live-stream resilience tracker. Kept outside ExoPlayer.Listener so the
+    // listener block stays clean; the listener just feeds it events.
+    val resilience = remember(isLive) { LiveResilience() }
+    // Track selector shared between the player and the resilience logic —
+    // resilience uses it to cap max bitrate after repeated stalls.
+    val trackSelector = remember(isLive) {
+        androidx.media3.exoplayer.trackselection.DefaultTrackSelector(context)
+    }
 
     val exo = remember(isLive) {
         // Live streams (public CDN, CORS open, no auth) want a CLEAN factory —
@@ -659,6 +698,7 @@ private fun VideoPlayer(
         ExoPlayer.Builder(context)
             .setMediaSourceFactory(sourceFactory)
             .setLoadControl(loadControl)
+            .setTrackSelector(trackSelector)
             .setAudioAttributes(AudioAttributes.DEFAULT, true)
             .setHandleAudioBecomingNoisy(true)
             .build()
@@ -736,8 +776,18 @@ private fun VideoPlayer(
         onExoReady(exo)
         val listener = object : Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) {
-                bufferingState.value(playbackState == Player.STATE_BUFFERING)
+                val isBuffering = playbackState == Player.STATE_BUFFERING
+                bufferingState.value(isBuffering)
                 if (playbackState == Player.STATE_ENDED) endedState.value()
+                // Live resilience: feed state transitions to the tracker.
+                if (liveState.value) {
+                    resilience.onBufferingChanged(
+                        buffering = isBuffering,
+                        player = exo,
+                        trackSelector = trackSelector,
+                        announce = { msg -> stabilisingState.value(msg) },
+                    )
+                }
             }
             override fun onIsPlayingChanged(isPlayingNow: Boolean) {
                 playingState.value(isPlayingNow)
