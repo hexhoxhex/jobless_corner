@@ -9,6 +9,7 @@ import android.view.ViewGroup
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -30,8 +31,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AspectRatio
+import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -41,6 +46,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -98,6 +104,34 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
     var resizeMode by remember {
         mutableStateOf(AspectRatioFrameLayout.RESIZE_MODE_FIT)
     }
+    // Live scrubber state: position read from the player every 500ms, plus a
+    // user-drag override that suppresses the read while the thumb is being
+    // moved so the bar doesn't fight the user.
+    var positionMs by remember { mutableLongStateOf(0L) }
+    var durationMs by remember { mutableLongStateOf(0L) }
+    var scrubbing by remember { mutableStateOf(false) }
+    var scrubTo by remember { mutableLongStateOf(0L) }
+    var exoRef by remember { mutableStateOf<androidx.media3.common.Player?>(null) }
+
+    // Auto-hide controls after 3.5s idle. Any tap resets the timer.
+    LaunchedEffect(controlsVisible, playing) {
+        if (controlsVisible && playing && !buffering) {
+            kotlinx.coroutines.delay(3500)
+            controlsVisible = false
+        }
+    }
+    // Tick the scrubber while controls are visible. No work otherwise — we
+    // don't want a 500ms timer firing forever when the user can't see it.
+    LaunchedEffect(controlsVisible, play) {
+        if (!controlsVisible) return@LaunchedEffect
+        while (true) {
+            exoRef?.let {
+                if (!scrubbing) positionMs = it.currentPosition
+                durationMs = it.duration.coerceAtLeast(0)
+            }
+            kotlinx.coroutines.delay(500)
+        }
+    }
 
     // Auto-dismiss the status pill ~1.5s after it appears.
     LaunchedEffect(statusPill) {
@@ -148,7 +182,17 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
         }
     }
 
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
+    Box(
+        Modifier.fillMaxSize().background(Color.Black)
+            // Tap anywhere on the player surface toggles the controls. When
+            // controls are hidden we treat the next tap as "show", not as
+            // "interact" — feels much more like Netflix / Apple TV.
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = { controlsVisible = !controlsVisible },
+            ),
+    ) {
         if (play != null && play.mediaUrl.isNotBlank()) {
             VideoPlayer(
                 mediaUrl = play.mediaUrl,
@@ -160,9 +204,10 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                     if (!play.isLive && state.autoplayNext && state.currentSe != null)
                         vm.nextEpisode()
                 },
-                onControlsVisible = { controlsVisible = it },
+                onControlsVisible = { /* native controller is off; we own visibility */ },
                 onBuffering = { buffering = it },
                 onPlayingChanged = { playing = it },
+                onExoReady = { exoRef = it },
                 tryDowngrade = vm::downgradeQuality,
                 resumeMs = if (play.isLive) 0L else state.resumeMs,
                 onProgress = { pos, dur ->
@@ -300,7 +345,151 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                 }
             }
         }
+
+        // ---- Center cluster: skip back · play/pause · skip forward ----
+        AnimatedVisibility(
+            visible = controlsVisible && play != null,
+            modifier = Modifier.align(Alignment.Center),
+            enter = androidx.compose.animation.fadeIn(),
+            exit = androidx.compose.animation.fadeOut(),
+        ) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(32.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                // Live streams don't seek; show only the play/pause toggle.
+                if (play?.isLive != true) {
+                    SkipBtn(Icons.Filled.Replay10) {
+                        exoRef?.seekTo((positionMs - 10_000).coerceAtLeast(0))
+                    }
+                }
+                BigPlayPauseBtn(
+                    playing = playing,
+                    buffering = buffering,
+                    onClick = {
+                        exoRef?.let { it.playWhenReady = !it.isPlaying }
+                    },
+                )
+                if (play?.isLive != true) {
+                    SkipBtn(Icons.Filled.Forward10) {
+                        exoRef?.seekTo(
+                            (positionMs + 10_000)
+                                .coerceAtMost(durationMs.coerceAtLeast(0))
+                        )
+                    }
+                }
+            }
+        }
+
+        // ---- Bottom strip: scrubber + time labels (VOD only) ----
+        AnimatedVisibility(
+            visible = controlsVisible && play != null && play.isLive != true,
+            modifier = Modifier.align(Alignment.BottomCenter),
+            enter = androidx.compose.animation.fadeIn(),
+            exit = androidx.compose.animation.fadeOut(),
+        ) {
+            Box(
+                Modifier.fillMaxWidth().background(
+                    Brush.verticalGradient(
+                        0f to Color.Transparent, 1f to Color(0xCC000000),
+                    )
+                ),
+            ) {
+                Column(
+                    Modifier.fillMaxWidth().padding(
+                        start = 18.dp, end = 18.dp, top = 12.dp, bottom = 18.dp,
+                    ),
+                ) {
+                    val dur = durationMs.coerceAtLeast(1)
+                    val cur = (if (scrubbing) scrubTo else positionMs)
+                        .coerceIn(0, dur)
+                    androidx.compose.material3.Slider(
+                        value = cur.toFloat(),
+                        valueRange = 0f..dur.toFloat(),
+                        onValueChange = {
+                            scrubbing = true
+                            scrubTo = it.toLong()
+                        },
+                        onValueChangeFinished = {
+                            exoRef?.seekTo(scrubTo)
+                            positionMs = scrubTo
+                            scrubbing = false
+                        },
+                        colors = androidx.compose.material3.SliderDefaults.colors(
+                            thumbColor = Accent,
+                            activeTrackColor = Accent,
+                            inactiveTrackColor = Color(0x55FFFFFF),
+                        ),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(
+                            formatTime(cur), color = Color.White,
+                            fontSize = 12.sp, fontWeight = FontWeight.Medium,
+                        )
+                        Text(
+                            formatTime(dur), color = Color.White.copy(alpha = .8f),
+                            fontSize = 12.sp, fontWeight = FontWeight.Medium,
+                        )
+                    }
+                }
+            }
+        }
     }
+}
+
+@Composable
+private fun BigPlayPauseBtn(
+    playing: Boolean,
+    buffering: Boolean,
+    onClick: () -> Unit,
+) {
+    Box(
+        Modifier.size(76.dp).clip(CircleShape)
+            .background(Color(0xCCFFFFFF))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (buffering) {
+            CircularProgressIndicator(
+                color = Accent, strokeWidth = 3.dp,
+                modifier = Modifier.size(36.dp),
+            )
+        } else {
+            Icon(
+                if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                null,
+                tint = Color.Black,
+                modifier = Modifier.size(40.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun SkipBtn(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    onClick: () -> Unit,
+) {
+    Box(
+        Modifier.size(56.dp).clip(CircleShape).background(Color(0x66000000))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(icon, null, tint = Color.White, modifier = Modifier.size(30.dp))
+    }
+}
+
+private fun formatTime(ms: Long): String {
+    val totalSec = (ms / 1000).coerceAtLeast(0)
+    val s = totalSec % 60
+    val m = (totalSec / 60) % 60
+    val h = totalSec / 3600
+    return if (h > 0) "%d:%02d:%02d".format(h, m, s)
+    else "%d:%02d".format(m, s)
 }
 
 @Composable
@@ -376,6 +565,9 @@ private fun VideoPlayer(
     onControlsVisible: (Boolean) -> Unit,
     onBuffering: (Boolean) -> Unit,
     onPlayingChanged: (Boolean) -> Unit,
+    /** Hand the underlying ExoPlayer back to PlayerScreen so the custom
+     *  controls overlay can read currentPosition for the scrubber and seek. */
+    onExoReady: (androidx.media3.common.Player) -> Unit = {},
     /** If a decoder/render error fires, ask the VM to drop one quality notch. */
     tryDowngrade: () -> Boolean = { false },
     resumeMs: Long,
@@ -508,6 +700,7 @@ private fun VideoPlayer(
 
     DisposableEffect(Unit) {
         RemoteController.player = exo
+        onExoReady(exo)
         val listener = object : Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) {
                 bufferingState.value(playbackState == Player.STATE_BUFFERING)
@@ -555,14 +748,9 @@ private fun VideoPlayer(
         factory = { ctx ->
             PlayerView(ctx).apply {
                 player = exo
-                useController = true
-                setShowSubtitleButton(true)
+                useController = false   // we own the chrome — see PlayerScreen
+                setShowSubtitleButton(false)
                 setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER)
-                setControllerVisibilityListener(
-                    PlayerView.ControllerVisibilityListener { vis ->
-                        visibilityState.value(vis == View.VISIBLE)
-                    }
-                )
                 layoutParams = ViewGroup.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT,
