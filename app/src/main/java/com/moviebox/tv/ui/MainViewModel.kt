@@ -78,6 +78,13 @@ data class UiState(
     /** null = "All". Otherwise the selected `group` value (e.g. "USA (DADDY LIVE)"). */
     val liveGroup: String? = null,
     val liveQuery: String = "",
+    /** Channel whose stream we're currently trying to play. Used by the
+     *  PlayerScreen to spin up the WebView fallback when direct HLS fails. */
+    val currentLiveChannel: Channel? = null,
+    /** When true, render LiveWebPlayer instead of the native ExoPlayer for
+     *  the active live stream. Flipped by [MainViewModel.fallbackToWebPlayer]
+     *  after the HLS path errors. */
+    val useLiveWebPlayer: Boolean = false,
 )
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
@@ -241,8 +248,21 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 details = null,
                 currentSe = null, currentEp = null,
                 error = null,
+                // Remember the channel so the WebView fallback knows what to
+                // load if the direct stream errors. Always start on the
+                // native HLS path — WebView is opt-in via fallbackToWebPlayer.
+                currentLiveChannel = ch,
+                useLiveWebPlayer = false,
             )
         }
+    }
+
+    /** PlayerScreen calls this when the native HLS player errors on a live
+     *  stream. We flip to the WebView fallback for the same channel rather
+     *  than bouncing the user out. */
+    fun fallbackToWebPlayer() {
+        if (_state.value.currentLiveChannel == null) return
+        _state.update { it.copy(useLiveWebPlayer = true) }
     }
 
     /** From a schedule chip — look up the channel by id and play it. */
@@ -553,7 +573,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             when (it.screen) {
                 Screen.PLAYER -> when {
                     it.play?.isLive == true ->
-                        it.copy(screen = Screen.TABS, tab = Tab.LIVE, play = null)
+                        it.copy(
+                            screen = Screen.TABS, tab = Tab.LIVE,
+                            play = null,
+                            currentLiveChannel = null,
+                            useLiveWebPlayer = false,
+                        )
                     it.details != null || it.currentSe != null ->
                         it.copy(screen = Screen.DETAIL, play = null)
                     else -> it.copy(screen = Screen.TABS, play = null)

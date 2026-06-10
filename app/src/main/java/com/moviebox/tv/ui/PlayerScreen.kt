@@ -193,7 +193,19 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                 onClick = { controlsVisible = !controlsVisible },
             ),
     ) {
-        if (play != null && play.mediaUrl.isNotBlank()) {
+        // ---- WebView fallback for live streams whose direct HLS 403's ----
+        if (play != null && play.isLive && state.useLiveWebPlayer &&
+            state.currentLiveChannel != null
+        ) {
+            LiveWebPlayer(
+                channel = state.currentLiveChannel,
+                onAllPathsFailed = { msg ->
+                    vm.surfaceError(msg)
+                    vm.back()
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else if (play != null && play.mediaUrl.isNotBlank()) {
             VideoPlayer(
                 mediaUrl = play.mediaUrl,
                 captions = play.captions,
@@ -218,8 +230,15 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                 resizeMode = resizeMode,
                 isLive = play.isLive,
                 onLiveError = { msg ->
-                    vm.surfaceError(msg)
-                    vm.back()
+                    // First failure → try the WebView fallback for the same
+                    // channel. If that also fails, LiveWebPlayer fires
+                    // onAllPathsFailed → vm.back() with the message.
+                    if (state.currentLiveChannel != null && !state.useLiveWebPlayer) {
+                        vm.fallbackToWebPlayer()
+                    } else {
+                        vm.surfaceError(msg)
+                        vm.back()
+                    }
                 },
                 title = play.let {
                     if (it.isLive) it.title
