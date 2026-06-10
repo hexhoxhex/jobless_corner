@@ -661,42 +661,35 @@ private fun VideoPlayer(
         // Live streams (public CDN, CORS open, no auth) want a CLEAN factory —
         // injecting the MovieBox Referer would either be ignored or rejected.
         // VOD reuses the header-injecting factory the rest of the app relies on.
-        // Live HLS uses an OkHttp-backed DataSource — gives us HTTP/2,
-        // connection pooling, and modern TLS, same as a browser. Single
-        // biggest improvement we can make for live smoothness on the
-        // pontos/vomos CDNs, which respond very poorly to HTTP/1.1 head-of-line
-        // blocking when chunks land on the same connection.
-        val httpFactory = if (isLive) {
-            val ok = okhttp3.OkHttpClient.Builder()
-                .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
-                .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
-                .retryOnConnectionFailure(true)
-                .build()
-            androidx.media3.datasource.okhttp.OkHttpDataSource.Factory(ok)
-                .setUserAgent(
-                    "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 " +
-                    "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
-                )
-        } else {
-            DefaultHttpDataSource.Factory()
-                .setAllowCrossProtocolRedirects(true)
-                .setConnectTimeoutMs(15_000)
-                .setReadTimeoutMs(20_000)
-                .setUserAgent(
-                    "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 " +
-                    "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
-                )
-                .setDefaultRequestProperties(Constants.mediaHeaders)
-        }
+        // NOTE: we tried OkHttpDataSource on the live path for HTTP/2 — it
+        // froze playback on the TCL TV (TLS / protocol negotiation issue
+        // against pontos.phantemlis.top). Reverted to DefaultHttpDataSource;
+        // the softer resilience tracker now does the heavy lifting instead.
+        val httpFactory = DefaultHttpDataSource.Factory()
+            .setAllowCrossProtocolRedirects(true)
+            .setConnectTimeoutMs(15_000)
+            .setReadTimeoutMs(20_000)
+            .setUserAgent(
+                "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+            )
+            .apply {
+                if (!isLive) setDefaultRequestProperties(Constants.mediaHeaders)
+            }
         // Live tuning: keep the latency tight to ~12s but allow a real cushion
         // so a momentary network dip doesn't pause playback. Numbers in ms:
         //   minBuffer  / maxBuffer  / bufferForPlayback / bufferForPlaybackAfterRebuffer
         val loadControl = if (isLive) {
-            // Live: ride further behind the edge so a momentary chunk stall
-            // doesn't bottom out the buffer and cause the stream to cut.
-            // minBuffer  / maxBuffer / playback / playback-after-rebuffer
+            // Live: a deep buffer is our primary defense against the
+            // HTTP/1.1 head-of-line blocking that ExoPlayer's DefaultHttp
+            // DataSource is stuck with. minBuffer 45s gives us nearly a
+            // minute of pre-loaded chunks; maxBuffer 90s lets ExoPlayer
+            // get further ahead when the network IS cooperating. 10s
+            // bufferForPlayback means we don't START until we have a
+            // real cushion (vs 5s where a hiccup in the first 5s puts
+            // us right back to buffering).
             DefaultLoadControl.Builder()
-                .setBufferDurationsMs(30_000, 60_000, 5_000, 10_000)
+                .setBufferDurationsMs(45_000, 90_000, 10_000, 15_000)
                 .build()
         } else {
             DefaultLoadControl.Builder()
