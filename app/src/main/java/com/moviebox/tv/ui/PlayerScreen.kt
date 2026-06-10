@@ -203,6 +203,7 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                     vm.surfaceError(msg)
                     vm.back()
                 },
+                onBack = { vm.back() },
                 modifier = Modifier.fillMaxSize(),
             )
         } else if (play != null && play.mediaUrl.isNotBlank()) {
@@ -293,7 +294,7 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
         // Top overlay: back + title + audio/quality + fullscreen. Fades with
         // the native controller so the video can use the whole screen.
         AnimatedVisibility(
-            visible = controlsVisible && play != null,
+            visible = controlsVisible && play != null && !state.useLiveWebPlayer,
             modifier = Modifier.align(Alignment.TopCenter),
         ) {
             Box(
@@ -373,7 +374,7 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
 
         // ---- Center cluster: skip back · play/pause · skip forward ----
         AnimatedVisibility(
-            visible = controlsVisible && play != null,
+            visible = controlsVisible && play != null && !state.useLiveWebPlayer,
             modifier = Modifier.align(Alignment.Center),
             enter = androidx.compose.animation.fadeIn(),
             exit = androidx.compose.animation.fadeOut(),
@@ -408,7 +409,7 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
 
         // ---- Bottom strip: scrubber + time labels (VOD only) ----
         AnimatedVisibility(
-            visible = controlsVisible && play != null && play.isLive != true,
+            visible = controlsVisible && play != null && play.isLive != true && !state.useLiveWebPlayer,
             modifier = Modifier.align(Alignment.BottomCenter),
             enter = androidx.compose.animation.fadeIn(),
             exit = androidx.compose.animation.fadeOut(),

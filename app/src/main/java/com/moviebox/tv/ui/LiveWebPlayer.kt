@@ -7,11 +7,24 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -24,7 +37,11 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -32,28 +49,36 @@ import com.moviebox.tv.data.live.Channel
 import com.moviebox.tv.ui.theme.Accent
 
 /**
- * Fallback for live channels whose direct HLS stream URL returns a 403 (the
- * inner playlist URLs in the mkurugenzi_viewer catalog can't be reached
- * directly from a hardened TV — see LIVE_TV_BUG_REPORT.md §0). The
- * dlhd.pk iframe-style endpoints embed a self-contained JS player.
+ * Fallback for live channels whose direct HLS stream URL returns a 403 (see
+ * `LIVE_TV_BUG_REPORT.md` §0 — the catalog's inner playlist URLs are
+ * universally rejected by nginx). Loads `dlhd.pk/{path}/stream-{id}.php` in
+ * a WebView. Many such pages are protected by Adscore-style anti-bot
+ * fingerprinting and stay black forever, so we time-bound each attempt.
  *
- * We rotate through the catalog's [Channel.playerPaths] in order. Each path
- * maps to a different upstream backend; if the iframe doesn't fire its
- * `onPageFinished` within a deadline OR the inner page errors, we move to
- * the next path. Final failure calls [onAllPathsFailed].
+ * What this composable owns:
+ *  - A small top bar (back + channel name) so the user is never trapped on
+ *    a black screen.
+ *  - Backend rotation: at most 3 backends, 7s per attempt. Total worst-case
+ *    is ~21s before we bail out to the channel grid.
+ *  - A single user-visible message at the end.
  */
 @Composable
 fun LiveWebPlayer(
     channel: Channel,
     onAllPathsFailed: (String) -> Unit,
+    onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // Iframe pages tend to behave the same regardless of path — first 3 are
+    // enough. The rest just keep the user staring at black.
     val paths = remember(channel.id) {
-        channel.playerPaths.ifEmpty { listOf("stream", "cast", "watch", "plus") }
+        channel.playerPaths.ifEmpty {
+            listOf("stream", "cast", "watch")
+        }.take(3)
     }
     var pathIndex by remember(channel.id) { mutableIntStateOf(0) }
-    var loadingNow by remember { mutableStateOf(true) }
     val failedRef = rememberUpdatedState(onAllPathsFailed)
+    val backRef = rememberUpdatedState(onBack)
 
     val currentPath = paths.getOrNull(pathIndex)
     val url = currentPath?.let {
@@ -64,97 +89,112 @@ fun LiveWebPlayer(
         if (url != null) {
             WebViewBox(
                 url = url,
-                onProgressChanged = { p -> if (p >= 100) loadingNow = false },
-                onError = {
-                    if (pathIndex < paths.size - 1) {
-                        pathIndex += 1; loadingNow = true
-                    } else {
-                        failedRef.value("All player backends failed for ${channel.displayName}.")
-                    }
+                onMainFrameError = {
+                    if (pathIndex < paths.size - 1) pathIndex += 1
+                    else failedRef.value(
+                        "Couldn't reach \"${channel.displayName}\".",
+                    )
                 },
                 modifier = Modifier.fillMaxSize(),
             )
         }
-        // Two timers per path:
-        //  - 8s loading deadline: if the page never fires onPageFinished /
-        //    onProgressChanged(100), assume the backend is unreachable.
-        //  - 12s "max black screen" deadline: even after the page loads, if
-        //    nothing visibly plays (Adscore + similar anti-bot pages stay
-        //    black forever) we rotate to the next backend / give up.
-        // The user can hit back at any point; the back navigation is owned
-        // by the parent PlayerScreen, not this composable.
+
+        // Single hard 7s deadline per backend. We have no reliable way to
+        // know whether the inner video player has actually started
+        // (Adscore-protected pages load fine and stay black), so the safest
+        // signal is: if you've been staring at this backend for 7s, move on.
         LaunchedEffect(pathIndex) {
-            loadingNow = true
-            kotlinx.coroutines.delay(8000)
-            if (loadingNow) {
-                rotateOrFail(
-                    pathIndex, paths.size,
-                    failed = { msg -> failedRef.value(msg) },
-                    advance = { pathIndex += 1 },
-                    msgWhenOut =
-                        "No backend responded for ${channel.displayName}.",
-                )
-            }
-        }
-        LaunchedEffect(pathIndex) {
-            kotlinx.coroutines.delay(12_000)
-            // Reached 12s on this backend. We have no reliable way to detect
-            // "video is actually playing" from outside the WebView, so the
-            // safe assumption when the user keeps seeing black is that this
-            // backend won't deliver and we should move on.
-            rotateOrFail(
-                pathIndex, paths.size,
-                failed = { msg -> failedRef.value(msg) },
-                advance = { pathIndex += 1 },
-                msgWhenOut =
-                    "Could not start \"${channel.displayName}\" on any backend.",
+            kotlinx.coroutines.delay(7_000)
+            if (pathIndex < paths.size - 1) pathIndex += 1
+            else failedRef.value(
+                "\"${channel.displayName}\" isn't streaming right now.",
             )
         }
-        if (loadingNow) {
-            Column(
-                Modifier.align(Alignment.Center),
-                horizontalAlignment = Alignment.CenterHorizontally,
+
+        // Always-visible top bar: back button + channel name. Stops the
+        // "trapped on a black screen" complaint.
+        Box(
+            Modifier.fillMaxWidth().align(Alignment.TopCenter).background(
+                Brush.verticalGradient(
+                    0f to Color(0xCC000000), 1f to Color.Transparent,
+                )
+            )
+        ) {
+            Row(
+                Modifier.fillMaxWidth().statusBarsPadding().padding(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                CircularProgressIndicator(
-                    color = Accent, strokeWidth = 3.dp,
-                    modifier = Modifier.size(46.dp),
-                )
-                Text(
-                    "Loading ${currentPath ?: "stream"} backend…",
-                    color = Color.White.copy(alpha = .85f),
-                    fontSize = 13.sp,
-                )
-                Text(
-                    "Backend ${pathIndex + 1} of ${paths.size}",
-                    color = Color.White.copy(alpha = .55f),
-                    fontSize = 11.sp,
-                )
+                Box(
+                    Modifier.size(40.dp).clip(CircleShape)
+                        .background(Color(0x66000000))
+                        .clickable { backRef.value() },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.ArrowBack, null,
+                        tint = Color.White, modifier = Modifier.size(22.dp),
+                    )
+                }
+                Column(Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            Modifier.padding(end = 8.dp)
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(Color(0xCCE5484D))
+                                .padding(horizontal = 6.dp, vertical = 2.dp),
+                        ) {
+                            Text("LIVE",
+                                color = Color.White, fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold)
+                        }
+                        Text(
+                            channel.displayName,
+                            color = Color.White,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 15.sp,
+                        )
+                    }
+                    if (!channel.group.isNullOrBlank()) {
+                        Text(
+                            "${channel.group} · backend ${pathIndex + 1}/${paths.size}",
+                            color = Color.White.copy(alpha = 0.55f),
+                            fontSize = 11.sp,
+                        )
+                    }
+                }
             }
         }
-    }
-}
 
-/** Either advance to the next path index, or report the final failure
- *  message. Shared by the two timeout effects in LiveWebPlayer. */
-private fun rotateOrFail(
-    currentIndex: Int,
-    total: Int,
-    failed: (String) -> Unit,
-    advance: () -> Unit,
-    msgWhenOut: String,
-) {
-    if (currentIndex < total - 1) advance() else failed(msgWhenOut)
+        // Small bottom-centred loading hint. Stays unobtrusive — if the
+        // video starts the user won't really see it; if it doesn't they
+        // know we're not just frozen.
+        Column(
+            Modifier.align(Alignment.BottomCenter).padding(bottom = 28.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            CircularProgressIndicator(
+                color = Accent, strokeWidth = 2.dp,
+                modifier = Modifier.size(22.dp),
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Trying ${currentPath ?: "—"} backend",
+                color = Color.White.copy(alpha = 0.7f),
+                fontSize = 11.sp, textAlign = TextAlign.Center,
+            )
+        }
+    }
 }
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 private fun WebViewBox(
     url: String,
-    onProgressChanged: (Int) -> Unit,
-    onError: () -> Unit,
+    onMainFrameError: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val onErrorState = rememberUpdatedState(onError)
+    val onMainFrameErrorState = rememberUpdatedState(onMainFrameError)
     var webView by remember { mutableStateOf<WebView?>(null) }
 
     AndroidView(
@@ -173,14 +213,14 @@ private fun WebViewBox(
                     loadWithOverviewMode = true
                     useWideViewPort = true
                     userAgentString = userAgentString
-                        .replace(Regex("wv\\b"), "")  // hide WebView marker
+                        .replace(Regex("wv\\b"), "")
                         .replace(Regex("; Build/[^)]+"), "")
                 }
                 webViewClient = object : WebViewClient() {
                     override fun shouldOverrideUrlLoading(
                         view: WebView?, request: WebResourceRequest?,
                     ): Boolean {
-                        // Stay in-app — block popups + redirects to other domains.
+                        // Block navigation away from the embed host.
                         val host = request?.url?.host ?: return false
                         return host !in setOf(
                             "dlhd.pk", "donis.jimpenopisonline.online",
@@ -194,21 +234,16 @@ private fun WebViewBox(
                         request: WebResourceRequest?,
                         error: android.webkit.WebResourceError?,
                     ) {
-                        // Only top-level errors matter — the iframe loads
-                        // dozens of subresources, many of which fail benignly.
-                        if (request?.isForMainFrame == true) onErrorState.value()
+                        if (request?.isForMainFrame == true) {
+                            onMainFrameErrorState.value()
+                        }
                     }
                 }
-                webChromeClient = object : WebChromeClient() {
-                    override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                        onProgressChanged(newProgress)
-                    }
-                }
+                webChromeClient = WebChromeClient()
                 loadUrl(url)
                 webView = this
             }
         },
-        update = { /* nothing — the LiveWebPlayer recreates by changing URL via factory key */ },
     )
 
     DisposableEffect(url) { onDispose { webView?.destroy() } }
