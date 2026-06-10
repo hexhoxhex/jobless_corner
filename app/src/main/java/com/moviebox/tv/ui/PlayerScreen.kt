@@ -237,7 +237,13 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
         }
 
         // Starting / re-buffering spinner over the video.
-        if (play != null && play.mediaUrl.isNotBlank() && (buffering || state.playLoading)) {
+        // The new BigPlayPauseBtn already shows a spinner for buffering inside
+        // the play-button circle. Show the full-screen pulse only for the
+        // initial "we haven't started yet" state where the play button isn't
+        // mounted yet because controls are hidden.
+        if (play != null && play.mediaUrl.isNotBlank() &&
+            state.playLoading && !controlsVisible
+        ) {
             Box(Modifier.fillMaxSize(), Alignment.Center) { LoadingPulse() }
         }
 
