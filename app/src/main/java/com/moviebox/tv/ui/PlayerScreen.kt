@@ -661,21 +661,36 @@ private fun VideoPlayer(
         // Live streams (public CDN, CORS open, no auth) want a CLEAN factory —
         // injecting the MovieBox Referer would either be ignored or rejected.
         // VOD reuses the header-injecting factory the rest of the app relies on.
-        // NOTE: we tried OkHttpDataSource on the live path for HTTP/2 — it
-        // froze playback on the TCL TV (TLS / protocol negotiation issue
-        // against pontos.phantemlis.top). Reverted to DefaultHttpDataSource;
-        // the softer resilience tracker now does the heavy lifting instead.
-        val httpFactory = DefaultHttpDataSource.Factory()
-            .setAllowCrossProtocolRedirects(true)
-            .setConnectTimeoutMs(15_000)
-            .setReadTimeoutMs(20_000)
-            .setUserAgent(
-                "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 " +
-                "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
-            )
-            .apply {
-                if (!isLive) setDefaultRequestProperties(Constants.mediaHeaders)
-            }
+        // Live HLS: OkHttpDataSource with HTTP/1.1 forced. We previously tried
+        // OkHttp with its default protocol list [H2, H1] — froze on the TCL
+        // TV's TLS stack during HTTP/2 ALPN negotiation. Forcing HTTP/1.1
+        // sidesteps that path entirely while still getting OkHttp's
+        // connection pool + keep-alive (the actual win vs DefaultHttpDataSource,
+        // which goes through Android's java.net.HttpURLConnection and pays a
+        // fresh handshake more often than the browser does).
+        val httpFactory = if (isLive) {
+            val ok = okhttp3.OkHttpClient.Builder()
+                .protocols(listOf(okhttp3.Protocol.HTTP_1_1))
+                .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+                .retryOnConnectionFailure(true)
+                .build()
+            androidx.media3.datasource.okhttp.OkHttpDataSource.Factory(ok)
+                .setUserAgent(
+                    "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 " +
+                    "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+                )
+        } else {
+            DefaultHttpDataSource.Factory()
+                .setAllowCrossProtocolRedirects(true)
+                .setConnectTimeoutMs(15_000)
+                .setReadTimeoutMs(20_000)
+                .setUserAgent(
+                    "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 " +
+                    "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+                )
+                .setDefaultRequestProperties(Constants.mediaHeaders)
+        }
         // Live tuning: keep the latency tight to ~12s but allow a real cushion
         // so a momentary network dip doesn't pause playback. Numbers in ms:
         //   minBuffer  / maxBuffer  / bufferForPlayback / bufferForPlaybackAfterRebuffer
