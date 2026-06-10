@@ -22,3 +22,15 @@ Thumbs.db
 
 # Internal handover notes — not part of the public source tree.
 /GITHUB_ANON_PUSH.md
+
+# Release artefacts staged for upload — generated, not source.
+/dist/
+
+# Diagnostic / probe scratchpad — generated, not source.
+/donis-page.html
+/stream-test/
+
+# Signing keystores. The real one lives outside the project tree
+# (~/.hexhoxhex/release.jks); this is a belt-and-braces guard.
+*.jks
+*.keystore

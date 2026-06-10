@@ -34,13 +34,31 @@ android {
         )
     }
 
+    // Release signing — keystore path + passwords live in local.properties
+    // (gitignored), which the hexhoxhex push procedure also relies on.
+    // CI can override via env vars of the same names.
+    signingConfigs {
+        create("release") {
+            val storePath = secret("HEXHOXHEX_KEYSTORE")
+            if (storePath.isNotBlank() && file(storePath).exists()) {
+                storeFile = file(storePath)
+                storePassword = secret("HEXHOXHEX_STORE_PASS")
+                keyAlias = secret("HEXHOXHEX_KEY_ALIAS")
+                keyPassword = secret("HEXHOXHEX_KEY_PASS")
+            }
+        }
+    }
+
     buildTypes {
         release {
+            // R8 is left off until we audit Moshi / Room / NanoHTTPD keep
+            // rules; APK is ~24 MB unminified, fine for sideload.
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
+            signingConfig = signingConfigs.findByName("release")
         }
     }
 
