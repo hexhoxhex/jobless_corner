@@ -15,6 +15,7 @@ import com.moviebox.tv.data.SubjectType
 import com.moviebox.tv.data.TastePrefs
 import com.moviebox.tv.data.UnavailableCatalog
 import com.moviebox.tv.data.live.Channel
+import com.moviebox.tv.data.live.LiveResolver
 import com.moviebox.tv.data.live.LiveTvRepository
 import com.moviebox.tv.data.live.ScheduleEvent
 import com.moviebox.tv.data.local.AppDatabase
@@ -91,6 +92,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val repo = Repository()
     private val liveRepo = LiveTvRepository()
+    private val liveResolver = LiveResolver()
     private val db = AppDatabase.get(app)
     private val favDao = db.favourites()
     private val watchDao = db.watchHistory()
@@ -219,41 +221,74 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun selectLiveGroup(g: String?) = _state.update { it.copy(liveGroup = g) }
     fun onLiveQuery(q: String) = _state.update { it.copy(liveQuery = q) }
 
-    /** Open the player for a TV channel. */
+    /** Open the player for a TV channel.
+     *
+     *  Resolves a fresh, IP-signed stream URL via [LiveResolver] first; falls
+     *  back to the catalog's cached [Channel.streamUrl] if the resolver
+     *  fails. The resolver is necessary because the catalog's signed URLs
+     *  are IP-bound to the scraper, not the playback device — see the
+     *  IP-binding confirmation in `LIVE_TV_BUG_REPORT.md` §0.
+     */
     fun playChannel(ch: Channel) {
-        val url = ch.streamUrl ?: return
-        // Live streams have no quality variants, no captions, no dub, no resume,
-        // no autoplay-next. We model them as a minimal PlayInfo with isLive=true.
-        val play = PlayInfo(
-            title = ch.displayName,
-            mediaUrl = url,
-            selected = "LIVE",
-            qualities = emptyList(),
-            captions = emptyList(),
-            dubs = emptyList(),
-            selectedDub = "",
-            season = 0, episode = 0, episodeTitle = "",
-            durationSec = 0,
-            isLive = true,
-            subtitle = ch.group ?: "Live TV",
-        )
+        // Flip into PLAYER immediately with a placeholder so the user sees
+        // the player chrome populate while we resolve. mediaUrl stays blank
+        // until the resolver lands — PlayerScreen waits on the blank URL
+        // before constructing ExoPlayer.
         _state.update {
             it.copy(
                 screen = Screen.PLAYER,
-                play = play,
-                playLoading = false,
+                play = PlayInfo(
+                    title = ch.displayName,
+                    mediaUrl = "",
+                    selected = "LIVE",
+                    qualities = emptyList(),
+                    captions = emptyList(),
+                    dubs = emptyList(),
+                    selectedDub = "",
+                    season = 0, episode = 0, episodeTitle = "",
+                    durationSec = 0,
+                    isLive = true,
+                    subtitle = ch.group ?: "Live TV",
+                ),
+                playLoading = true,
                 resumeMs = 0L,
-                // Wipe VOD context so PlayerScreen/back behave right.
                 detailItem = null,
                 details = null,
                 currentSe = null, currentEp = null,
                 error = null,
-                // Remember the channel so the WebView fallback knows what to
-                // load if the direct stream errors. Always start on the
-                // native HLS path — WebView is opt-in via fallbackToWebPlayer.
                 currentLiveChannel = ch,
                 useLiveWebPlayer = false,
             )
+        }
+        viewModelScope.launch {
+            // Try the resolver first — gives us a URL signed for THIS
+            // device's WAN egress IP. Falls back to the catalog cache only
+            // if resolution truly failed.
+            val resolved = runCatching { liveResolver.resolveStream(ch.id) }
+                .getOrNull()
+            val finalUrl = resolved ?: ch.streamUrl ?: ""
+            if (finalUrl.isBlank()) {
+                _state.update { s ->
+                    s.copy(
+                        playLoading = false,
+                        error = "Couldn't resolve \"${ch.displayName}\".",
+                        screen = Screen.TABS, tab = Tab.LIVE, play = null,
+                        currentLiveChannel = null, useLiveWebPlayer = false,
+                    )
+                }
+                return@launch
+            }
+            _state.update { s ->
+                if (s.currentLiveChannel?.id != ch.id) {
+                    // User already moved on — drop the resolution.
+                    s
+                } else {
+                    s.copy(
+                        play = s.play?.copy(mediaUrl = finalUrl),
+                        playLoading = false,
+                    )
+                }
+            }
         }
     }
 
