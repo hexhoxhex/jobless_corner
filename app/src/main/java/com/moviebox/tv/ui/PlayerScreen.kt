@@ -661,17 +661,33 @@ private fun VideoPlayer(
         // Live streams (public CDN, CORS open, no auth) want a CLEAN factory —
         // injecting the MovieBox Referer would either be ignored or rejected.
         // VOD reuses the header-injecting factory the rest of the app relies on.
-        val httpFactory = DefaultHttpDataSource.Factory()
-            .setAllowCrossProtocolRedirects(true)
-            .setConnectTimeoutMs(15_000)
-            .setReadTimeoutMs(20_000)
-            .setUserAgent(
-                "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 " +
-                "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
-            )
-            .apply {
-                if (!isLive) setDefaultRequestProperties(Constants.mediaHeaders)
-            }
+        // Live HLS uses an OkHttp-backed DataSource — gives us HTTP/2,
+        // connection pooling, and modern TLS, same as a browser. Single
+        // biggest improvement we can make for live smoothness on the
+        // pontos/vomos CDNs, which respond very poorly to HTTP/1.1 head-of-line
+        // blocking when chunks land on the same connection.
+        val httpFactory = if (isLive) {
+            val ok = okhttp3.OkHttpClient.Builder()
+                .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+                .retryOnConnectionFailure(true)
+                .build()
+            androidx.media3.datasource.okhttp.OkHttpDataSource.Factory(ok)
+                .setUserAgent(
+                    "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 " +
+                    "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+                )
+        } else {
+            DefaultHttpDataSource.Factory()
+                .setAllowCrossProtocolRedirects(true)
+                .setConnectTimeoutMs(15_000)
+                .setReadTimeoutMs(20_000)
+                .setUserAgent(
+                    "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 " +
+                    "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+                )
+                .setDefaultRequestProperties(Constants.mediaHeaders)
+        }
         // Live tuning: keep the latency tight to ~12s but allow a real cushion
         // so a momentary network dip doesn't pause playback. Numbers in ms:
         //   minBuffer  / maxBuffer  / bufferForPlayback / bufferForPlaybackAfterRebuffer
