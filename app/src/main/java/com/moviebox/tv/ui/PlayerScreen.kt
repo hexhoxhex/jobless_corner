@@ -172,6 +172,10 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                     LocalConfiguration.current.locales[0].language,
                 resizeMode = resizeMode,
                 isLive = play.isLive,
+                onLiveError = { msg ->
+                    vm.surfaceError(msg)
+                    vm.back()
+                },
                 title = play.let {
                     if (it.isLive) it.title
                     else if (state.currentSe != null)
@@ -379,6 +383,9 @@ private fun VideoPlayer(
     defaultSubtitleLang: String,
     resizeMode: Int,
     isLive: Boolean,
+    /** Called when a live HLS stream errors fatally (token expiry, upstream
+     *  offline, etc). Distinct from VOD, where we try downgrading quality. */
+    onLiveError: (String) -> Unit = {},
     title: String,
     modifier: Modifier = Modifier,
 ) {
@@ -389,6 +396,7 @@ private fun VideoPlayer(
     val playingState = rememberUpdatedState(onPlayingChanged)
     val downgradeState = rememberUpdatedState(tryDowngrade)
     val progressState = rememberUpdatedState(onProgress)
+    val liveErrorState = rememberUpdatedState(onLiveError)
     var lastKey by remember { mutableStateOf<String?>(null) }
     val liveState = rememberUpdatedState(isLive)
 
@@ -509,7 +517,23 @@ private fun VideoPlayer(
                 playingState.value(isPlayingNow)
             }
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                // Try one notch lower (e.g. 1080P HEVC → 720P / 480P H.264).
+                if (liveState.value) {
+                    // Live HLS doesn't have a quality ladder to drop into, and
+                    // a token-expiry or upstream-offline failure leaves the
+                    // player stuck at 00:00 with no feedback. Surface a
+                    // friendly error and pop back to the channel grid.
+                    val cause = error.cause
+                    val msg = when {
+                        cause is androidx.media3.datasource.HttpDataSource
+                            .InvalidResponseCodeException &&
+                            cause.responseCode in listOf(401, 403, 410) ->
+                            "This channel is offline right now."
+                        else -> "Couldn't connect — try another channel."
+                    }
+                    liveErrorState.value(msg)
+                    return
+                }
+                // VOD: try one notch lower (e.g. 1080P HEVC → 720P / 480P H.264).
                 // If no lower quality is available, the player is left paused
                 // and the user can hit back.
                 downgradeState.value()

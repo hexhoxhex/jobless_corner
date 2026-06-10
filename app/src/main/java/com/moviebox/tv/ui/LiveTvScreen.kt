@@ -34,6 +34,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
@@ -184,7 +185,10 @@ private fun ChannelCard(ch: Channel, onClick: () -> Unit) {
         Box(
             Modifier.fillMaxWidth().aspectRatio(1.5f)
                 .clip(RoundedCornerShape(8.dp))
-                .background(Color(0xFF0A0C12)),
+                .then(
+                    if (!ch.logo.isNullOrBlank()) Modifier.background(Color(0xFF0A0C12))
+                    else Modifier.background(initialsGradient(ch.displayName))
+                ),
             contentAlignment = Alignment.Center,
         ) {
             if (!ch.logo.isNullOrBlank()) {
@@ -195,8 +199,10 @@ private fun ChannelCard(ch: Channel, onClick: () -> Unit) {
                 )
             } else {
                 Text(
-                    ch.displayName.take(3).uppercase(),
-                    color = TextMuted, fontWeight = FontWeight.Bold, fontSize = 18.sp,
+                    initialsOf(ch.displayName),
+                    color = Color.White,
+                    fontWeight = FontWeight.Black,
+                    fontSize = 20.sp,
                 )
             }
             // Tiny "LIVE" pill in the corner.
@@ -355,4 +361,40 @@ private fun EventRow(
 private fun String.shortGroupLabel(): String {
     val idx = indexOf(" (")
     return if (idx > 0) substring(0, idx) else this
+}
+
+/** Acronym up to 3 chars from the channel name. "Arena Sport 2 Serbia" -> "AS2",
+ *  "ABC" -> "ABC", "Eurosport" -> "EUR". Beats `name.take(3)` which produced
+ *  "ARE", "AST", "EUR" for unrelated names — looked broken. */
+private fun initialsOf(name: String): String {
+    val words = name.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
+    return when {
+        words.isEmpty() -> "?"
+        words.size == 1 -> words[0].take(3).uppercase()
+        else -> words.take(3)
+            .map { it.first() }
+            .joinToString("")
+            .uppercase()
+    }
+}
+
+/** Deterministic two-color diagonal gradient seeded by the channel name.
+ *  Same channel always picks the same palette so card backgrounds stay
+ *  stable across recompositions. Hues are saturated but not garish. */
+private fun initialsGradient(seed: String): Brush {
+    val hash = seed.hashCode().toUInt().toLong()
+    val palette = listOf(
+        0xFF1f3a5f to 0xFF2d5a87,  // navy
+        0xFF3a1f5f to 0xFF6d3a87,  // purple
+        0xFF1f5f3a to 0xFF3a8758,  // teal-green
+        0xFF5f1f3a to 0xFF87385c,  // crimson
+        0xFF5f4a1f to 0xFF87683a,  // amber
+        0xFF1f4a5f to 0xFF3a6878,  // steel-blue
+        0xFF4a1f5f to 0xFF6a3a87,  // violet
+        0xFF5f1f1f to 0xFF873a3a,  // brick
+    )
+    val (a, b) = palette[(hash % palette.size).toInt()]
+    return Brush.linearGradient(
+        listOf(Color(a), Color(b)),
+    )
 }

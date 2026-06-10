@@ -475,6 +475,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun dismissError() = _state.update { it.copy(error = null) }
 
+    /** Push a user-visible error message — shows the existing top banner.
+     *  Used by PlayerScreen when a live HLS stream fatally errors. */
+    fun surfaceError(message: String) = _state.update { it.copy(error = message) }
+
     private var dpadCount = 0
     private var lastSuggestAt = 0L
 

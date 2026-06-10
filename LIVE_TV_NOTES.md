@@ -108,13 +108,41 @@ The app today only consumes `id`, `name`, `stream_url`, `status`, `logo`,
 `group`, `tvg_id`. The `players` array is recorded so future code can
 fall over to iframe-style alt backends if the direct `stream_url` 5xx's.
 
-## Stream-URL expiry
+## Stream-URL expiry — IMPORTANT
 
-Each `stream_url` carries an `expires=<unix>` query param, usually ~2
-months out from when the scraper last ran. After expiry the stream returns
-401/403 instead of the manifest. **Re-run the scraper before that** — the
-data repo's README explains how. For app users this means: if a previously-
-working channel suddenly stops playing, the catalog needs a refresh.
+**Each `stream_url` lives ~1 hour, not "~2 months" as an earlier version of
+this doc incorrectly claimed.** Each one carries an `expires=<unix>` query
+param that is roughly `now + 3600` at scrape time. The master `.m3u8`
+URL itself usually still returns 200 after expiry (the master is just a
+templated lookup), but the **inner chunk URLs** the master points at
+will return `410 Gone` (sometimes `500` with an "Error fetching index
+playlist" body) — which ExoPlayer surfaces as a fatal source error.
+
+**Implication for the static-mirror-on-GitHub model:** a freshly-pushed
+catalog is usable for ~55 minutes from push time, and gets progressively
+flakier through the second half of that hour as half the channels' chunk
+URLs start to roll over. You'll want to re-push hourly.
+
+**Better long-term architecture:**
+
+| Option | Complexity | Pros |
+|---|---|---|
+| GitHub Actions cron, every 50 min | trivial | works on the existing static data model; near-fresh data continuously |
+| Cloudflare Worker that proxies the donis `daddy.php` resolver and serves fresh URLs on demand | small (~150 LOC) | tokens always fresh, no decay; per-channel cache lives for 50 min in the worker, browsers + apps see ~5s p99 |
+| App calls a tiny self-hosted resolver | medium | full control, can rate-limit, can cache, can fall over to alt backends without WebView |
+
+`LIVE_TV_NOTES.md` (this file) and the data repo's README should probably
+note this — for now, the manual workflow is:
+
+```sh
+# In the data repo (G:\development\entertainment\eyepapcorn_iptv):
+python scraper.py
+git add data playlist_new.m3u8 tester.html
+git commit -m "Refresh catalog"
+git push     # uses the github-hexhoxhex SSH alias - see GITHUB_ANON_PUSH.md
+```
+
+If the app stops playing channels, this is the first thing to try.
 
 ## Mobile remote SPA — what works now
 
@@ -165,3 +193,68 @@ before the TV ever opened LIVE itself).
 ```
 
 `./gradlew assembleDebug` will produce `app/build/outputs/apk/debug/app-debug.apk`.
+
+---
+
+## Addendum — patches from LIVE_TV_BUG_REPORT.md
+
+Two of the three app-side issues raised in `LIVE_TV_BUG_REPORT.md` are
+now fixed in this commit; the third (catalog refresh) is fixed in the
+data repo with a corresponding push. Verifying against logcat is the
+next step.
+
+### Fixed: dead-stream UX
+
+`PlayerScreen.kt` — when `isLive` and the player error's `responseCode` is
+`401 / 403 / 410` (or just any other fatal source error) the listener no
+longer calls the VOD-only `downgradeQuality()` (which was a no-op for
+live and left the player stuck at `00:00`). It now:
+
+1. Picks a message — `"This channel is offline right now."` for 4xx
+   auth/gone codes, `"Couldn't connect — try another channel."` otherwise.
+2. Calls a new `onLiveError(msg)` callback on the player.
+3. `PlayerScreen` routes that to `vm.surfaceError(msg) + vm.back()` —
+   the existing top-of-screen error banner is shown and the user pops
+   back to the channel grid where they can pick another one. The system
+   bars restore automatically because `back()` flips `Screen.PLAYER ->
+   Screen.TABS` and the `DisposableEffect` in `PlayerScreen` shows the
+   bars on dispose.
+
+New API surface:
+- `MainViewModel.surfaceError(message: String)` — pushes the message
+  into `state.error` for the existing banner.
+- `VideoPlayer(..., onLiveError: (String) -> Unit = {})` — new optional
+  callback.
+
+### Fixed: 3-letter "ARE / AST / EUR" logo fallback
+
+`LiveTvScreen.kt::ChannelCard` — the previous fallback rendered
+`displayName.take(3).uppercase()` on a dim text colour for every
+channel with no logo, which read as broken. Replaced with:
+
+- `initialsOf(name)` — acronyms from up to 3 *words* of the channel
+  name. `"Arena Sport 2 Serbia"` → `"AS2"`, `"ABC"` → `"ABC"`,
+  `"Eurosport"` → `"EUR"`.
+- `initialsGradient(name)` — deterministic two-color diagonal gradient
+  seeded by the name's hashCode against an 8-palette set. Same channel
+  always renders the same colors so the grid feels stable. Text is now
+  white on a saturated tile instead of dim text on near-black.
+
+Both helpers are private to `LiveTvScreen.kt`. If you want to reuse them
+on a future EPG card, lift them into `ui/Components.kt`.
+
+### Not fixed (yet): tv-logo/tv-logos fallback by tvg_id
+
+The bug report's option 3 — attempt
+`https://raw.githubusercontent.com/tv-logo/tv-logos/main/countries/<dir>/<tvg_id>.png`
+when `logo` is null but `tvg_id` is present. Not done; the gradient
+fallback should be enough to make the grid stop looking broken. If you
+do tackle this, a HEAD-check is needed (Coil supports a placeholder on
+load error which would suffice).
+
+### "Modern player" redesign
+
+Out of scope for this patch set per the bug report. The path remains
+`PlayerScreen.kt::AndroidView(factory = { ctx -> PlayerView(ctx).apply { ... } })`.
+Replacing the Media3 default `PlayerView` controls with a custom Compose
+overlay would be the next big swing.
