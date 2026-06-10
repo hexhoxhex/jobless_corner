@@ -1,9 +1,21 @@
 package com.moviebox.tv.ui
 
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.composed
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.SolidColor
+import kotlinx.coroutines.flow.collectLatest
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -44,6 +56,75 @@ import com.moviebox.tv.ui.theme.Accent
 import com.moviebox.tv.ui.theme.Gold
 import com.moviebox.tv.ui.theme.SurfaceElevated
 import com.moviebox.tv.ui.theme.TextMuted
+
+/**
+ * D-pad-friendly focus indication for TV.
+ *
+ * Replaces the default click-only interaction with: scale up on focus,
+ * bright accent border, soft shadow, and (critically) brings the focused
+ * element into view of its parent scrollable so the user can keep
+ * pressing right/down without the focus marker disappearing off-screen.
+ *
+ * On phones (`LocalIsTv == false`) this collapses to a plain ripple-less
+ * clickable, since touch users don't navigate by focus.
+ *
+ * Apply as the SAME modifier you'd use for clickable() — replaces it.
+ * Pass [shape] matching the visible card shape so the border / shadow
+ * track it.
+ */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+fun Modifier.tvFocusable(
+    shape: androidx.compose.ui.graphics.Shape = RoundedCornerShape(10.dp),
+    scaleOnFocus: Float = 1.06f,
+    borderWidth: Dp = 3.dp,
+    borderColor: Color = Accent,
+    onClick: () -> Unit,
+): Modifier = composed {
+    val isTv = LocalIsTv.current
+    if (!isTv) {
+        return@composed this.clickable(
+            interactionSource = remember { MutableInteractionSource() },
+            indication = null,
+            onClick = onClick,
+        )
+    }
+    var focused by remember { mutableStateOf(false) }
+    val bringIntoView = remember { BringIntoViewRequester() }
+    val scale by animateFloatAsState(
+        if (focused) scaleOnFocus else 1f,
+        animationSpec = spring(dampingRatio = 0.8f, stiffness = 320f),
+        label = "tv-focus-scale",
+    )
+    val border by animateDpAsState(
+        if (focused) borderWidth else 0.dp,
+        animationSpec = spring(dampingRatio = 0.9f, stiffness = 400f),
+        label = "tv-focus-border",
+    )
+    LaunchedEffect(Unit) {
+        snapshotFlow { focused }.collectLatest { isFocused ->
+            if (isFocused) {
+                runCatching { bringIntoView.bringIntoView() }
+            }
+        }
+    }
+    this
+        .bringIntoViewRequester(bringIntoView)
+        .scale(scale)
+        .shadow(
+            elevation = if (focused) 12.dp else 0.dp,
+            shape = shape,
+            ambientColor = borderColor,
+            spotColor = borderColor,
+        )
+        .border(width = border, brush = SolidColor(borderColor), shape = shape)
+        .onFocusChanged { focused = it.isFocused }
+        .focusable()
+        .clickable(
+            interactionSource = remember { MutableInteractionSource() },
+            indication = null,
+            onClick = onClick,
+        )
+}
 
 @Composable
 fun SectionHeader(
@@ -171,16 +252,11 @@ fun PosterCard(
 ) {
     val isTv = LocalIsTv.current
     val actualWidth = width ?: if (isTv) 180.dp else 120.dp
-    var focused by remember { mutableStateOf(false) }
-    val scale = if (focused) 1.06f else 1f
     Column(
         Modifier
             .width(actualWidth)
-            .scale(scale)
-            .onFocusChanged { focused = it.isFocused }
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
+            .tvFocusable(
+                shape = RoundedCornerShape(10.dp),
                 onClick = onClick,
             ),
     ) {
@@ -188,12 +264,7 @@ fun PosterCard(
             Modifier
                 .fillMaxWidth()
                 .aspectRatio(2f / 3f)
-                .clip(RoundedCornerShape(10.dp))
-                .border(
-                    width = if (focused) 3.dp else 0.dp,
-                    color = if (focused) Accent else Color.Transparent,
-                    shape = RoundedCornerShape(10.dp),
-                ),
+                .clip(RoundedCornerShape(10.dp)),
         ) {
             PosterImage(item.coverUrl, item.title, Modifier.fillMaxSize())
             RatingPill(

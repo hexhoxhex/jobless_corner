@@ -178,7 +178,10 @@ private fun ChannelCard(ch: Channel, onClick: () -> Unit) {
         modifier = Modifier
             .clip(RoundedCornerShape(12.dp))
             .background(Surface)
-            .clickable(onClick = onClick)
+            .tvFocusable(
+                shape = RoundedCornerShape(12.dp),
+                onClick = onClick,
+            )
             .padding(8.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
@@ -230,7 +233,10 @@ private fun GroupChip(label: String, selected: Boolean, onClick: () -> Unit) {
     Box(
         Modifier.clip(RoundedCornerShape(20.dp))
             .background(if (selected) Accent else SurfaceElevated)
-            .clickable(onClick = onClick)
+            .tvFocusable(
+                shape = RoundedCornerShape(20.dp),
+                onClick = onClick,
+            )
             .padding(horizontal = 14.dp, vertical = 7.dp),
     ) {
         Text(
@@ -246,7 +252,10 @@ private fun SubTabPill(label: String, selected: Boolean, onClick: () -> Unit) {
     Box(
         Modifier.clip(RoundedCornerShape(20.dp))
             .background(if (selected) Accent else SurfaceElevated)
-            .clickable(onClick = onClick)
+            .tvFocusable(
+                shape = RoundedCornerShape(20.dp),
+                onClick = onClick,
+            )
             .padding(horizontal = 18.dp, vertical = 9.dp),
     ) {
         Text(
