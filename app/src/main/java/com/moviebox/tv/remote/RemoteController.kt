@@ -1,0 +1,217 @@
+package com.moviebox.tv.remote
+
+import android.media.AudioManager
+import android.os.Handler
+import android.os.Looper
+import androidx.media3.common.Player
+import com.moviebox.tv.data.Item
+import com.moviebox.tv.data.Repository
+import com.moviebox.tv.data.SubjectType
+import com.moviebox.tv.data.live.Channel
+import com.moviebox.tv.data.live.ScheduleEvent
+import com.moviebox.tv.data.tmdb.TmdbRepository
+import com.moviebox.tv.data.local.DownloadEntity
+import com.moviebox.tv.data.local.WatchHistoryEntity
+import com.moviebox.tv.ui.MainViewModel
+import java.lang.ref.WeakReference
+
+/**
+ * Bridge between the embedded remote server (background threads) and the app's
+ * player + ViewModel (main thread). The player is never touched off the main
+ * thread: reads come from cached @Volatile fields, commands are posted to the
+ * main looper.
+ */
+object RemoteController {
+
+    private val main = Handler(Looper.getMainLooper())
+    private val repo = Repository()
+    private val tmdb = TmdbRepository()
+
+    /** Slice id: one of "trending" | "popular_movies" | "popular_tv" |
+     *  "netflix" | "hbo" | "disney" | "prime" | "apple" | "hulu" |
+     *  "genre_movie:<csv ids>" | "genre_tv:<csv ids>". */
+    suspend fun browse(slice: String): List<Item> = runCatching {
+        when {
+            slice == "trending"        -> tmdb.trending()
+            slice == "popular_movies"  -> tmdb.popularMovies()
+            slice == "popular_tv"      -> tmdb.popularTv()
+            slice == "netflix" -> tmdb.byNetwork(TmdbRepository.Networks.NETFLIX)
+            slice == "hbo"     -> tmdb.byNetwork(TmdbRepository.Networks.HBO)
+            slice == "disney"  -> tmdb.byNetwork(TmdbRepository.Networks.DISNEY_PLUS)
+            slice == "prime"   -> tmdb.byNetwork(TmdbRepository.Networks.PRIME)
+            slice == "apple"   -> tmdb.byNetwork(TmdbRepository.Networks.APPLE_TV)
+            slice == "hulu"    -> tmdb.byNetwork(TmdbRepository.Networks.HULU)
+            slice.startsWith("genre_movie:") -> tmdb.byGenre(
+                slice.removePrefix("genre_movie:")
+                    .split(",").mapNotNull { it.toIntOrNull() }, tv = false,
+            )
+            slice.startsWith("genre_tv:") -> tmdb.byGenre(
+                slice.removePrefix("genre_tv:")
+                    .split(",").mapNotNull { it.toIntOrNull() }, tv = true,
+            )
+            else -> emptyList()
+        }
+    }.getOrDefault(emptyList())
+
+    suspend fun movieGenres() = runCatching { tmdb.movieGenres() }
+        .getOrDefault(emptyList())
+    suspend fun tvGenres() = runCatching { tmdb.tvGenres() }
+        .getOrDefault(emptyList())
+
+    @Volatile var player: Player? = null
+    @Volatile var audioManager: AudioManager? = null
+    private var vmRef: WeakReference<MainViewModel>? = null
+
+    @Volatile var nowPlayingTitle: String = ""
+    @Volatile var positionMs: Long = 0
+    @Volatile var durationMs: Long = 0
+    @Volatile var isPlaying: Boolean = false
+    @Volatile var selectedQuality: String = ""
+    @Volatile var availableQualities: List<String> = emptyList()
+    @Volatile var selectedDub: String = ""
+    @Volatile var availableDubs: List<String> = emptyList()
+
+    private val vm: MainViewModel? get() = vmRef?.get()
+
+    fun bind(viewModel: MainViewModel, am: AudioManager) {
+        vmRef = WeakReference(viewModel)
+        audioManager = am
+    }
+
+    fun updatePlayback(title: String, pos: Long, dur: Long, playing: Boolean) {
+        nowPlayingTitle = title
+        positionMs = pos
+        durationMs = dur
+        isPlaying = playing
+    }
+
+    fun clearPlayback() {
+        player = null
+        nowPlayingTitle = ""
+        positionMs = 0; durationMs = 0; isPlaying = false
+        selectedQuality = ""; availableQualities = emptyList()
+        selectedDub = ""; availableDubs = emptyList()
+    }
+
+    fun updatePlayTracks(
+        selectedQ: String, qs: List<String>,
+        selectedD: String, ds: List<String>,
+    ) {
+        selectedQuality = selectedQ; availableQualities = qs
+        selectedDub = selectedD;     availableDubs = ds
+    }
+
+    fun pickQuality(label: String) = main.post { vm?.changeQuality(label) }
+    fun pickDub(name: String) = main.post { vm?.changeDub(name) }
+
+    /**
+     * First authenticated request from any phone: dismiss the D-pad-suggestion
+     * tip AND close the QR overlay so the TV gets out of the user's way.
+     */
+    fun onClientActive() = main.post {
+        vm?.dismissSuggestion()
+        vm?.closeRemote()
+    }
+
+    // -- transport ---------------------------------------------------------
+
+    fun playPause() = main.post {
+        player?.let { it.playWhenReady = !it.isPlaying }
+    }
+
+    fun seekTo(ms: Long) = main.post { player?.seekTo(ms.coerceAtLeast(0)) }
+
+    fun seekBy(deltaMs: Long) = main.post {
+        player?.let { it.seekTo((it.currentPosition + deltaMs).coerceAtLeast(0)) }
+    }
+
+    // -- volume ------------------------------------------------------------
+
+    fun volumeUp() = audioManager?.adjustStreamVolume(
+        AudioManager.STREAM_MUSIC, AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI,
+    )
+
+    fun volumeDown() = audioManager?.adjustStreamVolume(
+        AudioManager.STREAM_MUSIC, AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI,
+    )
+
+    fun volumePercent(): Int {
+        val am = audioManager ?: return 0
+        val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        if (max == 0) return 0
+        return am.getStreamVolume(AudioManager.STREAM_MUSIC) * 100 / max
+    }
+
+    fun setVolumePercent(pct: Int) {
+        val am = audioManager ?: return
+        val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        am.setStreamVolume(
+            AudioManager.STREAM_MUSIC,
+            (pct.coerceIn(0, 100) * max / 100), 0,
+        )
+    }
+
+    // -- browse / play -----------------------------------------------------
+
+    suspend fun search(query: String): List<Item> =
+        runCatching { repo.search(query) }.getOrDefault(emptyList())
+
+    suspend fun details(subjectId: String): com.moviebox.tv.data.Details? =
+        runCatching { repo.details(subjectId) }.getOrNull()
+
+    fun playOnTv(
+        subjectId: String, title: String, coverUrl: String?, type: Int,
+        season: Int?, episode: Int?, year: Int? = null,
+    ) = main.post {
+        vm?.remotePlay(subjectId, title, coverUrl, type, season, episode, year)
+    }
+
+    // -- library -----------------------------------------------------------
+
+    fun history(): List<WatchHistoryEntity> = vm?.continueWatching?.value ?: emptyList()
+    fun downloads(): List<DownloadEntity> = vm?.downloads?.value ?: emptyList()
+    fun deleteHistory(key: String) = main.post { vm?.removeHistory(key) }
+
+    fun startDownload(
+        subjectId: String, title: String, coverUrl: String?, type: Int,
+        season: Int?, episode: Int?,
+    ) = main.post {
+        val item = Item(
+            subjectId = subjectId, title = title,
+            type = SubjectType.fromCode(type),
+            year = null, rating = null, coverUrl = coverUrl, seasonCount = 0,
+        )
+        if (season == null) vm?.downloadMovie(item)
+        else vm?.downloadEpisode(item, season, episode ?: 1)
+    }
+
+    fun deleteDownload(key: String) = main.post {
+        val d = vm?.downloads?.value?.firstOrNull { it.key == key } ?: return@post
+        vm?.removeDownload(d)
+    }
+
+    // -- live TV -----------------------------------------------------------
+
+    /** Snapshot of the live channel catalog held by the VM. May be empty if
+     *  the LIVE tab hasn't been opened yet — caller should invoke
+     *  [ensureLiveLoaded] and retry shortly after. */
+    fun liveChannels(): List<Channel> = vm?.state?.value?.liveChannels ?: emptyList()
+
+    fun liveSchedule(): List<ScheduleEvent> =
+        vm?.state?.value?.liveSchedule ?: emptyList()
+
+    /** True after the first successful fetch — lets the SPA stop polling. */
+    fun liveLoaded(): Boolean = (vm?.state?.value?.liveChannels?.isNotEmpty()) == true
+
+    /** Kick off a load on the VM if we don't have channels yet. Cheap to call
+     *  repeatedly — the VM guards against concurrent loads. */
+    fun ensureLiveLoaded() = main.post {
+        val s = vm?.state?.value ?: return@post
+        if (!s.liveLoading && s.liveChannels.isEmpty()) vm?.loadLive()
+    }
+
+    /** Play a live channel by its catalog id. */
+    fun playLiveChannel(channelId: String) = main.post {
+        vm?.playScheduleChannel(channelId)
+    }
+}

@@ -1,0 +1,253 @@
+package com.moviebox.tv.ui
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.border
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.platform.LocalConfiguration
+import coil.compose.AsyncImage
+import com.moviebox.tv.data.Hero
+import com.moviebox.tv.data.local.WatchHistoryEntity
+import com.moviebox.tv.ui.theme.Accent
+import com.moviebox.tv.ui.theme.SurfaceElevated
+import com.moviebox.tv.ui.theme.TextMuted
+
+@Composable
+fun HomeScreen(state: UiState, vm: MainViewModel) {
+    val home = state.home
+    if (home == null) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            if (state.homeLoading) CircularProgressIndicator()
+            else ErrorView(state.error, onRetry = { vm.loadHome() })
+        }
+        return
+    }
+    val isTv = LocalIsTv.current
+
+    LazyColumn(
+        contentPadding = PaddingValues(bottom = if (isTv) 36.dp else 24.dp),
+        verticalArrangement = Arrangement.spacedBy(if (isTv) 28.dp else 20.dp),
+    ) {
+        item {
+            home.heroes.firstOrNull()?.let { HeroBanner(it) { vm.openItem(it.item) } }
+        }
+        item {
+            val continueWatching by vm.continueWatching.collectAsState()
+            if (continueWatching.isNotEmpty()) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    SectionHeader("Continue Watching")
+                    LazyRow(
+                        contentPadding = PaddingValues(horizontal = if (isTv) 32.dp else 16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(if (isTv) 16.dp else 12.dp),
+                    ) {
+                        items(continueWatching) { h ->
+                            ContinueCard(h, onClick = { vm.resumeFrom(h) })
+                        }
+                    }
+                }
+            }
+        }
+        item {
+            val recs by vm.recommendations.collectAsState()
+            if (recs.isNotEmpty()) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    SectionHeader("For You")
+                    LazyRow(
+                        contentPadding = PaddingValues(horizontal = if (isTv) 32.dp else 16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(if (isTv) 16.dp else 12.dp),
+                    ) {
+                        items(recs) { item ->
+                            PosterCard(item) { vm.openItem(item) }
+                        }
+                    }
+                }
+            }
+        }
+        items(home.rows) { row ->
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                SectionHeader(row.title)
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    items(row.items) { item ->
+                        PosterCard(item) { vm.openItem(item) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ContinueCard(h: WatchHistoryEntity, onClick: () -> Unit) {
+    val isTv = LocalIsTv.current
+    val cardW = if (isTv) 240.dp else 150.dp
+    var focused by remember { mutableStateOf(false) }
+    val s = if (focused) 1.04f else 1f
+    Column(
+        Modifier
+            .width(cardW)
+            .scale(s)
+            .onFocusChanged { focused = it.isFocused }
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick,
+            ),
+    ) {
+        Box(
+            Modifier.fillMaxWidth().aspectRatio(16f / 10f)
+                .clip(RoundedCornerShape(10.dp))
+                .border(
+                    width = if (focused) 3.dp else 0.dp,
+                    color = if (focused) Accent else Color.Transparent,
+                    shape = RoundedCornerShape(10.dp),
+                ),
+        ) {
+            PosterImage(h.coverUrl, h.title, Modifier.fillMaxSize())
+            // Play affordance scrim
+            Box(
+                Modifier.fillMaxSize().background(
+                    Brush.verticalGradient(
+                        0f to Color.Transparent, 1f to Color(0xAA000000),
+                    )
+                )
+            )
+            // Progress bar
+            Box(
+                Modifier.align(Alignment.BottomStart).fillMaxWidth().height(4.dp)
+                    .background(Color(0x55FFFFFF)),
+            ) {
+                Box(
+                    Modifier.fillMaxHeight().fillMaxWidth(h.progress)
+                        .background(Accent),
+                )
+            }
+        }
+        Text(
+            h.title,
+            fontSize = if (isTv) 14.sp else 12.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(top = 6.dp),
+        )
+        Text(
+            if (h.season > 0) "S${h.season}E${h.episode}" else "Resume",
+            fontSize = if (isTv) 12.sp else 11.sp, color = TextMuted,
+        )
+    }
+}
+
+@Composable
+private fun HeroBanner(hero: Hero, onClick: () -> Unit) {
+    val isTv = LocalIsTv.current
+    val screen = LocalConfiguration.current
+    // TV: ~55% of screen height — cinematic but leaves room for the first row
+    // of cards below the fold. Phone: fixed 300dp.
+    val heroHeight =
+        if (isTv) (screen.screenHeightDp * 0.55f).dp else 300.dp
+    var focused by remember { mutableStateOf(false) }
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .height(heroHeight)
+            .onFocusChanged { focused = it.isFocused }
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick,
+            )
+            .let { if (isTv && focused) it.border(3.dp, Accent) else it },
+    ) {
+        PosterImage(
+            url = hero.backdropUrl,
+            title = hero.item.title,
+            modifier = Modifier.fillMaxSize(),
+        )
+        Box(
+            Modifier.fillMaxSize().background(
+                Brush.verticalGradient(
+                    0f to Color.Transparent,
+                    0.55f to Color(0x660B0D12),
+                    1f to Color(0xFF0B0D12),
+                )
+            )
+        )
+        Column(
+            Modifier
+                .align(Alignment.BottomStart)
+                .padding(if (isTv) 36.dp else 16.dp),
+        ) {
+            Text(
+                hero.item.title,
+                fontSize = if (isTv) 42.sp else 26.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color.White,
+            )
+            Spacer(Modifier.height(if (isTv) 8.dp else 4.dp))
+            Text(
+                buildString {
+                    hero.item.year?.let { append(it) }
+                    if (hero.item.genres.isNotEmpty()) {
+                        if (isNotEmpty()) append("  •  ")
+                        append(hero.item.genres.take(2).joinToString(" / "))
+                    }
+                },
+                fontSize = if (isTv) 16.sp else 13.sp,
+                color = TextMuted,
+            )
+            // On TV, give the user a clear affordance — the hero is huge and
+            // would otherwise feel passive.
+            if (isTv) {
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    "▶  Play",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Accent,
+                )
+            }
+        }
+        RatingPill(
+            hero.item.rating,
+            Modifier.align(Alignment.TopEnd).padding(if (isTv) 24.dp else 16.dp),
+        )
+    }
+}

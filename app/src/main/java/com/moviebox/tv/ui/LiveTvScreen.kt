@@ -1,0 +1,358 @@
+package com.moviebox.tv.ui
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import coil.compose.AsyncImage
+import com.moviebox.tv.data.live.Channel
+import com.moviebox.tv.data.live.ScheduleEvent
+import com.moviebox.tv.ui.theme.Accent
+import com.moviebox.tv.ui.theme.Surface
+import com.moviebox.tv.ui.theme.SurfaceElevated
+import com.moviebox.tv.ui.theme.TextMuted
+import com.moviebox.tv.ui.theme.TextPrimary
+
+@Composable
+fun LiveTvScreen(state: UiState, vm: MainViewModel) {
+    val isTv = LocalIsTv.current
+
+    Column(Modifier.fillMaxSize()) {
+        // Sub-tab switcher (Channels | Schedule), styled like a pill bar.
+        Row(
+            Modifier.fillMaxWidth().padding(
+                horizontal = if (isTv) 32.dp else 16.dp, vertical = 10.dp,
+            ),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            SubTabPill(
+                "Channels", state.liveSubTab == LiveSubTab.CHANNELS,
+            ) { vm.selectLiveSubTab(LiveSubTab.CHANNELS) }
+            SubTabPill(
+                "Schedule", state.liveSubTab == LiveSubTab.SCHEDULE,
+            ) { vm.selectLiveSubTab(LiveSubTab.SCHEDULE) }
+        }
+
+        when {
+            state.liveLoading && state.liveChannels.isEmpty() ->
+                Box(Modifier.fillMaxSize(), Alignment.Center) {
+                    CircularProgressIndicator(color = Accent)
+                }
+            state.liveError != null && state.liveChannels.isEmpty() ->
+                Box(Modifier.fillMaxSize(), Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("Could not load Live TV",
+                            color = TextPrimary, fontWeight = FontWeight.SemiBold)
+                        Text(state.liveError, color = TextMuted, fontSize = 12.sp)
+                        Box(
+                            Modifier.padding(top = 12.dp).clip(RoundedCornerShape(10.dp))
+                                .background(Accent).clickable { vm.loadLive(force = true) }
+                                .padding(horizontal = 18.dp, vertical = 8.dp),
+                        ) { Text("Retry", color = Color.White, fontWeight = FontWeight.SemiBold) }
+                    }
+                }
+            state.liveSubTab == LiveSubTab.CHANNELS -> ChannelsView(state, vm, isTv)
+            else -> ScheduleView(state, vm, isTv)
+        }
+    }
+}
+
+// ---------------- Channels grid ----------------
+
+@Composable
+private fun ChannelsView(state: UiState, vm: MainViewModel, isTv: Boolean) {
+    val q = state.liveQuery.trim().lowercase()
+    val group = state.liveGroup
+    val filtered = state.liveChannels.filter { c ->
+        (group == null || c.group == group) &&
+        (q.isEmpty() || c.name.lowercase().contains(q))
+    }
+    val groups = remember(state.liveChannels) {
+        state.liveChannels.mapNotNull { it.group }.distinct()
+    }
+
+    Column(Modifier.fillMaxSize()) {
+        // Search box
+        Box(
+            Modifier.fillMaxWidth()
+                .padding(horizontal = if (isTv) 32.dp else 16.dp)
+                .padding(bottom = 8.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(SurfaceElevated)
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Filled.Search, null, tint = TextMuted,
+                    modifier = Modifier.size(18.dp))
+                BasicTextField(
+                    value = state.liveQuery,
+                    onValueChange = vm::onLiveQuery,
+                    singleLine = true,
+                    textStyle = TextStyle(color = TextPrimary, fontSize = 14.sp),
+                    cursorBrush = androidx.compose.ui.graphics.SolidColor(Accent),
+                    modifier = Modifier.fillMaxWidth().padding(start = 8.dp),
+                    decorationBox = { inner ->
+                        if (state.liveQuery.isEmpty()) {
+                            Text("Search channels…", color = TextMuted, fontSize = 14.sp)
+                        }
+                        inner()
+                    },
+                )
+            }
+        }
+
+        // Group filter chips
+        LazyRow(
+            contentPadding = PaddingValues(
+                horizontal = if (isTv) 32.dp else 16.dp,
+            ),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.padding(bottom = 10.dp),
+        ) {
+            item { GroupChip("All", group == null) { vm.selectLiveGroup(null) } }
+            items(groups) { g ->
+                GroupChip(g.shortGroupLabel(), group == g) { vm.selectLiveGroup(g) }
+            }
+        }
+
+        // Channel grid - cards with logo + name + live dot
+        val columns = if (isTv) 6 else 3
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(columns),
+            contentPadding = PaddingValues(
+                start = if (isTv) 32.dp else 16.dp,
+                end = if (isTv) 32.dp else 16.dp,
+                bottom = if (isTv) 32.dp else 24.dp,
+            ),
+            horizontalArrangement = Arrangement.spacedBy(if (isTv) 14.dp else 10.dp),
+            verticalArrangement = Arrangement.spacedBy(if (isTv) 14.dp else 10.dp),
+        ) {
+            items(filtered, key = { it.id }) { ch ->
+                ChannelCard(ch) { vm.playChannel(ch) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChannelCard(ch: Channel, onClick: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(Surface)
+            .clickable(onClick = onClick)
+            .padding(8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Box(
+            Modifier.fillMaxWidth().aspectRatio(1.5f)
+                .clip(RoundedCornerShape(8.dp))
+                .background(Color(0xFF0A0C12)),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (!ch.logo.isNullOrBlank()) {
+                AsyncImage(
+                    model = ch.logo, contentDescription = ch.name,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize().padding(10.dp),
+                )
+            } else {
+                Text(
+                    ch.displayName.take(3).uppercase(),
+                    color = TextMuted, fontWeight = FontWeight.Bold, fontSize = 18.sp,
+                )
+            }
+            // Tiny "LIVE" pill in the corner.
+            Box(
+                Modifier.align(Alignment.TopEnd).padding(6.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(Color(0xCCE5484D))
+                    .padding(horizontal = 5.dp, vertical = 1.dp),
+            ) {
+                Text("LIVE",
+                    color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+        Text(
+            ch.displayName,
+            color = TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.Medium,
+            maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(top = 6.dp),
+        )
+    }
+}
+
+@Composable
+private fun GroupChip(label: String, selected: Boolean, onClick: () -> Unit) {
+    Box(
+        Modifier.clip(RoundedCornerShape(20.dp))
+            .background(if (selected) Accent else SurfaceElevated)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 7.dp),
+    ) {
+        Text(
+            label,
+            color = if (selected) Color.White else TextMuted,
+            fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+        )
+    }
+}
+
+@Composable
+private fun SubTabPill(label: String, selected: Boolean, onClick: () -> Unit) {
+    Box(
+        Modifier.clip(RoundedCornerShape(20.dp))
+            .background(if (selected) Accent else SurfaceElevated)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 18.dp, vertical = 9.dp),
+    ) {
+        Text(
+            label,
+            color = if (selected) Color.White else TextMuted,
+            fontWeight = FontWeight.SemiBold, fontSize = 13.sp,
+        )
+    }
+}
+
+// ---------------- Schedule list ----------------
+
+@Composable
+private fun ScheduleView(state: UiState, vm: MainViewModel, isTv: Boolean) {
+    val byId = remember(state.liveChannels) { state.liveChannels.associateBy { it.id } }
+    val collapsed = remember { mutableStateMapOf<String, Boolean>() }
+    val grouped = remember(state.liveSchedule) {
+        val buckets = LinkedHashMap<String, MutableList<ScheduleEvent>>()
+        for (e in state.liveSchedule) buckets.getOrPut(e.category) { mutableListOf() }.add(e)
+        buckets.map { (k, v) -> k to v.sortedBy { it.time } }
+    }
+
+    LazyColumn(
+        contentPadding = PaddingValues(
+            start = if (isTv) 32.dp else 16.dp,
+            end = if (isTv) 32.dp else 16.dp,
+            bottom = if (isTv) 32.dp else 24.dp,
+        ),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        items(grouped) { (cat, events) ->
+            val isCollapsed = collapsed[cat] == true
+            Column(
+                Modifier.clip(RoundedCornerShape(12.dp)).background(Surface),
+            ) {
+                Row(
+                    Modifier.fillMaxWidth()
+                        .clickable { collapsed[cat] = !isCollapsed }
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(cat, color = TextPrimary, fontWeight = FontWeight.SemiBold,
+                        fontSize = 14.sp, modifier = Modifier.weight(1f))
+                    Box(
+                        Modifier.clip(RoundedCornerShape(8.dp))
+                            .background(SurfaceElevated)
+                            .padding(horizontal = 8.dp, vertical = 2.dp),
+                    ) {
+                        Text("${events.size}", color = TextMuted, fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold)
+                    }
+                }
+                if (!isCollapsed) {
+                    events.forEach { e -> EventRow(e, byId, vm) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun EventRow(
+    e: ScheduleEvent,
+    byId: Map<String, Channel>,
+    vm: MainViewModel,
+) {
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(e.time, color = Color(0xFF9CC8FF), fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.padding(end = 10.dp))
+            Text(e.title, color = TextPrimary, fontSize = 13.sp,
+                fontWeight = FontWeight.Medium, maxLines = 2,
+                overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+        }
+        Row(
+            Modifier.fillMaxWidth().padding(top = 6.dp, start = 60.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            e.channels.take(6).forEach { ref ->
+                val real = byId[ref.id]
+                val available = real != null
+                Box(
+                    Modifier.clip(RoundedCornerShape(6.dp))
+                        .background(if (available) Accent else Color(0x33FFFFFF))
+                        .clickable(enabled = available) {
+                            if (available) vm.playScheduleChannel(ref.id)
+                        }
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (available) {
+                            Icon(Icons.Filled.PlayArrow, null, tint = Color.White,
+                                modifier = Modifier.size(11.dp))
+                        }
+                        Text(ref.name,
+                            color = if (available) Color.White else TextMuted,
+                            fontSize = 10.sp, fontWeight = FontWeight.SemiBold,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(start = if (available) 4.dp else 0.dp),
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Shortens "USA (DADDY LIVE)" -> "USA", "Soccer Coverage" -> "Soccer Coverage". */
+private fun String.shortGroupLabel(): String {
+    val idx = indexOf(" (")
+    return if (idx > 0) substring(0, idx) else this
+}

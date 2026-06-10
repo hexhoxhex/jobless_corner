@@ -1,0 +1,24 @@
+*.iml
+.gradle/
+/local.properties
+/.idea/
+.DS_Store
+/build/
+/app/build/
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# Debug artifacts accumulated at the repo root during testing — not part of
+# the source tree. Keep matchers narrow so we don't ignore images/resources
+# inside app/src/.
+/*.log
+/*.png
+/*.xml
+
+# OS / editor
+Thumbs.db
+
+# Internal handover notes — not part of the public source tree.
+/GITHUB_ANON_PUSH.md
