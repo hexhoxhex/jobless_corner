@@ -637,8 +637,11 @@ private fun VideoPlayer(
         // so a momentary network dip doesn't pause playback. Numbers in ms:
         //   minBuffer  / maxBuffer  / bufferForPlayback / bufferForPlaybackAfterRebuffer
         val loadControl = if (isLive) {
+            // Live: ride further behind the edge so a momentary chunk stall
+            // doesn't bottom out the buffer and cause the stream to cut.
+            // minBuffer  / maxBuffer / playback / playback-after-rebuffer
             DefaultLoadControl.Builder()
-                .setBufferDurationsMs(15_000, 40_000, 3_000, 6_000)
+                .setBufferDurationsMs(30_000, 60_000, 5_000, 10_000)
                 .build()
         } else {
             DefaultLoadControl.Builder()
@@ -671,12 +674,16 @@ private fun VideoPlayer(
                 .setUri(mediaUrl)
                 .setMimeType(MimeTypes.APPLICATION_M3U8)
                 .setLiveConfiguration(
+                    // Sit ~22s behind live (was 12s). At a 4s segment cadence
+                    // that's ~5 segments of cushion against an upstream
+                    // hiccup. The wider min/max bounds let ExoPlayer drift
+                    // back without snapping.
                     MediaItem.LiveConfiguration.Builder()
-                        .setTargetOffsetMs(12_000)
-                        .setMinOffsetMs(6_000)
-                        .setMaxOffsetMs(30_000)
-                        .setMinPlaybackSpeed(0.97f)
-                        .setMaxPlaybackSpeed(1.03f)
+                        .setTargetOffsetMs(22_000)
+                        .setMinOffsetMs(15_000)
+                        .setMaxOffsetMs(45_000)
+                        .setMinPlaybackSpeed(0.95f)
+                        .setMaxPlaybackSpeed(1.05f)
                         .build()
                 )
                 .build()
