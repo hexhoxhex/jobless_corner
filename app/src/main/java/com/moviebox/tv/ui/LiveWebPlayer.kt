@@ -75,22 +75,40 @@ fun LiveWebPlayer(
                 modifier = Modifier.fillMaxSize(),
             )
         }
-        // The iframe pages don't always reliably fire a "video started" event,
-        // so we just give them ~8s to take over the screen. If they have, the
-        // spinner is harmless underneath; if they haven't, we rotate paths.
+        // Two timers per path:
+        //  - 8s loading deadline: if the page never fires onPageFinished /
+        //    onProgressChanged(100), assume the backend is unreachable.
+        //  - 12s "max black screen" deadline: even after the page loads, if
+        //    nothing visibly plays (Adscore + similar anti-bot pages stay
+        //    black forever) we rotate to the next backend / give up.
+        // The user can hit back at any point; the back navigation is owned
+        // by the parent PlayerScreen, not this composable.
         LaunchedEffect(pathIndex) {
             loadingNow = true
             kotlinx.coroutines.delay(8000)
-            // If still loading after 8s, treat it as a path failure and rotate.
             if (loadingNow) {
-                if (pathIndex < paths.size - 1) {
-                    pathIndex += 1
-                } else {
-                    failedRef.value(
+                rotateOrFail(
+                    pathIndex, paths.size,
+                    failed = { msg -> failedRef.value(msg) },
+                    advance = { pathIndex += 1 },
+                    msgWhenOut =
                         "No backend responded for ${channel.displayName}.",
-                    )
-                }
+                )
             }
+        }
+        LaunchedEffect(pathIndex) {
+            kotlinx.coroutines.delay(12_000)
+            // Reached 12s on this backend. We have no reliable way to detect
+            // "video is actually playing" from outside the WebView, so the
+            // safe assumption when the user keeps seeing black is that this
+            // backend won't deliver and we should move on.
+            rotateOrFail(
+                pathIndex, paths.size,
+                failed = { msg -> failedRef.value(msg) },
+                advance = { pathIndex += 1 },
+                msgWhenOut =
+                    "Could not start \"${channel.displayName}\" on any backend.",
+            )
         }
         if (loadingNow) {
             Column(
@@ -114,6 +132,18 @@ fun LiveWebPlayer(
             }
         }
     }
+}
+
+/** Either advance to the next path index, or report the final failure
+ *  message. Shared by the two timeout effects in LiveWebPlayer. */
+private fun rotateOrFail(
+    currentIndex: Int,
+    total: Int,
+    failed: (String) -> Unit,
+    advance: () -> Unit,
+    msgWhenOut: String,
+) {
+    if (currentIndex < total - 1) advance() else failed(msgWhenOut)
 }
 
 @SuppressLint("SetJavaScriptEnabled")
