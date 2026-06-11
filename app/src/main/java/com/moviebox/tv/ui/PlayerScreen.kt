@@ -236,14 +236,32 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                 resizeMode = resizeMode,
                 isLive = play.isLive,
                 onLiveError = { msg ->
-                    // First failure → try the WebView fallback for the same
-                    // channel. If that also fails, LiveWebPlayer fires
-                    // onAllPathsFailed → vm.back() with the message.
-                    if (state.currentLiveChannel != null && !state.useLiveWebPlayer) {
-                        vm.fallbackToWebPlayer()
-                    } else {
-                        vm.surfaceError(msg)
-                        vm.back()
+                    // Long-haul resilience: never bounce the user out for a
+                    // transient failure. The cascade is:
+                    //   1) try re-resolving the URL via LiveResolver. Token
+                    //      expiry (the 10-minute-mark complaint) is fixed
+                    //      by a fresh token.
+                    //   2) only if re-resolve has failed ~10 minutes' worth
+                    //      of attempts, try the WebView iframe fallback.
+                    //   3) only after BOTH layers fail does the user see the
+                    //      "Couldn't connect" banner and bounce.
+                    when {
+                        state.currentLiveChannel == null || state.useLiveWebPlayer -> {
+                            // Already in WebView mode or no channel context —
+                            // we've exhausted the native path, let the
+                            // existing path handle the user-visible error.
+                            vm.surfaceError(msg)
+                            vm.back()
+                        }
+                        vm.shouldFallbackToWebPlayer() -> {
+                            vm.fallbackToWebPlayer()
+                        }
+                        else -> {
+                            // Most common case for a 10-min-in failure:
+                            // token expired. Refresh in place; player sees
+                            // the new URL and reloads. No bounce.
+                            vm.refreshLiveStream()
+                        }
                     }
                 },
                 title = play.let {

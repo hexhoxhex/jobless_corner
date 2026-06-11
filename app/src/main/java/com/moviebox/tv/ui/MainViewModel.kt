@@ -47,6 +47,22 @@ enum class Availability { UNKNOWN, CHECKING, AVAILABLE, UNAVAILABLE }
 
 private const val DEFAULT_QUALITY = "720p"
 
+// ---- Live-stream long-haul resilience tunables ----
+/** Re-resolve the stream URL this often while a channel is playing. Chosen
+ *  to be safely below the donis ~60-minute token expiry so the swap lands
+ *  inside the still-valid window and ExoPlayer never sees a 401/403/410. */
+private const val REFRESH_INTERVAL_MS: Long = 50L * 60 * 1000   // 50 minutes
+/** Base backoff between failed re-resolves. Doubles each attempt up to the
+ *  ceiling. 30 s is short enough that intermittent Wi-Fi drops feel snappy
+ *  and long enough that we don't hammer donis if it's actually down. */
+private const val BACKOFF_BASE_MS: Long = 30_000
+private const val BACKOFF_MAX_SHIFT: Int = 4   // 30s * 2^4 = 8 min
+private const val BACKOFF_CEILING_MS: Long = 8L * 60 * 1000   // 8 minutes
+/** How many re-resolve failures before we conclude the native HLS path is
+ *  truly broken and try the WebView iframe fallback. With a 30s base,
+ *  this is roughly 10 minutes of trying before giving up. */
+private const val MAX_RESOLVE_FAILURES_BEFORE_WEBVIEW: Int = 6
+
 data class UiState(
     val tab: Tab = Tab.HOME,
     val screen: Screen = Screen.TABS,
@@ -229,6 +245,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      *  are IP-bound to the scraper, not the playback device — see the
      *  IP-binding confirmation in `LIVE_TV_BUG_REPORT.md` §0.
      */
+    /** Coroutine job for the periodic "refresh-before-token-expires" loop.
+     *  Cancelled when the user leaves the channel (back() / new channel /
+     *  new VOD selection). */
+    private var liveRefreshJob: kotlinx.coroutines.Job? = null
+
+    /** How many consecutive re-resolve attempts have failed for the current
+     *  channel. Resets on a successful resolve. Used by backoff scheduler. */
+    private var liveResolveFailures = 0
+
     fun playChannel(ch: Channel) {
         // Flip into PLAYER immediately with a placeholder so the user sees
         // the player chrome populate while we resolve. mediaUrl stays blank
@@ -260,6 +285,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 useLiveWebPlayer = false,
             )
         }
+        liveResolveFailures = 0
         viewModelScope.launch {
             // Try the resolver first — gives us a URL signed for THIS
             // device's WAN egress IP. Falls back to the catalog cache only
@@ -289,16 +315,86 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     )
                 }
             }
+            // Start the long-haul refresh loop. Cancelled when we leave
+            // this channel.
+            startLiveRefreshLoop(ch)
         }
     }
 
-    /** PlayerScreen calls this when the native HLS player errors on a live
-     *  stream. We flip to the WebView fallback for the same channel rather
-     *  than bouncing the user out. */
+    /** Long-haul refresh loop: every ~50 minutes, re-resolve the stream URL
+     *  in the background and seamlessly swap it into play.mediaUrl so the
+     *  current ~60-minute token is replaced *before* the CDN starts
+     *  returning 401/403/410. ExoPlayer reloads the HLS source from the
+     *  new URL transparently.
+     *
+     *  Designed so a user can leave a channel on for hours/days without
+     *  ever seeing a "Couldn't connect" bounce — the resolver runs out of
+     *  band, hands ExoPlayer a fresh URL well before the buffer runs dry. */
+    private fun startLiveRefreshLoop(ch: Channel) {
+        liveRefreshJob?.cancel()
+        liveRefreshJob = viewModelScope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(REFRESH_INTERVAL_MS)
+                if (_state.value.currentLiveChannel?.id != ch.id) return@launch
+                runCatching { liveResolver.resolveStream(ch.id) }
+                    .getOrNull()
+                    ?.let { fresh ->
+                        _state.update { s ->
+                            if (s.currentLiveChannel?.id != ch.id) s
+                            else s.copy(play = s.play?.copy(mediaUrl = fresh))
+                        }
+                    }
+            }
+        }
+    }
+
+    /** PlayerScreen calls this when the native HLS player hits an
+     *  InvalidResponseCodeException 401/403/410 — overwhelmingly the
+     *  token-expired case after a long session. Re-resolves the URL and
+     *  swaps it; if the resolve fails, schedules a backoff retry.
+     *
+     *  Returns true if a refresh attempt was queued — the caller can use
+     *  that to suppress the WebView fallback in the meantime. */
+    fun refreshLiveStream(): Boolean {
+        val ch = _state.value.currentLiveChannel ?: return false
+        viewModelScope.launch {
+            val resolved = runCatching { liveResolver.resolveStream(ch.id) }
+                .getOrNull()
+            if (_state.value.currentLiveChannel?.id != ch.id) return@launch
+            if (resolved != null) {
+                liveResolveFailures = 0
+                _state.update { s ->
+                    s.copy(play = s.play?.copy(mediaUrl = resolved))
+                }
+            } else {
+                liveResolveFailures += 1
+                // Backoff before next attempt. The user sees the existing
+                // "Reconnecting…" pill while we retry; no bounce.
+                val backoffMs = minOf(
+                    BACKOFF_BASE_MS * (1L shl (liveResolveFailures - 1)
+                        .coerceAtMost(BACKOFF_MAX_SHIFT)),
+                    BACKOFF_CEILING_MS,
+                )
+                kotlinx.coroutines.delay(backoffMs)
+                if (_state.value.currentLiveChannel?.id != ch.id) return@launch
+                refreshLiveStream()   // tail-recurse, but coroutine-safe
+            }
+        }
+        return true
+    }
+
+    /** Truly-last-resort fallback. Only called after refreshLiveStream has
+     *  failed [MAX_RESOLVE_FAILURES_BEFORE_WEBVIEW] times in a row, which
+     *  for the default 30-second base means ~10 minutes of unable-to-resolve
+     *  before we give up on the native player and try the iframe pages. */
     fun fallbackToWebPlayer() {
         if (_state.value.currentLiveChannel == null) return
         _state.update { it.copy(useLiveWebPlayer = true) }
     }
+
+    /** Used by PlayerScreen to decide whether to fall back. */
+    fun shouldFallbackToWebPlayer(): Boolean =
+        liveResolveFailures >= MAX_RESOLVE_FAILURES_BEFORE_WEBVIEW
 
     /** From a schedule chip — look up the channel by id and play it. */
     fun playScheduleChannel(channelId: String) {
@@ -635,13 +731,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _state.update {
             when (it.screen) {
                 Screen.PLAYER -> when {
-                    it.play?.isLive == true ->
+                    it.play?.isLive == true -> {
+                        // Leaving a live channel cancels the long-haul
+                        // refresh loop and clears the failure counter.
+                        liveRefreshJob?.cancel()
+                        liveRefreshJob = null
+                        liveResolveFailures = 0
                         it.copy(
                             screen = Screen.TABS, tab = Tab.LIVE,
                             play = null,
                             currentLiveChannel = null,
                             useLiveWebPlayer = false,
                         )
+                    }
                     it.details != null || it.currentSe != null ->
                         it.copy(screen = Screen.DETAIL, play = null)
                     else -> it.copy(screen = Screen.TABS, play = null)
