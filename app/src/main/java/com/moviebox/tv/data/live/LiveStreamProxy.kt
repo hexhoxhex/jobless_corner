@@ -150,52 +150,72 @@ class LiveStreamProxy(
             scope.launch { refreshCache(channelId) }
         }
 
-        val req = Request.Builder()
-            .url(entry.innerUrl)
-            .header("User-Agent", CHROME_UA)
-            .build()
-        return runCatching {
-            httpClient.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) {
-                    com.moviebox.tv.debug.Telemetry.onHttpError(resp.code, entry.innerUrl)
-                    // Token might have died early. Force a sync refresh and
-                    // try once more so the user doesn't see a stall.
-                    val refreshed = runBlocking { refreshCache(channelId) }
-                    if (refreshed != null) {
-                        return@use fetchInner(refreshed.innerUrl)
-                    }
-                    return@use NanoHTTPD.newFixedLengthResponse(
-                        NanoHTTPD.Response.Status.lookup(resp.code)
-                            ?: NanoHTTPD.Response.Status.INTERNAL_ERROR,
-                        "text/plain", "upstream ${resp.code}",
-                    )
-                }
-                val body = resp.body?.string() ?: ""
-                NanoHTTPD.newFixedLengthResponse(
+        // Try the cached upstream URL up to MAX_INNER_RETRIES times before
+        // giving up. A single failure used to bubble through as HTTP 500 to
+        // ExoPlayer, which counted that against its (also-thin) retry budget
+        // and threw a Source error after a couple of attempts — visible to
+        // the user as "Reconnecting…" → freeze → bounce. Retrying here
+        // catches transient Wi-Fi blips before they ever reach ExoPlayer.
+        var lastResponseCode: Int? = null
+        for (attempt in 1..MAX_INNER_RETRIES) {
+            val r = runCatching { fetchUpstreamInner(entry.innerUrl) }
+            val resp = r.getOrNull()
+            if (resp != null && resp.first.isSuccessful) {
+                val body = resp.second
+                return NanoHTTPD.newFixedLengthResponse(
                     NanoHTTPD.Response.Status.OK,
                     "application/vnd.apple.mpegurl",
                     body,
                 )
             }
-        }.getOrElse { e ->
-            Log.w(TAG, "inner fetch error for $channelId: ${e.message}")
-            NanoHTTPD.newFixedLengthResponse(
-                NanoHTTPD.Response.Status.INTERNAL_ERROR,
-                "text/plain", "fetch error",
-            )
+            if (resp != null) {
+                lastResponseCode = resp.first.code
+                com.moviebox.tv.debug.Telemetry.onHttpError(resp.first.code, entry.innerUrl)
+                // If upstream told us the token died, force a fresh resolve
+                // immediately and retry with the new URL.
+                if (resp.first.code in listOf(401, 403, 410)) {
+                    val refreshed = runBlocking { refreshCache(channelId) }
+                    if (refreshed != null) {
+                        runCatching {
+                            return fetchUpstreamInner(refreshed.innerUrl).let {
+                                NanoHTTPD.newFixedLengthResponse(
+                                    NanoHTTPD.Response.Status.OK,
+                                    "application/vnd.apple.mpegurl", it.second,
+                                )
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Throw (e.g. SocketTimeout). Log and keep trying.
+                Log.w(TAG, "inner attempt $attempt for $channelId: " +
+                    "${r.exceptionOrNull()?.message}")
+            }
+            if (attempt < MAX_INNER_RETRIES) {
+                // Exponential backoff between attempts: 200ms, 400ms, 800ms.
+                runCatching { Thread.sleep((200L shl (attempt - 1)).coerceAtMost(1_000)) }
+            }
+        }
+        // Out of retries. Tell ExoPlayer it was upstream's fault so it doesn't
+        // count this against its own retry budget — 503 is "retry me" rather
+        // than "give up".
+        return NanoHTTPD.newFixedLengthResponse(
+            NanoHTTPD.Response.Status.SERVICE_UNAVAILABLE,
+            "text/plain", "upstream busy (${lastResponseCode ?: "timeout"})",
+        )
+    }
+
+    private fun fetchUpstreamInner(url: String): Pair<okhttp3.Response, String> {
+        val req = Request.Builder().url(url).header("User-Agent", CHROME_UA).build()
+        return httpClient.newCall(req).execute().use { resp ->
+            val body = resp.body?.string() ?: ""
+            // Note: we have to capture body inside the .use block because
+            // .body is closed when use exits. Returning a closed Response is
+            // safe — we only read .code / .isSuccessful afterwards.
+            resp to body
         }
     }
 
-    private fun fetchInner(url: String): NanoHTTPD.Response {
-        val req = Request.Builder().url(url).header("User-Agent", CHROME_UA).build()
-        httpClient.newCall(req).execute().use { resp ->
-            val body = resp.body?.string().orEmpty()
-            return NanoHTTPD.newFixedLengthResponse(
-                NanoHTTPD.Response.Status.OK,
-                "application/vnd.apple.mpegurl", body,
-            )
-        }
-    }
 
     /** Returns a cached entry, resolving synchronously if necessary. */
     private fun ensureCached(channelId: String): CacheEntry? {
@@ -275,6 +295,11 @@ class LiveStreamProxy(
          *  channel. Stops us from hammering donis if multiple requests
          *  race on a stale cache. */
         private const val MIN_RESOLVE_INTERVAL_MS: Long = 5_000
+        /** Inner-playlist fetch retries before we return SERVICE_UNAVAILABLE.
+         *  At 200/400/800 ms backoff the worst case takes ~1.4 s and we've
+         *  given the upstream three chances. Stops a single Wi-Fi blip from
+         *  cascading into a Source error on ExoPlayer's side. */
+        private const val MAX_INNER_RETRIES: Int = 3
         private const val CHROME_UA =
             "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 " +
                 "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"

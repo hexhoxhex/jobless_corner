@@ -739,7 +739,32 @@ private fun VideoPlayer(
         val sourceFactory = if (isLive) {
             // Explicit HLS factory: dlhd.pk streams are .m3u8 but Media3's
             // type sniffer is occasionally wrong on signed-token URLs.
-            HlsMediaSource.Factory(dataSourceFactory).setAllowChunklessPreparation(true)
+            // Custom LoadErrorHandlingPolicy: Media3's default gives up after
+            // 3 retries on a chunk failure, which over real Wi-Fi means a
+            // single dropped segment cascades into a Source error and the
+            // user sees "Reconnecting…" → bounce. 6 retries with a longer
+            // backoff floor lets the LiveStreamProxy's own 3-retry budget
+            // (200/400/800 ms) compose nicely — combined we tolerate ~5 s of
+            // intermittent network trouble before the source-error path is
+            // reached.
+            HlsMediaSource.Factory(dataSourceFactory)
+                .setAllowChunklessPreparation(true)
+                .setLoadErrorHandlingPolicy(
+                    object : androidx.media3.exoplayer.upstream
+                        .DefaultLoadErrorHandlingPolicy() {
+                        override fun getMinimumLoadableRetryCount(dataType: Int): Int = 6
+                        override fun getRetryDelayMsFor(
+                            loadErrorInfo: androidx.media3.exoplayer.upstream
+                                .LoadErrorHandlingPolicy.LoadErrorInfo,
+                        ): Long {
+                            val attempts = loadErrorInfo.errorCount
+                            // 1s, 2s, 4s, 8s, 8s, 8s — caps at 8s so we
+                            // don't sit on a single dead chunk forever.
+                            return (1000L shl (attempts - 1).coerceAtMost(3))
+                                .coerceAtMost(8_000L)
+                        }
+                    }
+                )
         } else {
             DefaultMediaSourceFactory(dataSourceFactory)
         }
