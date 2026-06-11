@@ -153,6 +153,9 @@ async function afterPair() {
   // Non-blocking: ask the TV whether a newer release is on GitHub. Banner
   // hides itself if the user already dismissed this exact version.
   checkUpdate();
+  // Network status banner — also handles the "phone can't reach TV" case
+  // (we treat that the same as "TV is offline" from a UX perspective).
+  startNetworkPoll();
 }
 
 async function loadMe() {
@@ -299,8 +302,11 @@ async function refreshDebug() {
   const cur = d.current || {};
   const channels = Array.isArray(d.channels) ? d.channels : [];
   const events = Array.isArray(d.events) ? d.events : [];
+  const today = d.today || {};
+  const week = d.week || {};
+  const providers = Array.isArray(d.providers) ? d.providers : [];
 
-  // Summary stat grid
+  // Summary stat grid (this session)
   $("#debugSummary").innerHTML = [
     statHtml("Uptime", fmtUptime(session.uptimeMs), null),
     statHtml("Plays started", session.playsStarted ?? 0, null),
@@ -309,6 +315,35 @@ async function refreshDebug() {
     statHtml("Rebuffers", session.rebuffers ?? 0,
       `${session.freezes ?? 0} freezes`),
   ].join("");
+
+  // Today + 7-day rollups
+  $("#debugRollups").innerHTML = [
+    rollupHtml("Today", today),
+    rollupHtml("Last 7 days", week),
+  ].join("");
+
+  // Providers
+  $("#debugProviders").innerHTML = providers.length === 0
+    ? `<div class="muted small">No provider activity yet.</div>`
+    : providers.map(p => {
+        const cls = p.status === "down" ? "err"
+                  : p.status === "degraded" ? "warn" : "ok";
+        const label = p.status[0].toUpperCase() + p.status.slice(1);
+        const lastFail = p.lastFailure
+          ? `<div class="muted small">${escapeHtml(p.lastFailure)}</div>` : "";
+        return `
+          <div class="ch-row">
+            <div>
+              <div class="name">${escapeHtml(p.name)}</div>
+              ${lastFail}
+            </div>
+            <div class="badges">
+              ${badge(cls, label)}
+              ${badge("ok", `${p.ok} ok`)}
+              ${p.err > 0 ? badge("warn", `${p.err} err`) : ""}
+            </div>
+          </div>`;
+      }).join("");
 
   // Current stream
   const ratingClass = "rating-" + (cur.rating || "excellent");
@@ -369,6 +404,79 @@ function statHtml(label, value, sub) {
       <span class="value">${escapeHtml(String(value))}</span>
       ${sub ? `<span class="sub">${escapeHtml(sub)}</span>` : ""}
     </div>`;
+}
+function rollupHtml(label, bucket) {
+  const b = bucket || {};
+  return `
+    <div class="roll">
+      <span class="label">${escapeHtml(label)}</span>
+      <div class="nums">
+        <span>Plays</span>     <span>${b.plays    ?? 0}</span>
+        <span>Failed</span>    <span>${b.failed   ?? 0}</span>
+        <span>Freezes</span>   <span>${b.freezes  ?? 0}</span>
+        <span>Rebuffers</span> <span>${b.rebuffers?? 0}</span>
+        <span>HTTP errs</span> <span>${b.httpErrors ?? 0}</span>
+      </div>
+    </div>`;
+}
+
+// Clear button — POST /api/debug/clear, refresh once so the user sees the reset.
+const debugClearBtn = $("#debugClearBtn");
+if (debugClearBtn) {
+  debugClearBtn.onclick = async () => {
+    debugClearBtn.disabled = true;
+    debugClearBtn.textContent = "Clearing…";
+    try {
+      await post("/api/debug/clear");
+      await refreshDebug();
+      showToast("Logs cleared");
+    } catch (e) { showToast("Couldn't clear"); }
+    debugClearBtn.disabled = false;
+    debugClearBtn.textContent = "Clear";
+  };
+}
+
+/* ---------- Network status banner ----------
+ * Polls /api/network every 8s — light, doesn't need to be precise. State
+ * comes from the TV's NetworkMonitor (Online / Checking / OfflineLong).
+ * Banner is hidden when "online", quiet when "checking", severe when
+ * offline >3 min OR when we can't reach the TV at all. */
+let netBannerTimer = null;
+async function pollNetwork() {
+  let r = null;
+  let phoneCanReachTv = true;
+  try { r = await get("/api/network"); }
+  catch { phoneCanReachTv = false; }
+  const banner = $("#netBanner");
+  const text = $("#netBannerText");
+  if (!phoneCanReachTv) {
+    banner.classList.remove("hidden");
+    banner.classList.add("severe");
+    text.textContent = "Phone can't reach the TV. Are you on the same Wi-Fi?";
+    return;
+  }
+  const state = r && r.state;
+  if (!state || state === "online") {
+    banner.classList.add("hidden");
+    banner.classList.remove("severe");
+    return;
+  }
+  banner.classList.remove("hidden");
+  if (state === "checking") {
+    banner.classList.remove("severe");
+    text.textContent = "Checking the TV's connection…";
+  } else { // offlinelong
+    banner.classList.add("severe");
+    const mins = Math.floor((r.sinceMs || 0) / 60000);
+    text.textContent = mins > 60
+      ? "TV's been offline over an hour. Try moving closer to the router."
+      : "TV is offline. We'll keep watching for it.";
+  }
+}
+function startNetworkPoll() {
+  if (netBannerTimer) return;
+  pollNetwork();
+  netBannerTimer = setInterval(pollNetwork, 8000);
 }
 function badge(severity, text) {
   return `<span class="badge ${severity}">${escapeHtml(text)}</span>`;

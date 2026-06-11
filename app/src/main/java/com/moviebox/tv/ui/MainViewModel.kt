@@ -85,6 +85,10 @@ data class UiState(
     /** null = "All". Otherwise the selected `group` value (e.g. "USA (DADDY LIVE)"). */
     val liveGroup: String? = null,
     val liveQuery: String = "",
+    /** Current network state from [com.moviebox.tv.debug.NetworkMonitor].
+     *  Used by HomeScreen to render the quiet banner / full-page error. */
+    val networkState: com.moviebox.tv.debug.NetworkMonitor.State =
+        com.moviebox.tv.debug.NetworkMonitor.State.Online,
     /** Update found on GitHub releases, if any. Null until the launch-time
      *  UpdateChecker resolves; null again if we're already on latest. */
     val updateAvailable: com.moviebox.tv.debug.UpdateChecker.Result? = null,
@@ -190,6 +194,25 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     com.moviebox.tv.debug.Telemetry.Severity.INFO,
                     "Update available: ${result.name}",
                 )
+                com.moviebox.tv.debug.ProviderHealth.success("github")
+            } else {
+                com.moviebox.tv.debug.ProviderHealth.success("github")
+            }
+        }
+        // Tick the NetworkMonitor + persist today's telemetry snapshot
+        // every 10s. Cheap — just reads atomic counters into SharedPrefs.
+        viewModelScope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(10_000)
+                com.moviebox.tv.debug.NetworkMonitor.tick()
+                com.moviebox.tv.debug.Telemetry.persistTodaySnapshot()
+                // Expose network state to the UI so the home banner /
+                // full-page error can react without each screen having to
+                // observe the StateFlow.
+                val netNow = com.moviebox.tv.debug.NetworkMonitor.state.value
+                if (netNow != _state.value.networkState) {
+                    _state.update { it.copy(networkState = netNow) }
+                }
             }
         }
     }

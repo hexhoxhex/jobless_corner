@@ -329,6 +329,25 @@ class RemoteServer(
                 json(com.moviebox.tv.debug.Telemetry.snapshotJson())
             }
 
+            uri == "/api/debug/clear" && method == Method.POST -> {
+                // Wipe in-memory event log + per-channel stats. Persisted
+                // per-day rollups are kept unless ?all=1 is passed.
+                if (p("all") == "1") com.moviebox.tv.debug.Telemetry.clearAll()
+                else com.moviebox.tv.debug.Telemetry.clearSession()
+                ok()
+            }
+
+            uri == "/api/network" -> {
+                // Lightweight ping endpoint the SPA polls. Returns state +
+                // how long we've been in it. SPA renders a banner when
+                // anything other than "online".
+                val s = com.moviebox.tv.debug.NetworkMonitor.state.value
+                json(
+                    """{"state":"${s.name.lowercase()}",""" +
+                    """"sinceMs":${com.moviebox.tv.debug.NetworkMonitor.timeInStateMs()}}""",
+                )
+            }
+
             uri == "/api/update" -> {
                 // Latest update-check result. Stays "available:false" when
                 // the device is on the latest build OR the check hasn't

@@ -40,7 +40,11 @@ class UpdateChecker {
             .build()
         runCatching {
             client.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) return@use null
+                if (!resp.isSuccessful) {
+                    ProviderHealth.failure("github", "HTTP ${resp.code}")
+                    return@use null
+                }
+                ProviderHealth.success("github")
                 val body = resp.body?.string() ?: return@use null
                 val json = JSONObject(body)
                 val tag = json.optString("tag_name").trimStart('v').takeIf { it.isNotEmpty() }

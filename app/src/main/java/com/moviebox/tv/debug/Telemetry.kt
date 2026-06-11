@@ -159,6 +159,34 @@ object Telemetry {
         sb.append(",\"rebuffers\":").append(rebuffers.get())
         sb.append(",\"httpErrors\":").append(httpErrors.get())
         sb.append('}')
+        // rollups
+        val today = todayBucket()
+        val week  = lastNDaysBucket(7)
+        sb.append(",\"today\":")
+        sb.append(today.toJson())
+        sb.append(",\"week\":")
+        sb.append(week.toJson())
+        // network
+        val net = NetworkMonitor.state.value
+        sb.append(",\"network\":{")
+        sb.append("\"state\":").append(quote(net.name.lowercase()))
+        sb.append(",\"sinceMs\":").append(NetworkMonitor.timeInStateMs())
+        sb.append('}')
+        // providers
+        sb.append(",\"providers\":[")
+        var firstP = true
+        for (p in ProviderHealth.snapshotAll()) {
+            if (!firstP) sb.append(',')
+            firstP = false
+            sb.append('{')
+            sb.append("\"name\":").append(quote(p.name))
+            sb.append(",\"status\":").append(quote(p.status.name.lowercase()))
+            sb.append(",\"ok\":").append(p.recentSuccesses)
+            sb.append(",\"err\":").append(p.recentFailures)
+            sb.append(",\"lastFailure\":").append(quote(p.lastFailure ?: ""))
+            sb.append('}')
+        }
+        sb.append(']')
         // current stream
         sb.append(",\"current\":{")
         sb.append("\"kind\":").append(quote(currentKind))
@@ -267,5 +295,145 @@ object Telemetry {
         val rebuffers = AtomicInteger(0)
         val failures = AtomicInteger(0)
         @Volatile var lastFailure: String? = null
+    }
+
+    // ============================================================
+    // Daily / weekly rollups + clear
+    // ============================================================
+
+    /** Per-day persisted totals. The current session keeps a separate
+     *  in-memory copy via the AtomicInteger counters; rollups happen when
+     *  a new day rolls over OR when [persistTodaySnapshot] is called
+     *  explicitly (Clear button, app exit). */
+    data class DayBucket(
+        var plays: Int = 0,
+        var failed: Int = 0,
+        var freezes: Int = 0,
+        var rebuffers: Int = 0,
+        var httpErrors: Int = 0,
+    ) {
+        fun toJson(): String =
+            """{"plays":$plays,"failed":$failed,"freezes":$freezes,"rebuffers":$rebuffers,"httpErrors":$httpErrors}"""
+    }
+
+    private lateinit var prefs: android.content.SharedPreferences
+
+    /** Call once on app launch. Resets the in-memory session log so the
+     *  Debug pane starts from a clean slate, but preserves the persisted
+     *  per-day rollups so /api/debug can still answer "what did the user
+     *  experience yesterday?". */
+    fun init(context: android.content.Context) {
+        prefs = context.applicationContext.getSharedPreferences(
+            "telemetry_rollups", android.content.Context.MODE_PRIVATE,
+        )
+        // Session is already implicitly zero on init (object construction);
+        // the eventLog is empty. This call just affirms the contract.
+        clearSession()
+    }
+
+    /** Resets in-session counters + event log; preserves persisted rollups. */
+    fun clearSession() {
+        playsStarted.set(0); playsFailed.set(0); freezes.set(0)
+        rebuffers.set(0); httpErrors.set(0)
+        currentTitle = ""; currentKind = "none"; currentChannelId = null
+        currentFps = 0; currentDroppedRatio = 0f; currentBufferMs = 0L
+        currentBitrateBps = 0L; currentResolution = ""
+        eventLog.clear()
+        channelStats.clear()
+        ProviderHealth.clear()
+        note(Severity.INFO, "Telemetry cleared")
+    }
+
+    /** Wipe everything, including persisted rollups. Used by the SPA's
+     *  Clear button. */
+    fun clearAll() {
+        if (::prefs.isInitialized) prefs.edit().clear().apply()
+        clearSession()
+    }
+
+    /** Sum the current session's counters into the current-day bucket and
+     *  persist. Called from the periodic tick. Idempotent — replays the
+     *  same totals each second, but writes are coalesced by the
+     *  if-changed check inside SharedPreferences. */
+    fun persistTodaySnapshot() {
+        if (!::prefs.isInitialized) return
+        val key = "day-" + today()
+        val now = currentSnapshotForToday()
+        val existing = readDayBucket(key)
+        // Merge: session totals replace whatever was already there for
+        // this date. Since session totals only grow during a single run,
+        // and a new process restart clears them, we'd lose intra-day
+        // totals across two app launches without this merge. Take max of
+        // each counter to be safe.
+        val merged = DayBucket(
+            plays      = maxOf(existing.plays,      now.plays),
+            failed     = maxOf(existing.failed,     now.failed),
+            freezes    = maxOf(existing.freezes,    now.freezes),
+            rebuffers  = maxOf(existing.rebuffers,  now.rebuffers),
+            httpErrors = maxOf(existing.httpErrors, now.httpErrors),
+        )
+        prefs.edit().putString(key, merged.toJson()).apply()
+    }
+
+    private fun currentSnapshotForToday(): DayBucket = DayBucket(
+        plays = playsStarted.get(), failed = playsFailed.get(),
+        freezes = freezes.get(), rebuffers = rebuffers.get(),
+        httpErrors = httpErrors.get(),
+    )
+
+    /** Read a DayBucket from prefs. Lenient — missing fields default to 0. */
+    private fun readDayBucket(key: String): DayBucket {
+        if (!::prefs.isInitialized) return DayBucket()
+        val raw = prefs.getString(key, null) ?: return DayBucket()
+        return parseDayJson(raw)
+    }
+
+    private fun parseDayJson(raw: String): DayBucket {
+        val o = runCatching { org.json.JSONObject(raw) }.getOrNull() ?: return DayBucket()
+        return DayBucket(
+            plays      = o.optInt("plays", 0),
+            failed     = o.optInt("failed", 0),
+            freezes    = o.optInt("freezes", 0),
+            rebuffers  = o.optInt("rebuffers", 0),
+            httpErrors = o.optInt("httpErrors", 0),
+        )
+    }
+
+    private fun todayBucket(): DayBucket {
+        if (!::prefs.isInitialized) return currentSnapshotForToday()
+        val stored = readDayBucket("day-" + today())
+        val live = currentSnapshotForToday()
+        // Today's display = max(persisted, live).
+        return DayBucket(
+            plays      = maxOf(stored.plays,      live.plays),
+            failed     = maxOf(stored.failed,     live.failed),
+            freezes    = maxOf(stored.freezes,    live.freezes),
+            rebuffers  = maxOf(stored.rebuffers,  live.rebuffers),
+            httpErrors = maxOf(stored.httpErrors, live.httpErrors),
+        )
+    }
+
+    private fun lastNDaysBucket(n: Int): DayBucket {
+        if (!::prefs.isInitialized) return DayBucket()
+        val accum = DayBucket()
+        val cal = java.util.Calendar.getInstance()
+        for (i in 0 until n) {
+            val d = isoDate(cal)
+            val b = if (i == 0) todayBucket() else readDayBucket("day-$d")
+            accum.plays += b.plays; accum.failed += b.failed
+            accum.freezes += b.freezes; accum.rebuffers += b.rebuffers
+            accum.httpErrors += b.httpErrors
+            cal.add(java.util.Calendar.DAY_OF_YEAR, -1)
+        }
+        return accum
+    }
+
+    private fun today(): String = isoDate(java.util.Calendar.getInstance())
+
+    private fun isoDate(cal: java.util.Calendar): String {
+        val y = cal.get(java.util.Calendar.YEAR)
+        val m = cal.get(java.util.Calendar.MONTH) + 1
+        val d = cal.get(java.util.Calendar.DAY_OF_MONTH)
+        return "%04d-%02d-%02d".format(y, m, d)
     }
 }

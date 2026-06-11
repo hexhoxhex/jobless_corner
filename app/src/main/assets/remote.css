@@ -488,6 +488,71 @@ button.icon-btn { flex: 0 0 auto; padding: 8px 10px; }
 }
 .chip.active { background: var(--accent); color: #fff; border-color: var(--accent); }
 .livestatus { padding: 0 16px 8px; }
+/* Network status banner. Lives directly under the topbar, takes over the
+   full width, switches between two intensities based on JS state. */
+.net-banner {
+  margin: 0 16px 12px;
+  padding: 9px 13px;
+  border-radius: 12px;
+  display: flex; align-items: center; gap: 10px;
+  background: color-mix(in srgb, #f0a020 18%, var(--surface));
+  border: 1px solid color-mix(in srgb, #f0a020 50%, var(--line));
+  color: var(--text); font-size: .85rem; font-weight: 600;
+}
+.net-banner.severe {
+  background: color-mix(in srgb, #e5484d 22%, var(--surface));
+  border-color: color-mix(in srgb, #e5484d 55%, var(--line));
+}
+.net-banner .dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: #f0a020;
+  box-shadow: 0 0 0 0 currentColor;
+  animation: net-pulse 1.4s ease-in-out infinite;
+}
+.net-banner.severe .dot { background: #e5484d; }
+@keyframes net-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50%      { transform: scale(.78); opacity: .55; }
+}
+
+/* Debug pane structural additions: header row with Clear button, section
+   labels separating session/today/week/providers, today+week roll-up. */
+.debug-head {
+  display: flex; align-items: flex-end; justify-content: space-between;
+  margin: 4px 0 14px;
+}
+.debug-head .ghost.small {
+  background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--line); padding: 6px 12px;
+  border-radius: 14px; font-size: .8rem; font-weight: 600; cursor: pointer;
+}
+.debug-head .ghost.small:active { transform: scale(.97); }
+.debug-section-h {
+  font-size: .76rem; font-weight: 700; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .04em;
+  margin: 14px 0 6px;
+}
+.debug-rollups {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+  margin-bottom: 14px;
+}
+.debug-rollups .roll {
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: 12px; padding: 12px;
+}
+.debug-rollups .roll .label {
+  font-size: .72rem; color: var(--muted); font-weight: 600;
+}
+.debug-rollups .roll .nums {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px;
+  margin-top: 8px;
+  font-size: .8rem; font-variant-numeric: tabular-nums;
+}
+.debug-rollups .roll .nums span:nth-child(2n) {
+  text-align: right; font-weight: 700; color: var(--text);
+}
+.debug-rollups .roll .nums span:nth-child(2n+1) { color: var(--muted); }
+
 /* Update available banner — sits below the topbar, dismissible. */
 .update-banner {
   margin: 0 16px 14px;

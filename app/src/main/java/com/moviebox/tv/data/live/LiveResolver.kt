@@ -49,8 +49,12 @@ class LiveResolver(
         for (suffix in DADDY_ENDPOINTS) {
             runCatching { tryEndpoint(channelId, suffix) }
                 .getOrNull()
-                ?.let { return@withContext it }
+                ?.let {
+                    com.moviebox.tv.debug.ProviderHealth.success("donis")
+                    return@withContext it
+                }
         }
+        com.moviebox.tv.debug.ProviderHealth.failure("donis", "resolve failed (all daddy endpoints)")
         null
     }
 

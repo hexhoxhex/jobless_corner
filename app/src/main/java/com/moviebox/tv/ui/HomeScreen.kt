@@ -52,6 +52,14 @@ import com.moviebox.tv.ui.theme.TextMuted
 
 @Composable
 fun HomeScreen(state: UiState, vm: MainViewModel) {
+    // OfflineLong = network has been gone >3min. Take over the whole
+    // screen with a clean explainer rather than letting the home try to
+    // load forever. Soft "Checking…" banner is rendered inline as the
+    // first LazyColumn item further down.
+    if (state.networkState == com.moviebox.tv.debug.NetworkMonitor.State.OfflineLong) {
+        NetworkOfflinePage(onRetry = { vm.loadHome() })
+        return
+    }
     val home = state.home
     if (home == null) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -66,6 +74,13 @@ fun HomeScreen(state: UiState, vm: MainViewModel) {
         contentPadding = PaddingValues(bottom = if (isTv) 36.dp else 24.dp),
         verticalArrangement = Arrangement.spacedBy(if (isTv) 28.dp else 20.dp),
     ) {
+        // Soft "Checking your connection…" banner while we're in the
+        // 3-minute window. After that the full NetworkOfflinePage takes
+        // over above. Solid pill rather than an animated spinner — the
+        // user shouldn't be alarmed.
+        if (state.networkState == com.moviebox.tv.debug.NetworkMonitor.State.Checking) {
+            item { NetworkCheckingBanner() }
+        }
         // Update-available banner. Dismissed-for-this-session check keeps
         // the banner from coming back after the user clicks the X.
         val u = state.updateAvailable
@@ -329,6 +344,79 @@ private fun UpdateBanner(
             contentAlignment = Alignment.Center,
         ) {
             Text("×", color = TextMuted, fontSize = 18.sp)
+        }
+    }
+}
+
+/** Soft inline banner: shown for the first 3 minutes after we lose
+ *  connectivity. Keeps the rest of the home visible (history, cached
+ *  rows) so the user can still scroll through what's already loaded. */
+@Composable
+private fun NetworkCheckingBanner() {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(androidx.compose.ui.graphics.Color(0xCC2D1F40))
+            .border(1.dp, androidx.compose.ui.graphics.Color(0x66FFFFFF),
+                RoundedCornerShape(14.dp))
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier.size(8.dp)
+                .clip(RoundedCornerShape(4.dp))
+                .background(androidx.compose.ui.graphics.Color(0xFFE8B341)),
+        )
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text("Checking your connection…",
+                color = androidx.compose.ui.graphics.Color.White,
+                fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+            Text("We'll keep trying quietly. Hold tight.",
+                color = TextMuted, fontSize = 12.sp)
+        }
+    }
+}
+
+/** Full-page replacement shown when we've been offline >3 minutes. */
+@Composable
+private fun NetworkOfflinePage(onRetry: () -> Unit) {
+    val longGone = com.moviebox.tv.debug.NetworkMonitor.timeInStateMs() >=
+        com.moviebox.tv.debug.NetworkMonitor.LONG_FAIL_MS
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.padding(horizontal = 24.dp),
+        ) {
+            Text("📡",
+                fontSize = 56.sp,
+                color = androidx.compose.ui.graphics.Color.White)
+            Spacer(Modifier.height(16.dp))
+            Text("No internet right now",
+                fontSize = 22.sp, fontWeight = FontWeight.Bold,
+                color = androidx.compose.ui.graphics.Color.White)
+            Spacer(Modifier.height(8.dp))
+            Text(
+                if (longGone)
+                    "Still no connection — try moving closer to your router or restarting it."
+                else
+                    "We can't reach the network. We'll keep checking and pick up automatically when it's back.",
+                fontSize = 14.sp, color = TextMuted,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            )
+            Spacer(Modifier.height(24.dp))
+            Box(
+                Modifier.clip(RoundedCornerShape(22.dp))
+                    .background(Accent)
+                    .clickable(onClick = onRetry)
+                    .padding(horizontal = 22.dp, vertical = 12.dp),
+            ) {
+                Text("Try again",
+                    color = androidx.compose.ui.graphics.Color.White,
+                    fontWeight = FontWeight.SemiBold)
+            }
         }
     }
 }

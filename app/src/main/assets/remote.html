@@ -171,6 +171,14 @@
 
   <div id="banner" class="banner hidden"></div>
 
+  <!-- Network banner: shown when the TV isn't reachable or its own
+       NetworkMonitor reports trouble. Quiet for the first 3 minutes,
+       louder after that. -->
+  <div id="netBanner" class="net-banner hidden">
+    <span class="dot"></span>
+    <span id="netBannerText">Checking connection…</span>
+  </div>
+
   <!-- Update banner: shown when an update is available on GitHub releases. -->
   <div id="updateBanner" class="update-banner hidden">
     <div class="ub-text">
@@ -376,19 +384,39 @@
 
   <!-- DEBUG (superuser only) -->
   <section id="pane-debug" class="pane" style="padding:0 16px">
-    <h2 class="ph" style="padding:0">Debug</h2>
-    <p class="muted small">
-      Live telemetry from the TV. Updates every few seconds while this pane is open.
-    </p>
+    <div class="debug-head">
+      <div>
+        <h2 class="ph" style="padding:0;margin:0">Debug</h2>
+        <p class="muted small" style="margin:4px 0 0">
+          Live telemetry from the TV. Updates every few seconds while this pane is open.
+        </p>
+      </div>
+      <button id="debugClearBtn" class="ghost small" title="Reset logs + counters">
+        Clear
+      </button>
+    </div>
+
+    <div class="debug-section-h">This session</div>
     <div id="debugSummary" class="debug-grid"></div>
+
     <div class="card">
       <h3 class="card-h">Current stream</h3>
       <div id="debugStream" class="debug-stream"></div>
     </div>
+
+    <div class="debug-section-h">Today &amp; last 7 days</div>
+    <div id="debugRollups" class="debug-rollups"></div>
+
+    <div class="card">
+      <h3 class="card-h">Providers</h3>
+      <div id="debugProviders" class="debug-list"></div>
+    </div>
+
     <div class="card">
       <h3 class="card-h">Channels &amp; events <span class="muted small" id="debugScope"></span></h3>
       <div id="debugChannels" class="debug-list"></div>
     </div>
+
     <div class="card">
       <h3 class="card-h">Recent events</h3>
       <div id="debugEvents" class="debug-events"></div>

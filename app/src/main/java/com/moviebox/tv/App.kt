@@ -20,6 +20,11 @@ class App : Application(), ImageLoaderFactory {
     override fun onCreate() {
         super.onCreate()
         installCrashHandler()
+        // Debug / telemetry plumbing — resets in-memory session log, leaves
+        // persisted daily rollups intact. NetworkMonitor starts listening
+        // for connectivity changes immediately.
+        com.moviebox.tv.debug.Telemetry.init(this)
+        com.moviebox.tv.debug.NetworkMonitor.start(this)
     }
 
     /** Show a friendly crash screen instead of the system "app stopped". */
