@@ -167,13 +167,19 @@ async function loadMe() {
   $("#meLabel").textContent = me.label;
   const role = $("#meRole");
   role.textContent = me.role; role.className = "role " + me.role;
-  // Superuser-only Devices view: moved out of the bottom tabbar (which was
-  // overcrowded at 7 items) into a gear-button on the topbar.
+  // Devices view: managing other phones' permissions is genuinely
+  // superuser-only. Debug pane is read-only and the data is already
+  // token-gated, so make it available to any paired device — otherwise
+  // a single misconfigured pair (reinstall, lost SUPERUSER) hides the
+  // most useful diagnostic surface.
   if (me.role === "SUPERUSER") {
     $("#devicesBtn").classList.remove("hidden"); loadDevices();
-    $("#debugBtn").classList.remove("hidden");
   } else {
     $("#devicesBtn").classList.add("hidden");
+  }
+  if (me.role === "SUPERUSER" || me.role === "USER") {
+    $("#debugBtn").classList.remove("hidden");
+  } else {
     $("#debugBtn").classList.add("hidden");
   }
 }
