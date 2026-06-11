@@ -426,6 +426,64 @@ function rollupHtml(label, bucket) {
     </div>`;
 }
 
+/* ---------- Bandwidth probe ---------- */
+const bwTestBtn = $("#bwTestBtn");
+if (bwTestBtn) {
+  bwTestBtn.onclick = async () => {
+    const result = $("#bwResult");
+    bwTestBtn.disabled = true;
+    bwTestBtn.textContent = "Testing…";
+    result.innerHTML = `<span class="muted small">Downloading 2 MB from the TV's egress…</span>`;
+    let r;
+    try {
+      r = await post("/api/debug/bandwidth");
+    } catch (e) {
+      result.innerHTML = `<span class="muted small">Couldn't reach the TV.</span>`;
+      bwTestBtn.disabled = false; bwTestBtn.textContent = "Test now";
+      return;
+    }
+    bwTestBtn.disabled = false; bwTestBtn.textContent = "Test now";
+    renderBandwidthResult(r);
+  };
+}
+
+function renderBandwidthResult(r) {
+  const result = $("#bwResult");
+  if (!r || r.verdict === "error") {
+    result.innerHTML = `
+      <div class="row">
+        <span>Verdict</span>
+        <span class="verdict-pill error">Error</span>
+      </div>
+      <div class="hint">${escapeHtml(r && r.error || "Test failed.")}</div>`;
+    return;
+  }
+  const v = String(r.verdict || "fair");
+  const mbps = Number(r.mbps || 0);
+  // Compare against the currently-playing channel's bitrate (if any) and
+  // give the user a one-line verdict that's actionable.
+  let hint = "";
+  if (v === "excellent") hint = "Plenty of headroom for any live channel.";
+  else if (v === "good") hint = "1080p HD live channels should play smoothly.";
+  else if (v === "fair") hint = "720p live channels OK; 1080p HD will rebuffer.";
+  else hint = "Even SD channels will rebuffer. Move closer to your router or switch to wired.";
+
+  result.innerHTML = `
+    <div class="row">
+      <span>Throughput</span>
+      <span>${mbps.toFixed(2)} Mbps</span>
+    </div>
+    <div class="row">
+      <span>Sample</span>
+      <span>${Math.round((r.bytes || 0)/1024)} KB in ${Math.round(r.elapsedMs || 0)} ms</span>
+    </div>
+    <div class="row">
+      <span>Verdict</span>
+      <span class="verdict-pill ${escapeHtml(v)}">${escapeHtml(v.toUpperCase())}</span>
+    </div>
+    <div class="hint">${escapeHtml(hint)}</div>`;
+}
+
 // Clear button — POST /api/debug/clear, refresh once so the user sees the reset.
 const debugClearBtn = $("#debugClearBtn");
 if (debugClearBtn) {

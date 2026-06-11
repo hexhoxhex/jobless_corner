@@ -337,6 +337,25 @@ class RemoteServer(
                 ok()
             }
 
+            uri == "/api/debug/bandwidth" && method == Method.POST -> {
+                // Run a real-world download throughput test from the TV's
+                // own egress. Synchronous on the request thread because the
+                // SPA polls /api/debug while this is running and we want
+                // serialised access to results. ~1-3 seconds on a healthy
+                // link, up to readTimeout (20 s) on a dead one.
+                val probe = com.moviebox.tv.debug.BandwidthProbe()
+                val result = kotlinx.coroutines.runBlocking { probe.measure() }
+                com.moviebox.tv.debug.Telemetry.note(
+                    when (result.verdict) {
+                        "excellent", "good" -> com.moviebox.tv.debug.Telemetry.Severity.INFO
+                        "fair"               -> com.moviebox.tv.debug.Telemetry.Severity.WARN
+                        else                 -> com.moviebox.tv.debug.Telemetry.Severity.ERROR
+                    },
+                    "Bandwidth: %.1f Mbps (%s)".format(result.mbps, result.verdict),
+                )
+                json(result.toJson())
+            }
+
             uri == "/api/network" -> {
                 // Lightweight ping endpoint the SPA polls. Returns state +
                 // how long we've been in it. SPA renders a banner when

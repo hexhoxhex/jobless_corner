@@ -618,6 +618,40 @@ button.icon-btn { flex: 0 0 auto; padding: 8px 10px; }
 .rating-fair      { background: #f0a020; }
 .rating-poor      { background: #e5484d; }
 
+/* Bandwidth probe header + result rows */
+.bw-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 10px;
+}
+.bw-head .ghost.small {
+  background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--line); padding: 6px 12px;
+  border-radius: 14px; font-size: .8rem; font-weight: 600; cursor: pointer;
+}
+.bw-head .ghost.small:disabled { opacity: .55; cursor: default; }
+.bw-result { display: flex; flex-direction: column; gap: 6px; }
+.bw-result .row {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: .82rem;
+}
+.bw-result .row span:first-child { color: var(--muted); }
+.bw-result .row span:last-child {
+  font-variant-numeric: tabular-nums; font-weight: 700; color: var(--text);
+}
+.bw-result .verdict-pill {
+  display: inline-block; padding: 3px 10px; border-radius: 12px;
+  font-size: .68rem; font-weight: 800; letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.bw-result .verdict-pill.excellent { background: rgba(76,175,80,.22);  color: #4caf50; }
+.bw-result .verdict-pill.good      { background: rgba(76,175,80,.18);  color: #88c057; }
+.bw-result .verdict-pill.fair      { background: rgba(240,160,32,.22); color: #f0a020; }
+.bw-result .verdict-pill.poor      { background: rgba(229,72,77,.20);  color: #e5484d; }
+.bw-result .verdict-pill.error     { background: rgba(229,72,77,.20);  color: #e5484d; }
+.bw-result .hint {
+  font-size: .76rem; color: var(--muted); line-height: 1.35; margin-top: 4px;
+}
+
 .debug-list { display: flex; flex-direction: column; gap: 6px; }
 .debug-list .ch-row {
   display: flex; align-items: center; justify-content: space-between;
