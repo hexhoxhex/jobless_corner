@@ -47,20 +47,10 @@ enum class Availability { UNKNOWN, CHECKING, AVAILABLE, UNAVAILABLE }
 
 private const val DEFAULT_QUALITY = "720p"
 
-// ---- Live-stream long-haul resilience tunables ----
-/** Re-resolve the stream URL this often while a channel is playing. Chosen
- *  to be safely below the donis ~60-minute token expiry so the swap lands
- *  inside the still-valid window and ExoPlayer never sees a 401/403/410. */
-private const val REFRESH_INTERVAL_MS: Long = 50L * 60 * 1000   // 50 minutes
-/** Base backoff between failed re-resolves. Doubles each attempt up to the
- *  ceiling. 30 s is short enough that intermittent Wi-Fi drops feel snappy
- *  and long enough that we don't hammer donis if it's actually down. */
-private const val BACKOFF_BASE_MS: Long = 30_000
-private const val BACKOFF_MAX_SHIFT: Int = 4   // 30s * 2^4 = 8 min
-private const val BACKOFF_CEILING_MS: Long = 8L * 60 * 1000   // 8 minutes
-/** How many re-resolve failures before we conclude the native HLS path is
- *  truly broken and try the WebView iframe fallback. With a 30s base,
- *  this is roughly 10 minutes of trying before giving up. */
+/** How many native-HLS failures before we conclude the proxy + ExoPlayer
+ *  path is genuinely broken and try the WebView iframe fallback. With the
+ *  proxy in place this should almost never fire — it only matters if the
+ *  proxy itself is unable to resolve, e.g. donis is down end-to-end. */
 private const val MAX_RESOLVE_FAILURES_BEFORE_WEBVIEW: Int = 6
 
 data class UiState(
@@ -109,6 +99,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val repo = Repository()
     private val liveRepo = LiveTvRepository()
     private val liveResolver = LiveResolver()
+    private val liveProxy = com.moviebox.tv.data.live.LiveStreamProxy(liveResolver)
     private val db = AppDatabase.get(app)
     private val favDao = db.favourites()
     private val watchDao = db.watchHistory()
@@ -116,6 +107,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
+
+    override fun onCleared() {
+        super.onCleared()
+        // Release the live-stream proxy socket. ViewModel is destroyed when
+        // the user leaves the app — without this the bound port lingers
+        // until process death, which is benign but noisy in logcat.
+        runCatching { liveProxy.stop() }
+    }
 
     val favourites: StateFlow<List<Item>> = favDao.all()
         .map { list ->
@@ -245,13 +244,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      *  are IP-bound to the scraper, not the playback device — see the
      *  IP-binding confirmation in `LIVE_TV_BUG_REPORT.md` §0.
      */
-    /** Coroutine job for the periodic "refresh-before-token-expires" loop.
-     *  Cancelled when the user leaves the channel (back() / new channel /
-     *  new VOD selection). */
-    private var liveRefreshJob: kotlinx.coroutines.Job? = null
-
     /** How many consecutive re-resolve attempts have failed for the current
-     *  channel. Resets on a successful resolve. Used by backoff scheduler. */
+     *  channel. Resets on channel change. Drives the WebView fallback
+     *  threshold via [shouldFallbackToWebPlayer]. */
     private var liveResolveFailures = 0
 
     fun playChannel(ch: Channel) {
@@ -287,12 +282,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
         liveResolveFailures = 0
         viewModelScope.launch {
-            // Try the resolver first — gives us a URL signed for THIS
-            // device's WAN egress IP. Falls back to the catalog cache only
-            // if resolution truly failed.
-            val resolved = runCatching { liveResolver.resolveStream(ch.id) }
-                .getOrNull()
-            val finalUrl = resolved ?: ch.streamUrl ?: ""
+            // Spin up the proxy and prime its cache for this channel — the
+            // first inner-playlist fetch triggers a sync resolve which we
+            // do here on the IO dispatcher rather than blocking the
+            // first /inner request from the player. If the proxy can't
+            // resolve at all (network down at tap time), fall back to the
+            // catalog's cached URL so the user still has *something* to
+            // try, even if it's an expired token.
+            liveProxy.start()
+            val resolved = runCatching {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    liveResolver.resolveStream(ch.id)
+                }
+            }.getOrNull()
+            val finalUrl = if (resolved != null) {
+                liveProxy.proxyUrl(ch.id)
+            } else {
+                ch.streamUrl ?: ""
+            }
             if (finalUrl.isBlank()) {
                 _state.update { s ->
                     s.copy(
@@ -306,7 +313,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
             _state.update { s ->
                 if (s.currentLiveChannel?.id != ch.id) {
-                    // User already moved on — drop the resolution.
                     s
                 } else {
                     s.copy(
@@ -315,71 +321,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     )
                 }
             }
-            // Start the long-haul refresh loop. Cancelled when we leave
-            // this channel.
-            startLiveRefreshLoop(ch)
-        }
-    }
-
-    /** Long-haul refresh loop: every ~50 minutes, re-resolve the stream URL
-     *  in the background and seamlessly swap it into play.mediaUrl so the
-     *  current ~60-minute token is replaced *before* the CDN starts
-     *  returning 401/403/410. ExoPlayer reloads the HLS source from the
-     *  new URL transparently.
-     *
-     *  Designed so a user can leave a channel on for hours/days without
-     *  ever seeing a "Couldn't connect" bounce — the resolver runs out of
-     *  band, hands ExoPlayer a fresh URL well before the buffer runs dry. */
-    private fun startLiveRefreshLoop(ch: Channel) {
-        liveRefreshJob?.cancel()
-        liveRefreshJob = viewModelScope.launch {
-            while (true) {
-                kotlinx.coroutines.delay(REFRESH_INTERVAL_MS)
-                if (_state.value.currentLiveChannel?.id != ch.id) return@launch
-                runCatching { liveResolver.resolveStream(ch.id) }
-                    .getOrNull()
-                    ?.let { fresh ->
-                        _state.update { s ->
-                            if (s.currentLiveChannel?.id != ch.id) s
-                            else s.copy(play = s.play?.copy(mediaUrl = fresh))
-                        }
-                    }
-            }
+            // No periodic refresh loop needed — the proxy refreshes its
+            // token cache transparently while serving inner-playlist
+            // requests. ExoPlayer never sees the URL change.
         }
     }
 
     /** PlayerScreen calls this when the native HLS player hits an
-     *  InvalidResponseCodeException 401/403/410 — overwhelmingly the
-     *  token-expired case after a long session. Re-resolves the URL and
-     *  swaps it; if the resolve fails, schedules a backoff retry.
+     *  InvalidResponseCodeException 401/403/410. With the LiveStreamProxy
+     *  in place, this is now extremely rare — the proxy refreshes its
+     *  cached upstream URL transparently before tokens expire. But the
+     *  proxy itself could be down (port bind failed, etc.) or donis could
+     *  be unreachable at refresh time, so we still surface a manual retry.
      *
-     *  Returns true if a refresh attempt was queued — the caller can use
-     *  that to suppress the WebView fallback in the meantime. */
+     *  The retry just bumps the failure counter; PlayerScreen will reload
+     *  the same proxy URL via its existing source-error retry, and the
+     *  next /inner request will force a fresh resolve. */
     fun refreshLiveStream(): Boolean {
-        val ch = _state.value.currentLiveChannel ?: return false
-        viewModelScope.launch {
-            val resolved = runCatching { liveResolver.resolveStream(ch.id) }
-                .getOrNull()
-            if (_state.value.currentLiveChannel?.id != ch.id) return@launch
-            if (resolved != null) {
-                liveResolveFailures = 0
-                _state.update { s ->
-                    s.copy(play = s.play?.copy(mediaUrl = resolved))
-                }
-            } else {
-                liveResolveFailures += 1
-                // Backoff before next attempt. The user sees the existing
-                // "Reconnecting…" pill while we retry; no bounce.
-                val backoffMs = minOf(
-                    BACKOFF_BASE_MS * (1L shl (liveResolveFailures - 1)
-                        .coerceAtMost(BACKOFF_MAX_SHIFT)),
-                    BACKOFF_CEILING_MS,
-                )
-                kotlinx.coroutines.delay(backoffMs)
-                if (_state.value.currentLiveChannel?.id != ch.id) return@launch
-                refreshLiveStream()   // tail-recurse, but coroutine-safe
-            }
-        }
+        liveResolveFailures += 1
         return true
     }
 
@@ -732,10 +691,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             when (it.screen) {
                 Screen.PLAYER -> when {
                     it.play?.isLive == true -> {
-                        // Leaving a live channel cancels the long-haul
-                        // refresh loop and clears the failure counter.
-                        liveRefreshJob?.cancel()
-                        liveRefreshJob = null
                         liveResolveFailures = 0
                         it.copy(
                             screen = Screen.TABS, tab = Tab.LIVE,

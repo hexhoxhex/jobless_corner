@@ -1,0 +1,281 @@
+package com.moviebox.tv.data.live
+
+import android.util.Log
+import fi.iki.elonen.NanoHTTPD
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
+
+/**
+ * Local HTTP proxy that gives ExoPlayer a stable URL to the live stream
+ * while we re-resolve the donis token transparently in the background.
+ *
+ * **Why this exists.** The catalog's signed stream URLs expire after ~60
+ * minutes. The previous approach (re-resolve and swap `play.mediaUrl`)
+ * forces ExoPlayer to call `setMediaSource + prepare()`, which **throws
+ * away the existing buffer** — visible as a freeze/rebuffer at each
+ * token refresh. From the user's seat, that's the "channel froze at 10
+ * min and tried to recover" symptom; it now happens *every refresh*,
+ * which over a week of continuous viewing is hundreds of blips.
+ *
+ * With this proxy, ExoPlayer plays `http://127.0.0.1:PORT/master/<id>`
+ * once. That URL never changes. The proxy serves:
+ *
+ *   - **GET /master/<id>** — a hand-rewritten master playlist whose
+ *     stream-inf entry points at `/inner/<id>` on the same proxy.
+ *   - **GET /inner/<id>** — fetches the upstream inner playlist (per
+ *     the currently-cached resolved URL), returns its body verbatim.
+ *     The segment URLs inside the inner playlist are absolute upstream
+ *     CDN URLs — ExoPlayer fetches those directly, no further proxying.
+ *
+ * The cache is refreshed in the background after [REFRESH_AT_MS] of age.
+ * The refresh runs in a coroutine; while it's in flight, requests serve
+ * the stale-but-still-valid cached URLs. When the refresh completes, the
+ * next `/inner/<id>` fetch transparently picks up the new token — HLS's
+ * media-sequence numbers carry the user across the boundary, ExoPlayer
+ * doesn't know anything changed.
+ *
+ * **Lifetime.** Single instance held by `MainViewModel`. Started on the
+ * first live channel tap, never stopped within a session. The
+ * `127.0.0.1` bind + OS-assigned port means it's not reachable from
+ * outside the device.
+ */
+class LiveStreamProxy(
+    private val resolver: LiveResolver,
+) {
+
+    private val server = ProxyServer()
+    private val cache = ConcurrentHashMap<String, CacheEntry>()
+    private val refreshLocks = ConcurrentHashMap<String, Mutex>()
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    private val httpClient: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
+        .build()
+
+    /** Bind the socket. Idempotent — repeated calls are no-ops. */
+    fun start() {
+        if (!server.isAlive) {
+            // NO_SOCKET_TIMEOUT = keep ExoPlayer's keep-alive connection open
+            // across multiple inner-playlist fetches.
+            server.start(NanoHTTPD.SOCKET_READ_TIMEOUT, /* daemon = */ true)
+            Log.i(TAG, "Proxy listening on 127.0.0.1:${server.listeningPort}")
+        }
+    }
+
+    /** Stop the socket. Safe to call repeatedly. */
+    fun stop() {
+        if (server.isAlive) server.stop()
+    }
+
+    /**
+     * Stable URL ExoPlayer should play. Survives token refreshes; survives
+     * channel re-taps. Caller must ensure [start] has been called.
+     */
+    fun proxyUrl(channelId: String): String {
+        check(server.isAlive) { "LiveStreamProxy.start() must be called first" }
+        return "http://127.0.0.1:${server.listeningPort}/master/$channelId"
+    }
+
+    // ---- internals ----
+
+    private inner class ProxyServer : NanoHTTPD("127.0.0.1", /* port = */ 0) {
+        override fun serve(session: IHTTPSession): Response {
+            val uri = session.uri ?: return notFound()
+            return when {
+                uri.startsWith("/master/") -> handleMaster(uri.removePrefix("/master/"))
+                uri.startsWith("/inner/")  -> handleInner(uri.removePrefix("/inner/"))
+                else -> notFound()
+            }
+        }
+
+        private fun notFound() = newFixedLengthResponse(
+            Response.Status.NOT_FOUND, "text/plain", "not found",
+        )
+    }
+
+    /** Serve a master playlist pointing at our own /inner/<id> endpoint. */
+    private fun handleMaster(channelId: String): NanoHTTPD.Response {
+        // Make sure we've at least resolved once, so the upstream master body
+        // is available to learn the codecs/resolution headers from. If we
+        // can't resolve right now, return 503 and let ExoPlayer retry.
+        val entry = ensureCached(channelId)
+            ?: return NanoHTTPD.newFixedLengthResponse(
+                NanoHTTPD.Response.Status.SERVICE_UNAVAILABLE,
+                "text/plain", "resolver unavailable",
+            )
+
+        // Use the codecs/bandwidth line from the real master if we have it,
+        // otherwise a sensible 720p60 H.264 default. ExoPlayer just needs
+        // *some* STREAM-INF entry to pick the variant.
+        val streamInf = entry.streamInfLine
+            ?: """#EXT-X-STREAM-INF:BANDWIDTH=9000000,RESOLUTION=1280x720,""" +
+                """FRAME-RATE=59.940,CODECS="avc1.640020,mp4a.40.2""""
+        val innerUrl = "http://127.0.0.1:${server.listeningPort}/inner/$channelId"
+        val body = buildString {
+            appendLine("#EXTM3U")
+            appendLine(streamInf)
+            appendLine(innerUrl)
+        }
+        return NanoHTTPD.newFixedLengthResponse(
+            NanoHTTPD.Response.Status.OK,
+            "application/vnd.apple.mpegurl",
+            body,
+        )
+    }
+
+    /**
+     * Serve the upstream inner playlist body, re-resolving lazily if our
+     * cache is stale. We always fetch the upstream playlist live (never
+     * cache its body) because the segment list is rolling.
+     */
+    private fun handleInner(channelId: String): NanoHTTPD.Response {
+        val entry = ensureCached(channelId)
+            ?: return NanoHTTPD.newFixedLengthResponse(
+                NanoHTTPD.Response.Status.SERVICE_UNAVAILABLE,
+                "text/plain", "resolver unavailable",
+            )
+        // Background refresh if we're past the soft TTL — keeps the next
+        // fetch landing on a still-fresh token.
+        if (System.currentTimeMillis() - entry.resolvedAtMs > REFRESH_AT_MS) {
+            scope.launch { refreshCache(channelId) }
+        }
+
+        val req = Request.Builder()
+            .url(entry.innerUrl)
+            .header("User-Agent", CHROME_UA)
+            .build()
+        return runCatching {
+            httpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    // Token might have died early. Force a sync refresh and
+                    // try once more so the user doesn't see a stall.
+                    val refreshed = runBlocking { refreshCache(channelId) }
+                    if (refreshed != null) {
+                        return@use fetchInner(refreshed.innerUrl)
+                    }
+                    return@use NanoHTTPD.newFixedLengthResponse(
+                        NanoHTTPD.Response.Status.lookup(resp.code)
+                            ?: NanoHTTPD.Response.Status.INTERNAL_ERROR,
+                        "text/plain", "upstream ${resp.code}",
+                    )
+                }
+                val body = resp.body?.string() ?: ""
+                NanoHTTPD.newFixedLengthResponse(
+                    NanoHTTPD.Response.Status.OK,
+                    "application/vnd.apple.mpegurl",
+                    body,
+                )
+            }
+        }.getOrElse { e ->
+            Log.w(TAG, "inner fetch error for $channelId: ${e.message}")
+            NanoHTTPD.newFixedLengthResponse(
+                NanoHTTPD.Response.Status.INTERNAL_ERROR,
+                "text/plain", "fetch error",
+            )
+        }
+    }
+
+    private fun fetchInner(url: String): NanoHTTPD.Response {
+        val req = Request.Builder().url(url).header("User-Agent", CHROME_UA).build()
+        httpClient.newCall(req).execute().use { resp ->
+            val body = resp.body?.string().orEmpty()
+            return NanoHTTPD.newFixedLengthResponse(
+                NanoHTTPD.Response.Status.OK,
+                "application/vnd.apple.mpegurl", body,
+            )
+        }
+    }
+
+    /** Returns a cached entry, resolving synchronously if necessary. */
+    private fun ensureCached(channelId: String): CacheEntry? {
+        cache[channelId]?.let { return it }
+        return runBlocking { refreshCache(channelId) }
+    }
+
+    /** Re-resolve donis for this channel; populate the cache. Serialized
+     *  per-channel via a Mutex so two concurrent refreshes don't double-fire
+     *  donis. */
+    private suspend fun refreshCache(channelId: String): CacheEntry? {
+        val lock = refreshLocks.getOrPut(channelId) { Mutex() }
+        return lock.withLock {
+            val current = cache[channelId]
+            if (current != null &&
+                System.currentTimeMillis() - current.resolvedAtMs < MIN_RESOLVE_INTERVAL_MS
+            ) {
+                // Another thread refreshed inside the lock; reuse that.
+                return@withLock current
+            }
+            val masterUrl = resolver.resolveStream(channelId) ?: return@withLock null
+            // Fetch master once to learn the inner URL + STREAM-INF line.
+            val (innerUrl, streamInf) = parseMaster(masterUrl) ?: return@withLock null
+            val entry = CacheEntry(
+                masterUrl = masterUrl,
+                innerUrl = innerUrl,
+                streamInfLine = streamInf,
+                resolvedAtMs = System.currentTimeMillis(),
+            )
+            cache[channelId] = entry
+            entry
+        }
+    }
+
+    private fun parseMaster(masterUrl: String): Pair<String, String?>? {
+        val req = Request.Builder().url(masterUrl)
+            .header("User-Agent", CHROME_UA)
+            .build()
+        return runCatching {
+            httpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                val body = resp.body?.string() ?: return null
+                var streamInf: String? = null
+                var rel: String? = null
+                for (rawLine in body.lineSequence()) {
+                    val line = rawLine.trim()
+                    if (line.startsWith("#EXT-X-STREAM-INF")) streamInf = line
+                    else if (line.isNotEmpty() && !line.startsWith("#")) {
+                        rel = line; break
+                    }
+                }
+                if (rel == null) return null
+                val absolute = if (rel.startsWith("http")) rel
+                else {
+                    val base = masterUrl.substringBeforeLast('/')
+                    "$base/$rel"
+                }
+                absolute to streamInf
+            }
+        }.getOrNull()
+    }
+
+    private data class CacheEntry(
+        val masterUrl: String,
+        val innerUrl: String,
+        val streamInfLine: String?,
+        val resolvedAtMs: Long,
+    )
+
+    companion object {
+        private const val TAG = "LiveStreamProxy"
+        /** Background-refresh the cached resolution after this much time.
+         *  Donis tokens live ~60 min; refreshing at 40 min keeps a safe
+         *  20-minute window of validity on every cache update. */
+        private const val REFRESH_AT_MS: Long = 40L * 60 * 1000
+        /** Minimum spacing between consecutive resolves for the same
+         *  channel. Stops us from hammering donis if multiple requests
+         *  race on a stale cache. */
+        private const val MIN_RESOLVE_INTERVAL_MS: Long = 5_000
+        private const val CHROME_UA =
+            "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+    }
+}
