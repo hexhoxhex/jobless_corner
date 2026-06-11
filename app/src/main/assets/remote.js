@@ -150,6 +150,9 @@ async function afterPair() {
   await loadHistory();
   selectTab(active === "details" ? "browse" : active);
   toast("Connected as " + me.label);
+  // Non-blocking: ask the TV whether a newer release is on GitHub. Banner
+  // hides itself if the user already dismissed this exact version.
+  checkUpdate();
 }
 
 async function loadMe() {
@@ -165,7 +168,11 @@ async function loadMe() {
   // overcrowded at 7 items) into a gear-button on the topbar.
   if (me.role === "SUPERUSER") {
     $("#devicesBtn").classList.remove("hidden"); loadDevices();
-  } else { $("#devicesBtn").classList.add("hidden"); }
+    $("#debugBtn").classList.remove("hidden");
+  } else {
+    $("#devicesBtn").classList.add("hidden");
+    $("#debugBtn").classList.add("hidden");
+  }
 }
 
 /* ---------- recovery: 403 or PENDING → poll until usable ---------- */
@@ -240,15 +247,145 @@ function selectTab(name) {
   if (name === "np") refresh();
   if (name === "dl") loadDownloads();
   if (name === "devices") loadDevices();
+  if (name === "debug") openDebug();
+  else closeDebug();
   if (name === "browse" && !browseLoaded) loadBrowse();
   if (name === "live" && !liveLoaded) loadLive();
   if (name === "prefs") loadPrefs();
 }
 $$(".tab").forEach(b => b.onclick = () => selectTab(b.dataset.pane));
 
-// Topbar Devices shortcut (superuser only — visibility set in fetchMe()).
+// Topbar Devices + Debug shortcuts (superuser only — visibility from fetchMe()).
 const devicesBtn = $("#devicesBtn");
 if (devicesBtn) devicesBtn.onclick = () => selectTab("devices");
+const debugBtn = $("#debugBtn");
+if (debugBtn) debugBtn.onclick = () => selectTab("debug");
+
+/* ---------- Update banner ---------- */
+async function checkUpdate() {
+  let r;
+  try { r = await get("/api/update"); } catch { return; }
+  if (!r || !r.tag) return;   // device says "available:false" → no tag field
+  // The user might have dismissed THIS specific version already; honour that.
+  if (localStorage.getItem("vbtv.dismissedUpdate") === r.tag) return;
+  $("#ubVersion").textContent = "Update available — " + (r.name || ("v" + r.tag));
+  const body = String(r.notes || "")
+    .replace(/[#*`]+/g, "").split("\n").map(l => l.trim()).filter(Boolean).slice(0, 2).join(" · ");
+  $("#ubBody").textContent = body || "Download the latest APK.";
+  $("#ubDownload").href = r.apkUrl || r.htmlUrl || "#";
+  $("#updateBanner").classList.remove("hidden");
+  $("#ubDismiss").onclick = () => {
+    localStorage.setItem("vbtv.dismissedUpdate", r.tag);
+    $("#updateBanner").classList.add("hidden");
+  };
+}
+
+/* ---------- Debug pane ---------- */
+let debugTimer = null;
+function openDebug() {
+  if (debugTimer) return;
+  refreshDebug();
+  debugTimer = setInterval(refreshDebug, 2500);
+}
+function closeDebug() {
+  if (debugTimer) { clearInterval(debugTimer); debugTimer = null; }
+}
+async function refreshDebug() {
+  let d;
+  try { d = await get("/api/debug"); } catch { return; }
+  if (!d) return;
+
+  const session = d.session || {};
+  const cur = d.current || {};
+  const channels = Array.isArray(d.channels) ? d.channels : [];
+  const events = Array.isArray(d.events) ? d.events : [];
+
+  // Summary stat grid
+  $("#debugSummary").innerHTML = [
+    statHtml("Uptime", fmtUptime(session.uptimeMs), null),
+    statHtml("Plays started", session.playsStarted ?? 0, null),
+    statHtml("Failures", session.playsFailed ?? 0,
+      `${session.httpErrors ?? 0} HTTP errors`),
+    statHtml("Rebuffers", session.rebuffers ?? 0,
+      `${session.freezes ?? 0} freezes`),
+  ].join("");
+
+  // Current stream
+  const ratingClass = "rating-" + (cur.rating || "excellent");
+  const ratingPct = ({excellent:100, good:75, fair:45, poor:20})[cur.rating || "excellent"];
+  const droppedPct = ((cur.droppedRatio || 0) * 100).toFixed(1);
+  const bitrateMbps = ((cur.bitrateBps || 0) / 1e6).toFixed(2);
+  $("#debugStream").innerHTML = cur.kind === "none" || !cur.title
+    ? `<div class="muted small">Nothing playing.</div>`
+    : `
+      <div class="row"><span>Title</span><span>${escapeHtml(cur.title)}</span></div>
+      <div class="row"><span>Kind</span><span>${escapeHtml(cur.kind)}</span></div>
+      <div class="row"><span>Resolution</span><span>${escapeHtml(cur.resolution || "—")}</span></div>
+      <div class="row"><span>Bitrate</span><span>${bitrateMbps} Mbps</span></div>
+      <div class="row"><span>Buffer</span><span>${((cur.bufferMs||0)/1000).toFixed(1)}s</span></div>
+      <div class="row"><span>Dropped frames</span><span>${droppedPct}%</span></div>
+      <div class="row"><span>Quality</span><span>${escapeHtml(cur.rating || "—")}</span></div>
+      <div class="rating-bar"><div class="${ratingClass}" style="width:${ratingPct}%"></div></div>
+    `;
+
+  // Channels list — show troublesome ones first (server already sorted by
+  // failures*10 + freezes*5 + rebuffers). Limit to 15 to keep the page short.
+  $("#debugScope").textContent = channels.length
+    ? `(${channels.length} channel${channels.length === 1 ? "" : "s"} touched)`
+    : "";
+  $("#debugChannels").innerHTML = channels.length === 0
+    ? `<div class="muted small">No channels played yet.</div>`
+    : channels.slice(0, 15).map(ch => {
+        const badges = [];
+        if (ch.failures > 0) badges.push(badge("err", `${ch.failures} fail`));
+        if (ch.freezes > 0)  badges.push(badge("err", `${ch.freezes} froze`));
+        if (ch.rebuffers > 0) badges.push(badge("warn", `${ch.rebuffers} reb`));
+        badges.push(badge("ok", `${ch.plays} play${ch.plays === 1 ? "" : "s"}`));
+        const lastFail = ch.lastFailure ? `<div class="muted small">${escapeHtml(ch.lastFailure)}</div>` : "";
+        return `
+          <div class="ch-row">
+            <div>
+              <div class="name">${escapeHtml(ch.name || ch.id)}</div>
+              ${lastFail}
+            </div>
+            <div class="badges">${badges.join("")}</div>
+          </div>`;
+      }).join("");
+
+  // Events
+  $("#debugEvents").innerHTML = events.length === 0
+    ? `<div class="muted small">No events logged yet.</div>`
+    : events.slice(0, 25).map(e => `
+        <div class="ev severity-${escapeHtml(e.severity || "info")}">
+          <span class="ts">${fmtTs(e.atMs)}</span>
+          <span class="body">${escapeHtml(e.message || "")}</span>
+        </div>`).join("");
+}
+
+function statHtml(label, value, sub) {
+  return `
+    <div class="stat">
+      <span class="label">${escapeHtml(label)}</span>
+      <span class="value">${escapeHtml(String(value))}</span>
+      ${sub ? `<span class="sub">${escapeHtml(sub)}</span>` : ""}
+    </div>`;
+}
+function badge(severity, text) {
+  return `<span class="badge ${severity}">${escapeHtml(text)}</span>`;
+}
+function fmtUptime(ms) {
+  if (!ms) return "0s";
+  const s = Math.floor(ms / 1000);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${r}s`;
+  return `${r}s`;
+}
+function fmtTs(elapsedMs) {
+  const s = Math.floor(elapsedMs / 1000);
+  const m = Math.floor(s / 60), r = s % 60;
+  return `${m}:${String(r).padStart(2, "0")}`;
+}
 
 /* ---------- search ---------- */
 $("#q").addEventListener("input", (e) => {
@@ -782,6 +919,32 @@ document.querySelectorAll("#pane-live .subtab").forEach(b => {
 });
 
 /* ---------- Live Schedule ---------- */
+let liveScheduleData = null;
+let liveScheduleQuery = "";
+let liveScheduleCategory = "all";
+let liveScheduleQueryTimer = null;
+
+// Meta-categories the user asked for, mapped from the raw category strings the
+// catalog publishes (which look like "Soccer", "NBA", "Cricket Test Match", …).
+// First match wins; "Other" catches anything not classified.
+const SCHED_CATEGORIES = [
+  { id: "all",       label: "All",      match: () => true },
+  { id: "sports",    label: "Sports",   match: s => /\b(soccer|football|nfl|nba|mlb|nhl|cricket|tennis|rugby|hockey|boxing|mma|wrestl|racing|f1|formula|gp|golf|baseball|basketball|sports?|league|cup|liga|premier|champion|olympic)\b/i.test(s) },
+  { id: "news",      label: "News",     match: s => /\b(news|breaking|world|politics?|press)\b/i.test(s) },
+  { id: "movies",    label: "Movies",   match: s => /\b(movies?|film|cinema)\b/i.test(s) },
+  { id: "shows",     label: "TV Shows", match: s => /\b(shows?|series|drama|talk|sitcom|reality|episodes?)\b/i.test(s) },
+  { id: "other",     label: "Other",    match: () => true },
+];
+
+function classifyScheduleCategory(name) {
+  const s = String(name || "");
+  for (const cat of SCHED_CATEGORIES) {
+    if (cat.id === "all" || cat.id === "other") continue;
+    if (cat.match(s)) return cat.id;
+  }
+  return "other";
+}
+
 async function loadLiveSchedule() {
   liveScheduleLoaded = true;
   const status = $("#liveScheduleStatus");
@@ -794,9 +957,43 @@ async function loadLiveSchedule() {
   } catch (e) { status.textContent = "Could not reach the TV."; return; }
   if (!Array.isArray(data) || data.length === 0) {
     status.textContent = "No schedule available right now.";
+    renderScheduleChips([]);
     return;
   }
+  liveScheduleData = data;
+  renderScheduleChips(data);
   renderLiveSchedule(data);
+}
+
+function renderScheduleChips(data) {
+  // Always show the same meta-category set regardless of which categories the
+  // current payload happens to populate — keeps the filter row stable so
+  // tapping a chip doesn't shift other chips around (the original
+  // "page moves on tap" complaint from much earlier).
+  const bar = $("#schedChips");
+  bar.innerHTML = "";
+  SCHED_CATEGORIES.forEach(cat => {
+    const chip = document.createElement("div");
+    chip.className = "chip" + (cat.id === liveScheduleCategory ? " active" : "");
+    chip.textContent = cat.label;
+    chip.onclick = () => {
+      liveScheduleCategory = cat.id;
+      renderScheduleChips(liveScheduleData || []);
+      renderLiveSchedule(liveScheduleData || []);
+    };
+    bar.appendChild(chip);
+  });
+}
+
+const schedQEl = document.getElementById("schedQ");
+if (schedQEl) {
+  schedQEl.addEventListener("input", (e) => {
+    clearTimeout(liveScheduleQueryTimer);
+    liveScheduleQueryTimer = setTimeout(() => {
+      liveScheduleQuery = (e.target.value || "").trim().toLowerCase();
+      if (liveScheduleData) renderLiveSchedule(liveScheduleData);
+    }, 200);
+  });
 }
 
 function renderLiveSchedule(data) {
@@ -815,23 +1012,29 @@ function renderLiveSchedule(data) {
   let liveCount = 0;
   let upcomingCount = 0;
 
+  const q = liveScheduleQuery;
+  const cat = liveScheduleCategory;
   // Prep: keep each category, filter its events, drop empty categories.
-  const filtered = data.map(cat => {
-    const events = (cat.events || []).filter(e => {
+  const filtered = data.map(g => {
+    const groupMeta = classifyScheduleCategory(g.category);
+    if (cat !== "all" && groupMeta !== cat) return { ...g, events: [] };
+    const events = (g.events || []).filter(e => {
       const m = /^(\d{1,2}):(\d{2})$/.exec(e.time || "");
       if (!m) return true;
       const evMinutes = parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
-      // Keep events that haven't started yet OR are within the last hour
-      // (assume those are still airing).
       const stillOnAir = evMinutes >= nowMinutes - 60;
-      if (stillOnAir) {
-        if (evMinutes <= nowMinutes) liveCount++;
-        else upcomingCount++;
+      if (!stillOnAir) return false;
+      if (q) {
+        const hay = ((e.title || "") + " " + (g.category || "") + " " +
+          (e.channels || []).map(c => c.name).join(" ")).toLowerCase();
+        if (!hay.includes(q)) return false;
       }
-      return stillOnAir;
+      if (evMinutes <= nowMinutes) liveCount++;
+      else upcomingCount++;
+      return true;
     });
-    return { ...cat, events };
-  }).filter(cat => cat.events.length > 0);
+    return { ...g, events };
+  }).filter(g => g.events.length > 0);
 
   status.textContent = filtered.length
     ? `${todayUtc} (UTC) — ${liveCount} on now, ${upcomingCount} upcoming`

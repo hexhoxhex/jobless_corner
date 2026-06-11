@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -64,6 +66,19 @@ fun HomeScreen(state: UiState, vm: MainViewModel) {
         contentPadding = PaddingValues(bottom = if (isTv) 36.dp else 24.dp),
         verticalArrangement = Arrangement.spacedBy(if (isTv) 28.dp else 20.dp),
     ) {
+        // Update-available banner. Dismissed-for-this-session check keeps
+        // the banner from coming back after the user clicks the X.
+        val u = state.updateAvailable
+        if (u != null && state.updateDismissedFor != u.tag) {
+            item {
+                val ctx = androidx.compose.ui.platform.LocalContext.current
+                UpdateBanner(
+                    update = u,
+                    onUpdate = { vm.openUpdateInBrowser(ctx) },
+                    onDismiss = { vm.dismissUpdateBanner() },
+                )
+            }
+        }
         item {
             home.heroes.firstOrNull()?.let { HeroBanner(it) { vm.openItem(it.item) } }
         }
@@ -249,5 +264,71 @@ private fun HeroBanner(hero: Hero, onClick: () -> Unit) {
             hero.item.rating,
             Modifier.align(Alignment.TopEnd).padding(if (isTv) 24.dp else 16.dp),
         )
+    }
+}
+
+/** Update-available banner shown above the Home hero. Polite, dismissable.
+ *  Triggers a browser-intent to the release APK URL on the user's TV. */
+@Composable
+private fun UpdateBanner(
+    update: com.moviebox.tv.debug.UpdateChecker.Result,
+    onUpdate: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val isTv = LocalIsTv.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = if (isTv) 32.dp else 16.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(
+                androidx.compose.ui.graphics.Brush.horizontalGradient(
+                    listOf(Accent.copy(alpha = 0.32f), SurfaceElevated),
+                ),
+            )
+            .border(1.dp, Accent.copy(alpha = 0.6f), RoundedCornerShape(14.dp))
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                "Update available — ${update.name}",
+                fontWeight = FontWeight.SemiBold, fontSize = 14.sp,
+                color = androidx.compose.ui.graphics.Color.White,
+            )
+            val one = update.notes
+                .replace(Regex("[#*`]+"), "")
+                .lineSequence()
+                .map { it.trim() }
+                .firstOrNull { it.isNotEmpty() }
+                ?: "Tap Download to install."
+            Text(
+                one, fontSize = 12.sp, color = TextMuted,
+                maxLines = 2,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            )
+        }
+        Spacer(Modifier.width(12.dp))
+        Box(
+            Modifier
+                .clip(RoundedCornerShape(18.dp))
+                .background(Accent)
+                .clickable(onClick = onUpdate)
+                .padding(horizontal = 14.dp, vertical = 8.dp),
+        ) {
+            Text("Download",
+                color = androidx.compose.ui.graphics.Color.White,
+                fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
+        }
+        Spacer(Modifier.width(6.dp))
+        Box(
+            Modifier
+                .size(34.dp)
+                .clip(RoundedCornerShape(17.dp))
+                .clickable(onClick = onDismiss),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("×", color = TextMuted, fontSize = 18.sp)
+        }
     }
 }

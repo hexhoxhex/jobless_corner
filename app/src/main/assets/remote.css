@@ -334,20 +334,33 @@ button.icon-btn { flex: 0 0 auto; padding: 8px 10px; }
 
 /* ---------- Tab bar ---------- */
 .tabbar {
+  /* Pinned-stable bottom bar. We previously used backdrop-filter which on
+     iOS Safari + Chrome Android causes repaints on every scroll frame
+     (visible as the bar/icons "wobbling"). Switched to a solid background.
+     Promoting the bar to its own composite layer via translateZ keeps it
+     glued to the bottom of the viewport while scroll events fire.
+     Total height includes the safe-area inset so the bar's box doesn't
+     resize when iOS shows/hides the URL chrome. */
   position: fixed; left: 0; right: 0; bottom: 0;
-  display: flex; height: var(--tabbar-h);
+  display: flex; align-items: stretch;
+  height: calc(var(--tabbar-h) + env(safe-area-inset-bottom));
   padding-bottom: env(safe-area-inset-bottom);
-  background: color-mix(in srgb, var(--bg) 92%, transparent);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+  background: var(--bg);
   border-top: 1px solid var(--line);
   z-index: 30;
+  transform: translateZ(0);
+  will-change: transform;
 }
 .tab {
+  /* Equal-width distribution — without flex:1 the tabs sized to text width,
+     so the icons sat at uneven positions and visibly shifted whenever the
+     row repainted (the "icons move on scroll" complaint). */
+  flex: 1 1 0; min-width: 0;
   background: transparent; border-radius: 0;
-  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 2px;
   color: var(--muted); font-size: .7rem; font-weight: 500;
-  padding: 8px 2px;
+  padding: 0 2px;
 }
 .tab .icon { color: var(--muted); }
 .tab i { font-style: normal; }
@@ -475,6 +488,103 @@ button.icon-btn { flex: 0 0 auto; padding: 8px 10px; }
 }
 .chip.active { background: var(--accent); color: #fff; border-color: var(--accent); }
 .livestatus { padding: 0 16px 8px; }
+/* Update available banner — sits below the topbar, dismissible. */
+.update-banner {
+  margin: 0 16px 14px;
+  padding: 11px 13px;
+  display: flex; align-items: center; gap: 12px;
+  background: linear-gradient(135deg,
+    color-mix(in srgb, var(--accent) 28%, var(--surface)),
+    var(--surface));
+  border: 1px solid var(--accent);
+  border-radius: 14px;
+}
+.update-banner .ub-text {
+  flex: 1 1 auto; display: flex; flex-direction: column; gap: 2px;
+  min-width: 0;
+}
+.update-banner strong { font-size: .92rem; color: var(--text); }
+.update-banner .ub-actions { display: flex; gap: 6px; align-items: center; }
+.update-banner .ub-actions .primary {
+  text-decoration: none; padding: 7px 14px; border-radius: 18px;
+  background: var(--accent); color: #fff; font-weight: 700; font-size: .82rem;
+  border: none;
+}
+.update-banner .ub-actions .ghost {
+  padding: 6px; border-radius: 18px; background: transparent; border: 0;
+  color: var(--muted); cursor: pointer;
+}
+.update-banner .ub-actions .ghost .icon { width: 18px; height: 18px; }
+
+/* Debug pane — telemetry from the TV displayed in compact cards. */
+.debug-grid {
+  display: grid; grid-template-columns: repeat(2, 1fr);
+  gap: 10px; margin-bottom: 14px;
+}
+.debug-grid .stat {
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: 12px; padding: 12px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.debug-grid .stat .label { font-size: .72rem; color: var(--muted); }
+.debug-grid .stat .value {
+  font-size: 1.15rem; font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.debug-grid .stat .sub { font-size: .68rem; color: var(--muted); }
+.debug-stream { display: flex; flex-direction: column; gap: 7px; }
+.debug-stream .row {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: .82rem;
+}
+.debug-stream .row span:first-child { color: var(--muted); }
+.debug-stream .row span:last-child {
+  font-variant-numeric: tabular-nums; font-weight: 600; color: var(--text);
+}
+.debug-stream .rating-bar {
+  height: 6px; background: var(--surface-2); border-radius: 3px; overflow: hidden;
+  margin-top: 4px;
+}
+.debug-stream .rating-bar > div {
+  height: 100%; transition: width .25s ease, background-color .25s ease;
+}
+.rating-excellent { background: #4caf50; }
+.rating-good      { background: #88c057; }
+.rating-fair      { background: #f0a020; }
+.rating-poor      { background: #e5484d; }
+
+.debug-list { display: flex; flex-direction: column; gap: 6px; }
+.debug-list .ch-row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 6px; border-bottom: 1px solid var(--line);
+  font-size: .82rem;
+}
+.debug-list .ch-row:last-child { border-bottom: 0; }
+.debug-list .ch-row .name { color: var(--text); font-weight: 600; flex: 1 1 auto; }
+.debug-list .ch-row .badges { display: flex; gap: 5px; flex: 0 0 auto; }
+.debug-list .badge {
+  font-size: .65rem; font-weight: 700; padding: 2px 6px; border-radius: 8px;
+  font-variant-numeric: tabular-nums;
+}
+.badge.ok    { background: rgba(76,175,80,.18);  color: #4caf50; }
+.badge.warn  { background: rgba(240,160,32,.22); color: #f0a020; }
+.badge.err   { background: rgba(229,72,77,.20);  color: #e5484d; }
+
+.debug-events { display: flex; flex-direction: column; gap: 5px; }
+.debug-events .ev {
+  display: flex; gap: 8px; padding: 6px 0;
+  border-bottom: 1px solid var(--line); font-size: .76rem;
+}
+.debug-events .ev:last-child { border-bottom: 0; }
+.debug-events .ev .ts {
+  flex: 0 0 auto; color: var(--muted); width: 4.2em;
+  font-variant-numeric: tabular-nums;
+}
+.debug-events .ev .body { flex: 1 1 auto; color: var(--text); }
+.debug-events .ev.severity-info  .body { color: var(--text); }
+.debug-events .ev.severity-warn  .body { color: #f0a020; }
+.debug-events .ev.severity-error .body { color: #e5484d; }
+
 /* Sub-tabs at the top of the Live pane (Channels / Schedule). Matches the
    pill-toggle pattern used on the TV. Sticky-ish: sits above the search bar
    and group chipbar so the user can re-enter the other sub-tab quickly. */

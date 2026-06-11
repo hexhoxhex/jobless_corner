@@ -157,6 +157,7 @@ class LiveStreamProxy(
         return runCatching {
             httpClient.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) {
+                    com.moviebox.tv.debug.Telemetry.onHttpError(resp.code, entry.innerUrl)
                     // Token might have died early. Force a sync refresh and
                     // try once more so the user doesn't see a stall.
                     val refreshed = runBlocking { refreshCache(channelId) }

@@ -322,6 +322,20 @@ class RemoteServer(
                 }
             }
 
+            uri == "/api/debug" -> {
+                // Telemetry snapshot for the Debug pane. JSON. No auth gating
+                // beyond the standard pair-token check above — pairing
+                // already implies the user is on the trusted Wi-Fi.
+                json(com.moviebox.tv.debug.Telemetry.snapshotJson())
+            }
+
+            uri == "/api/update" -> {
+                // Latest update-check result. Stays "available:false" when
+                // the device is on the latest build OR the check hasn't
+                // succeeded yet (e.g. no Wi-Fi at launch).
+                json(RemoteController.pendingUpdateJson())
+            }
+
             uri == "/api/genres" -> {
                 val tv = p("tv") == "1"
                 val genres = runBlocking {

@@ -813,6 +813,14 @@ private fun VideoPlayer(
                 title, exo.currentPosition, exo.duration.coerceAtLeast(0),
                 exo.isPlaying,
             )
+            // Feed the Debug pane's realtime metrics.
+            com.moviebox.tv.debug.Telemetry.updateRealtime(
+                bufferMs = exo.totalBufferedDuration,
+                bitrateBps = exo.videoFormat?.bitrate?.toLong()?.takeIf { it > 0 } ?: 0L,
+                resolution = exo.videoFormat?.let { f ->
+                    if (f.width > 0 && f.height > 0) "${f.width}x${f.height}" else ""
+                } ?: "",
+            )
             if (++tick % 5 == 0 && exo.isPlaying && exo.duration > 0) {
                 progressState.value(exo.currentPosition, exo.duration)
             }
@@ -827,13 +835,26 @@ private fun VideoPlayer(
                 val isBuffering = playbackState == Player.STATE_BUFFERING
                 bufferingState.value(isBuffering)
                 if (playbackState == Player.STATE_ENDED) endedState.value()
+                if (isBuffering && playbackState != Player.STATE_BUFFERING) {
+                    // No-op; left for parallel structure with the telemetry
+                    // call below — we only want to count "transition INTO
+                    // buffering" not "still buffering".
+                }
+                if (isBuffering) {
+                    com.moviebox.tv.debug.Telemetry.onBufferStart()
+                }
                 // Live resilience: feed state transitions to the tracker.
                 if (liveState.value) {
                     resilience.onBufferingChanged(
                         buffering = isBuffering,
                         player = exo,
                         trackSelector = trackSelector,
-                        announce = { msg -> stabilisingState.value(msg) },
+                        announce = { msg ->
+                            stabilisingState.value(msg)
+                            if (msg != null) com.moviebox.tv.debug.Telemetry.note(
+                                com.moviebox.tv.debug.Telemetry.Severity.WARN, msg,
+                            )
+                        },
                     )
                 }
             }
@@ -841,6 +862,9 @@ private fun VideoPlayer(
                 playingState.value(isPlayingNow)
             }
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                com.moviebox.tv.debug.Telemetry.onPlayFailed(
+                    error.cause?.message ?: error.message ?: "playback error",
+                )
                 if (liveState.value) {
                     // Live HLS doesn't have a quality ladder to drop into, and
                     // a token-expiry or upstream-offline failure leaves the
@@ -874,6 +898,7 @@ private fun VideoPlayer(
                 droppedFrames: Int,
                 elapsedMs: Long,
             ) {
+                com.moviebox.tv.debug.Telemetry.onDroppedFrames(droppedFrames, elapsedMs)
                 if (liveState.value) return
                 // Initial 5s settle — the first few frames are nearly always
                 // dropped while ExoPlayer warms the decoder.

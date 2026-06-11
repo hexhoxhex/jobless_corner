@@ -214,4 +214,8 @@ object RemoteController {
     fun playLiveChannel(channelId: String) = main.post {
         vm?.playScheduleChannel(channelId)
     }
+
+    /** Snapshot the latest update-check result for the SPA. JSON. */
+    fun pendingUpdateJson(): String =
+        vm?.pendingUpdateJson() ?: """{"available":false}"""
 }

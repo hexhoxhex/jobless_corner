@@ -85,6 +85,12 @@ data class UiState(
     /** null = "All". Otherwise the selected `group` value (e.g. "USA (DADDY LIVE)"). */
     val liveGroup: String? = null,
     val liveQuery: String = "",
+    /** Update found on GitHub releases, if any. Null until the launch-time
+     *  UpdateChecker resolves; null again if we're already on latest. */
+    val updateAvailable: com.moviebox.tv.debug.UpdateChecker.Result? = null,
+    /** User dismissed the update banner on the TV for this version — don't
+     *  re-show it for the rest of this session. */
+    val updateDismissedFor: String? = null,
     /** Channel whose stream we're currently trying to play. Used by the
      *  PlayerScreen to spin up the WebView fallback when direct HLS fails. */
     val currentLiveChannel: Channel? = null,
@@ -100,6 +106,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val liveRepo = LiveTvRepository()
     private val liveResolver = LiveResolver()
     private val liveProxy = com.moviebox.tv.data.live.LiveStreamProxy(liveResolver)
+    private val updateChecker = com.moviebox.tv.debug.UpdateChecker()
+    @Volatile private var pendingUpdate: com.moviebox.tv.debug.UpdateChecker.Result? = null
+    fun pendingUpdateJson(): String =
+        pendingUpdate?.toJson() ?: """{"available":false}"""
     private val db = AppDatabase.get(app)
     private val favDao = db.favourites()
     private val watchDao = db.watchHistory()
@@ -167,7 +177,36 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val contentKey: String
         get() = "$subjectId|${_state.value.currentSe}|${_state.value.currentEp}"
 
-    init { loadHome() }
+    init {
+        loadHome()
+        // Fire one update check on launch. Public GitHub release lookup,
+        // no token. Failures are silent — SPA / TV banner just won't show.
+        viewModelScope.launch {
+            val result = updateChecker.check(com.moviebox.tv.BuildConfig.VERSION_NAME)
+            pendingUpdate = result
+            if (result != null) {
+                _state.update { it.copy(updateAvailable = result) }
+                com.moviebox.tv.debug.Telemetry.note(
+                    com.moviebox.tv.debug.Telemetry.Severity.INFO,
+                    "Update available: ${result.name}",
+                )
+            }
+        }
+    }
+
+    fun dismissUpdateBanner() {
+        val v = _state.value.updateAvailable?.tag ?: return
+        _state.update { it.copy(updateDismissedFor = v) }
+    }
+
+    fun openUpdateInBrowser(context: android.content.Context) {
+        val u = _state.value.updateAvailable ?: return
+        val intent = android.content.Intent(
+            android.content.Intent.ACTION_VIEW,
+            android.net.Uri.parse(u.apkUrl.ifBlank { u.htmlUrl }),
+        ).apply { addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK) }
+        runCatching { context.startActivity(intent) }
+    }
 
     fun loadHome() {
         _state.update { it.copy(homeLoading = true, error = null) }
@@ -290,6 +329,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             // catalog's cached URL so the user still has *something* to
             // try, even if it's an expired token.
             liveProxy.start()
+            com.moviebox.tv.debug.Telemetry.onPlayStart(
+                kind = "live", title = ch.displayName, channelId = ch.id,
+            )
             val resolved = runCatching {
                 kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                     liveResolver.resolveStream(ch.id)
@@ -692,6 +734,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 Screen.PLAYER -> when {
                     it.play?.isLive == true -> {
                         liveResolveFailures = 0
+                        com.moviebox.tv.debug.Telemetry.onPlayStopped()
                         it.copy(
                             screen = Screen.TABS, tab = Tab.LIVE,
                             play = null,
@@ -728,6 +771,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 _state.update {
                     it.copy(play = p, playLoading = false, resumeMs = resume)
                 }
+                com.moviebox.tv.debug.Telemetry.onPlayStart(
+                    kind = "vod", title = p.title,
+                )
             }.onFailure { e ->
                 // If this play came from a TMDB-bridged item, the bridge picked
                 // an aoneroom title but the stream is broken/unavailable —

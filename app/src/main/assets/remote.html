@@ -157,6 +157,9 @@
         <span id="meLabel">…</span>
         <span id="meRole" class="role"></span>
       </div>
+      <button id="debugBtn" class="theme-toggle hidden" aria-label="Debug">
+        <svg class="icon"><use href="#i-bulb"/></svg>
+      </button>
       <button id="devicesBtn" class="theme-toggle hidden" aria-label="Devices">
         <svg class="icon"><use href="#i-users"/></svg>
       </button>
@@ -167,6 +170,22 @@
   </header>
 
   <div id="banner" class="banner hidden"></div>
+
+  <!-- Update banner: shown when an update is available on GitHub releases. -->
+  <div id="updateBanner" class="update-banner hidden">
+    <div class="ub-text">
+      <strong id="ubVersion">Update available</strong>
+      <span class="muted small" id="ubBody"></span>
+    </div>
+    <div class="ub-actions">
+      <a id="ubDownload" class="primary small" target="_blank" rel="noopener">
+        Download
+      </a>
+      <button id="ubDismiss" class="ghost small" aria-label="Dismiss">
+        <svg class="icon"><use href="#i-close"/></svg>
+      </button>
+    </div>
+  </div>
 
   <!-- SEARCH -->
   <section id="pane-search" class="pane">
@@ -333,6 +352,14 @@
 
     <!-- Schedule -->
     <div id="liveSchedulePane" class="hidden">
+      <div class="searchbar">
+        <div class="field">
+          <svg class="icon"><use href="#i-search"/></svg>
+          <input id="schedQ" type="search"
+                 placeholder="Search events or channels…" autocomplete="off"/>
+        </div>
+      </div>
+      <div id="schedChips" class="chipbar"></div>
       <div class="livestatus muted small" id="liveScheduleStatus"></div>
       <div id="liveScheduleList" class="schedule-list"></div>
     </div>
@@ -344,6 +371,27 @@
     <div id="dlEmpty" class="empty hidden">
       <svg class="icon"><use href="#i-download"/></svg>
       <p>No downloads yet.<br/>Open a title from Search and tap Download.</p>
+    </div>
+  </section>
+
+  <!-- DEBUG (superuser only) -->
+  <section id="pane-debug" class="pane" style="padding:0 16px">
+    <h2 class="ph" style="padding:0">Debug</h2>
+    <p class="muted small">
+      Live telemetry from the TV. Updates every few seconds while this pane is open.
+    </p>
+    <div id="debugSummary" class="debug-grid"></div>
+    <div class="card">
+      <h3 class="card-h">Current stream</h3>
+      <div id="debugStream" class="debug-stream"></div>
+    </div>
+    <div class="card">
+      <h3 class="card-h">Channels &amp; events <span class="muted small" id="debugScope"></span></h3>
+      <div id="debugChannels" class="debug-list"></div>
+    </div>
+    <div class="card">
+      <h3 class="card-h">Recent events</h3>
+      <div id="debugEvents" class="debug-events"></div>
     </div>
   </section>
 
