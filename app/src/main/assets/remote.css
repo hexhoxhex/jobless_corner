@@ -475,6 +475,67 @@ button.icon-btn { flex: 0 0 auto; padding: 8px 10px; }
 }
 .chip.active { background: var(--accent); color: #fff; border-color: var(--accent); }
 .livestatus { padding: 0 16px 8px; }
+/* Sub-tabs at the top of the Live pane (Channels / Schedule). Matches the
+   pill-toggle pattern used on the TV. Sticky-ish: sits above the search bar
+   and group chipbar so the user can re-enter the other sub-tab quickly. */
+.subtabs {
+  display: flex; gap: 6px; padding: 12px 16px 14px;
+  align-items: center;
+}
+.subtab {
+  flex: 1; padding: 9px 0;
+  background: var(--surface-2); color: var(--muted);
+  border: 1px solid var(--line); border-radius: 20px;
+  font-size: .82rem; font-weight: 600; cursor: pointer;
+  transition: background-color .15s ease, color .15s ease;
+}
+.subtab.active {
+  background: var(--accent); color: #fff; border-color: var(--accent);
+}
+
+/* Schedule list — grouped by category, each event line is a row with
+   left-aligned time, the title, and tappable channel chips on the right. */
+.schedule-list { padding: 0 16px 24px; }
+.schedule-empty {
+  padding: 30px 0; text-align: center; color: var(--muted); font-size: .9rem;
+}
+.schedule-category {
+  margin-bottom: 18px;
+}
+.schedule-category h3 {
+  margin: 6px 0 8px; font-size: .92rem;
+  color: var(--text); font-weight: 700;
+  display: flex; align-items: center; gap: 8px;
+}
+.schedule-category h3::after {
+  content: ""; flex: 1; height: 1px; background: var(--line);
+}
+.schedule-event {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 0 9px 4px; border-bottom: 1px solid var(--line);
+}
+.schedule-event:last-child { border-bottom: none; }
+.schedule-event .when {
+  flex: 0 0 auto; min-width: 3.2em;
+  font-variant-numeric: tabular-nums; font-weight: 600;
+  color: var(--text); font-size: .85rem;
+}
+.schedule-event .what {
+  flex: 1 1 auto; font-size: .85rem; color: var(--text);
+  line-height: 1.25;
+}
+.schedule-event .chs {
+  flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 4px;
+  justify-content: flex-end; max-width: 45%;
+}
+.schedule-event .ch-pill {
+  background: var(--accent); color: #fff;
+  font-size: .65rem; font-weight: 700;
+  padding: 3px 8px; border-radius: 12px;
+  cursor: pointer; white-space: nowrap;
+}
+.schedule-event .ch-pill:active { transform: scale(.96); }
+
 .livegrid {
   display: grid; grid-template-columns: 1fr 1fr 1fr;
   gap: 10px; padding: 0 16px 24px;

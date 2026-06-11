@@ -161,9 +161,11 @@ async function loadMe() {
   $("#meLabel").textContent = me.label;
   const role = $("#meRole");
   role.textContent = me.role; role.className = "role " + me.role;
+  // Superuser-only Devices view: moved out of the bottom tabbar (which was
+  // overcrowded at 7 items) into a gear-button on the topbar.
   if (me.role === "SUPERUSER") {
-    $("#tabDevices").classList.remove("hidden"); loadDevices();
-  } else { $("#tabDevices").classList.add("hidden"); }
+    $("#devicesBtn").classList.remove("hidden"); loadDevices();
+  } else { $("#devicesBtn").classList.add("hidden"); }
 }
 
 /* ---------- recovery: 403 or PENDING → poll until usable ---------- */
@@ -243,6 +245,10 @@ function selectTab(name) {
   if (name === "prefs") loadPrefs();
 }
 $$(".tab").forEach(b => b.onclick = () => selectTab(b.dataset.pane));
+
+// Topbar Devices shortcut (superuser only — visibility set in fetchMe()).
+const devicesBtn = $("#devicesBtn");
+if (devicesBtn) devicesBtn.onclick = () => selectTab("devices");
 
 /* ---------- search ---------- */
 $("#q").addEventListener("input", (e) => {
@@ -756,6 +762,112 @@ if (liveSearchEl) {
       liveQuery = e.target.value || "";
       refreshLive(false);
     }, 300);
+  });
+}
+
+/* ---------- Live sub-tab switching (Channels / Schedule) ---------- */
+let liveScheduleLoaded = false;
+function selectLiveSubtab(which) {
+  // Toggle pill state + pane visibility. The Live tab now mirrors the TV's
+  // Live structure (Channels grid vs Schedule by category).
+  document.querySelectorAll("#pane-live .subtab").forEach(b => {
+    b.classList.toggle("active", b.dataset.sub === which);
+  });
+  $("#liveChannelsPane").classList.toggle("hidden", which !== "channels");
+  $("#liveSchedulePane").classList.toggle("hidden", which !== "schedule");
+  if (which === "schedule" && !liveScheduleLoaded) loadLiveSchedule();
+}
+document.querySelectorAll("#pane-live .subtab").forEach(b => {
+  b.onclick = () => selectLiveSubtab(b.dataset.sub);
+});
+
+/* ---------- Live Schedule ---------- */
+async function loadLiveSchedule() {
+  liveScheduleLoaded = true;
+  const status = $("#liveScheduleStatus");
+  const list = $("#liveScheduleList");
+  status.textContent = "Loading schedule…";
+  list.innerHTML = "";
+  let data;
+  try {
+    data = await get("/api/live/schedule");
+  } catch (e) { status.textContent = "Could not reach the TV."; return; }
+  if (!Array.isArray(data) || data.length === 0) {
+    status.textContent = "No schedule available right now.";
+    return;
+  }
+  renderLiveSchedule(data);
+}
+
+function renderLiveSchedule(data) {
+  // Filter out events whose start time has already passed (today). The
+  // schedule is published in UTC HH:MM as documented in LiveModels.kt;
+  // compare against the user's current UTC clock so timezone-of-viewer
+  // doesn't matter — events disappear when their broadcast starts, not
+  // when the user's local time rolls past them.
+  const now = new Date();
+  const nowMinutes = now.getUTCHours() * 60 + now.getUTCMinutes();
+  const todayUtc = now.toLocaleDateString(undefined, {
+    weekday: "long", month: "short", day: "numeric", timeZone: "UTC",
+  });
+  const list = $("#liveScheduleList");
+  const status = $("#liveScheduleStatus");
+  let liveCount = 0;
+  let upcomingCount = 0;
+
+  // Prep: keep each category, filter its events, drop empty categories.
+  const filtered = data.map(cat => {
+    const events = (cat.events || []).filter(e => {
+      const m = /^(\d{1,2}):(\d{2})$/.exec(e.time || "");
+      if (!m) return true;
+      const evMinutes = parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+      // Keep events that haven't started yet OR are within the last hour
+      // (assume those are still airing).
+      const stillOnAir = evMinutes >= nowMinutes - 60;
+      if (stillOnAir) {
+        if (evMinutes <= nowMinutes) liveCount++;
+        else upcomingCount++;
+      }
+      return stillOnAir;
+    });
+    return { ...cat, events };
+  }).filter(cat => cat.events.length > 0);
+
+  status.textContent = filtered.length
+    ? `${todayUtc} (UTC) — ${liveCount} on now, ${upcomingCount} upcoming`
+    : `No upcoming events for ${todayUtc} (UTC).`;
+
+  list.innerHTML = "";
+  filtered.forEach(cat => {
+    const block = document.createElement("div");
+    block.className = "schedule-category";
+    const head = document.createElement("h3");
+    head.textContent = cat.category || "Other";
+    block.appendChild(head);
+    cat.events.forEach(ev => {
+      const row = document.createElement("div");
+      row.className = "schedule-event";
+      // Channel chips clickable — playing a channel from the schedule
+      // does the same as tapping it in the grid.
+      const chsHtml = (ev.channels || []).slice(0, 4).map(ch => {
+        const safe = (ch.name || ch.id).replace(/['"<>&]/g, "");
+        return `<span class="ch-pill" data-cid="${ch.id}">${escapeHtml(safe)}</span>`;
+      }).join("");
+      row.innerHTML = `
+        <span class="when">${escapeHtml(ev.time || "")}</span>
+        <span class="what">${escapeHtml(ev.title || "")}</span>
+        <span class="chs">${chsHtml}</span>`;
+      row.querySelectorAll(".ch-pill").forEach(pill => {
+        pill.addEventListener("click", async () => {
+          try {
+            await post("/api/live/play?id=" + encodeURIComponent(pill.dataset.cid));
+            showToast(`Playing ${pill.textContent}`);
+          } catch (e) { showToast("Couldn't play"); }
+        });
+      });
+      block.appendChild(row);
+    });
+    list.appendChild(block);
   });
 }
 

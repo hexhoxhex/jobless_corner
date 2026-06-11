@@ -157,6 +157,9 @@
         <span id="meLabel">…</span>
         <span id="meRole" class="role"></span>
       </div>
+      <button id="devicesBtn" class="theme-toggle hidden" aria-label="Devices">
+        <svg class="icon"><use href="#i-users"/></svg>
+      </button>
       <button id="themeBtn" class="theme-toggle" aria-label="Theme">
         <svg class="icon"><use id="themeIcon" href="#i-sun"/></svg>
       </button>
@@ -304,16 +307,35 @@
   <!-- DOWNLOADS -->
   <!-- LIVE TV -->
   <section id="pane-live" class="pane">
-    <h2 class="ph">Live TV</h2>
-    <div class="searchbar">
-      <div class="field">
-        <svg class="icon"><use href="#i-search"/></svg>
-        <input id="liveQ" type="search" placeholder="Search channels…" autocomplete="off"/>
-      </div>
+    <!-- Two sub-tabs at the top: Channels grid, Schedule grouped by category.
+         Mirrors the TV's Live tab so the experience matches. -->
+    <div class="subtabs">
+      <button id="liveSubChannels" class="subtab active" data-sub="channels">
+        Channels
+      </button>
+      <button id="liveSubSchedule" class="subtab" data-sub="schedule">
+        Schedule
+      </button>
     </div>
-    <div id="liveGroups" class="chipbar"></div>
-    <div id="liveStatus" class="livestatus muted small"></div>
-    <div id="liveChannels" class="livegrid"></div>
+
+    <!-- Channels -->
+    <div id="liveChannelsPane">
+      <div class="searchbar">
+        <div class="field">
+          <svg class="icon"><use href="#i-search"/></svg>
+          <input id="liveQ" type="search" placeholder="Search channels…" autocomplete="off"/>
+        </div>
+      </div>
+      <div id="liveGroups" class="chipbar"></div>
+      <div id="liveStatus" class="livestatus muted small"></div>
+      <div id="liveChannels" class="livegrid"></div>
+    </div>
+
+    <!-- Schedule -->
+    <div id="liveSchedulePane" class="hidden">
+      <div class="livestatus muted small" id="liveScheduleStatus"></div>
+      <div id="liveScheduleList" class="schedule-list"></div>
+    </div>
   </section>
 
   <section id="pane-dl" class="pane">
@@ -360,9 +382,6 @@
     </button>
     <button class="tab" data-pane="prefs">
       <svg class="icon"><use href="#i-tune"/></svg><i>Taste</i>
-    </button>
-    <button id="tabDevices" class="tab hidden" data-pane="devices">
-      <svg class="icon"><use href="#i-users"/></svg><i>Devices</i>
     </button>
   </nav>
 </main>
