@@ -651,6 +651,12 @@ private fun VideoPlayer(
     // Live-stream resilience tracker. Kept outside ExoPlayer.Listener so the
     // listener block stays clean; the listener just feeds it events.
     val resilience = remember(isLive) { LiveResilience() }
+    // VOD slow-motion detector. ExoPlayer reports dropped video frames via
+    // AnalyticsListener; if sustained drops exceed ~12% over an 8s window
+    // the hardware decoder can't keep up with the chosen variant — fire
+    // tryDowngrade() and announce it. Reset per-content via the
+    // LaunchedEffect(contentKey) further down.
+    val vodDrops = remember(isLive) { VodFrameDropTracker() }
     // Track selector shared between the player and the resilience logic —
     // resilience uses it to cap max bitrate after repeated stalls.
     val trackSelector = remember(isLive) {
@@ -840,14 +846,52 @@ private fun VideoPlayer(
             }
         }
         exo.addListener(listener)
+
+        // VOD slow-motion detector. Only attached for VOD streams; live HLS
+        // uses LiveResilience instead.
+        val analytics = object :
+            androidx.media3.exoplayer.analytics.AnalyticsListener {
+            override fun onDroppedVideoFrames(
+                eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+                droppedFrames: Int,
+                elapsedMs: Long,
+            ) {
+                if (liveState.value) return
+                // Initial 5s settle — the first few frames are nearly always
+                // dropped while ExoPlayer warms the decoder.
+                if (exo.currentPosition < 5_000) return
+                if (vodDrops.observe(droppedFrames, elapsedMs)) {
+                    stabilisingState.value(
+                        "Reducing quality for smoother playback…",
+                    )
+                    val didDowngrade = downgradeState.value()
+                    // If no lower variant exists, clear the message — there's
+                    // nothing we can do silently. The pill still flashed
+                    // briefly so the user knows we noticed.
+                    if (!didDowngrade) {
+                        stabilisingState.value(null)
+                    }
+                }
+            }
+        }
+        exo.addAnalyticsListener(analytics)
+
         onDispose {
             if (exo.duration > 0) {
                 progressState.value(exo.currentPosition, exo.duration)
             }
             RemoteController.clearPlayback()
             exo.removeListener(listener)
+            exo.removeAnalyticsListener(analytics)
             exo.release()
         }
+    }
+
+    // Reset the drop tracker every time the content (or quality variant)
+    // changes, so a fresh attempt after a manual quality switch isn't
+    // poisoned by old counters.
+    LaunchedEffect(contentKey, mediaUrl) {
+        vodDrops.reset()
     }
 
     AndroidView(
