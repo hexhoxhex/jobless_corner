@@ -555,6 +555,31 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         subjectId: String, title: String, coverUrl: String?, type: Int,
         season: Int?, episode: Int?, year: Int? = null,
     ) {
+        // Flip the TV INSTANTLY to a "loading the new pick" state. Previously
+        // we left `play` populated from whatever the TV was already showing,
+        // so the old movie kept playing in the foreground while the new
+        // title resolved async — user perception: the new pick opens "in
+        // the background". Same cleanup openItem() does for the direct path.
+        _state.update {
+            it.copy(
+                screen = Screen.PLAYER,
+                play = null,
+                playLoading = true,
+                resumeMs = 0L,
+                detailItem = Item(
+                    subjectId, title, SubjectType.fromCode(type), year, null,
+                    coverUrl, 0,
+                ),
+                details = null,
+                currentSe = season,
+                currentEp = episode,
+                error = null,
+                // Wipe live-TV transient state so a movie-after-channel
+                // hand-off doesn't carry over the WebView fallback flag.
+                currentLiveChannel = null,
+                useLiveWebPlayer = false,
+            )
+        }
         viewModelScope.launch {
             pendingTmdbId =
                 if (subjectId.startsWith("tmdb:")) subjectId else null
@@ -573,6 +598,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                             tab = Tab.SEARCH,
                             query = title,
                             searchType = SubjectType.ALL,
+                            playLoading = false,
                             error = "Couldn't auto-match \"$title\" — " +
                                 "pick the right entry from search.",
                         )
@@ -586,13 +612,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             this@MainViewModel.subjectId = effectiveId
             dub = "Original"
             quality = DEFAULT_QUALITY
+            // Re-stamp detailItem with the bridge's effective subjectId now
+            // that we know it, so downstream code (favourites, history) keys
+            // off the aoneroom id rather than the bare tmdb: prefix.
             _state.update {
                 it.copy(
                     detailItem = Item(
                         effectiveId, title, SubjectType.fromCode(type), year, null,
                         coverUrl, 0,
                     ),
-                    currentSe = season, currentEp = episode,
                 )
             }
             if (season != null) {
