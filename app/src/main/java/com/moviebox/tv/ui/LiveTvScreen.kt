@@ -2,6 +2,8 @@ package com.moviebox.tv.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusGroup
+import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -51,6 +53,7 @@ import com.moviebox.tv.ui.theme.SurfaceElevated
 import com.moviebox.tv.ui.theme.TextMuted
 import com.moviebox.tv.ui.theme.TextPrimary
 
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable
 fun LiveTvScreen(state: UiState, vm: MainViewModel) {
     val isTv = LocalIsTv.current
@@ -156,6 +159,13 @@ private fun ChannelsView(state: UiState, vm: MainViewModel, isTv: Boolean) {
         // Channel grid - cards with logo + name + live dot
         val columns = if (isTv) 6 else 3
         LazyVerticalGrid(
+            // focusRestorer so D-pad up from a row lands back at the same
+            // column it was on. Without this, vertical navigation on TV
+            // makes the cursor jump to the leftmost tile of each row
+            // which feels broken.
+            modifier = Modifier
+                .focusGroup()
+                .focusRestorer(),
             columns = GridCells.Fixed(columns),
             contentPadding = PaddingValues(
                 start = if (isTv) 32.dp else 16.dp,

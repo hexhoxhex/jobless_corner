@@ -25,8 +25,8 @@ android {
         // ExoPlayer codec support; covers virtually all Android TV devices.
         minSdk = 26
         targetSdk = 35
-        versionCode = 11
-        versionName = "0.1.10"
+        versionCode = 12
+        versionName = "0.1.11"
 
         buildConfigField(
             "String", "TMDB_TOKEN",
@@ -70,6 +70,8 @@ android {
         jvmTarget = "17"
         freeCompilerArgs = freeCompilerArgs + listOf(
             "-opt-in=androidx.compose.foundation.layout.ExperimentalLayoutApi",
+            "-opt-in=androidx.compose.ui.ExperimentalComposeUiApi",
+            "-opt-in=androidx.compose.foundation.ExperimentalFoundationApi",
             "-opt-in=androidx.media3.common.util.UnstableApi",
         )
     }

@@ -351,7 +351,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             // resolve at all (network down at tap time), fall back to the
             // catalog's cached URL so the user still has *something* to
             // try, even if it's an expired token.
-            liveProxy.start()
+            val proxyReady = liveProxy.start()
             com.moviebox.tv.debug.Telemetry.onPlayStart(
                 kind = "live", title = ch.displayName, channelId = ch.id,
             )
@@ -360,10 +360,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     liveResolver.resolveStream(ch.id)
                 }
             }.getOrNull()
-            val finalUrl = if (resolved != null) {
-                liveProxy.proxyUrl(ch.id)
-            } else {
-                ch.streamUrl ?: ""
+            // Prefer the proxy URL (which transparently refreshes tokens
+            // forever); fall back to the directly-resolved URL if the
+            // proxy didn't come up; final fallback is the catalog's
+            // stored URL even if it might be expired — at least the user
+            // sees something attempt to play instead of staring at a
+            // loading spinner with no feedback.
+            val proxyUrl = if (proxyReady && resolved != null)
+                liveProxy.proxyUrl(ch.id) else null
+            val finalUrl = proxyUrl
+                ?: resolved
+                ?: ch.streamUrl
+                ?: ""
+            if (proxyUrl == null && resolved != null) {
+                com.moviebox.tv.debug.Telemetry.note(
+                    com.moviebox.tv.debug.Telemetry.Severity.WARN,
+                    "Live proxy unavailable; using direct CDN URL " +
+                        "(token expiry will end this session in ~60 min)",
+                )
             }
             if (finalUrl.isBlank()) {
                 _state.update { s ->

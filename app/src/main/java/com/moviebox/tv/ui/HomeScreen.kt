@@ -36,7 +36,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.border
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -50,6 +52,7 @@ import com.moviebox.tv.ui.theme.Accent
 import com.moviebox.tv.ui.theme.SurfaceElevated
 import com.moviebox.tv.ui.theme.TextMuted
 
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable
 fun HomeScreen(state: UiState, vm: MainViewModel) {
     // OfflineLong = network has been gone >3min. Take over the whole
@@ -103,10 +106,17 @@ fun HomeScreen(state: UiState, vm: MainViewModel) {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     SectionHeader("Continue Watching")
                     LazyRow(
+                        // focusRestorer + focusGroup: when the D-pad enters
+                        // this row from above/below, focus lands back on the
+                        // last tile the user was on instead of jumping to
+                        // index 0. Single biggest UX win for TV scrolling.
+                        modifier = Modifier
+                            .focusGroup()
+                            .focusRestorer(),
                         contentPadding = PaddingValues(horizontal = if (isTv) 32.dp else 16.dp),
                         horizontalArrangement = Arrangement.spacedBy(if (isTv) 16.dp else 12.dp),
                     ) {
-                        items(continueWatching) { h ->
+                        items(continueWatching, key = { it.key }) { h ->
                             ContinueCard(h, onClick = { vm.resumeFrom(h) })
                         }
                     }
@@ -119,24 +129,30 @@ fun HomeScreen(state: UiState, vm: MainViewModel) {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     SectionHeader("For You")
                     LazyRow(
+                        modifier = Modifier
+                            .focusGroup()
+                            .focusRestorer(),
                         contentPadding = PaddingValues(horizontal = if (isTv) 32.dp else 16.dp),
                         horizontalArrangement = Arrangement.spacedBy(if (isTv) 16.dp else 12.dp),
                     ) {
-                        items(recs) { item ->
+                        items(recs, key = { it.subjectId }) { item ->
                             PosterCard(item) { vm.openItem(item) }
                         }
                     }
                 }
             }
         }
-        items(home.rows) { row ->
+        items(home.rows, key = { it.title }) { row ->
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 SectionHeader(row.title)
                 LazyRow(
+                    modifier = Modifier
+                        .focusGroup()
+                        .focusRestorer(),
                     contentPadding = PaddingValues(horizontal = 16.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    items(row.items) { item ->
+                    items(row.items, key = { it.subjectId }) { item ->
                         PosterCard(item) { vm.openItem(item) }
                     }
                 }

@@ -62,13 +62,49 @@ class LiveStreamProxy(
         .readTimeout(15, TimeUnit.SECONDS)
         .build()
 
-    /** Bind the socket. Idempotent — repeated calls are no-ops. */
-    fun start() {
-        if (!server.isAlive) {
-            // NO_SOCKET_TIMEOUT = keep ExoPlayer's keep-alive connection open
-            // across multiple inner-playlist fetches.
+    /**
+     * Bind the socket. Idempotent — repeated calls are no-ops. Returns true
+     * if the proxy is alive after the call, false if bind failed.
+     *
+     * The user reported "failed to connect to localhost" on the mobile
+     * build, which means ExoPlayer couldn't reach 127.0.0.1:PORT.
+     * Previously [start] would silently swallow a bind IOException and
+     * leave [server.isAlive] = false; callers would then hit the
+     * `check(server.isAlive)` in [proxyUrl] and crash. Now bind failure
+     * is logged + reported to telemetry, and [proxyUrl] returns null
+     * instead of throwing so callers can fall through to the direct
+     * stream URL.
+     */
+    fun start(): Boolean {
+        if (server.isAlive) return true
+        return runCatching {
             server.start(NanoHTTPD.SOCKET_READ_TIMEOUT, /* daemon = */ true)
+            // NanoHTTPD.start() can return before the accept thread is
+            // ready on slow devices; spin briefly until listeningPort is
+            // valid OR a short deadline expires.
+            val deadline = System.currentTimeMillis() + 1_500
+            while (System.currentTimeMillis() < deadline &&
+                (!server.isAlive || server.listeningPort <= 0)
+            ) {
+                runCatching { Thread.sleep(20) }
+            }
+            if (!server.isAlive || server.listeningPort <= 0) {
+                Log.e(TAG, "Proxy bind succeeded but socket isn't usable")
+                com.moviebox.tv.debug.Telemetry.note(
+                    com.moviebox.tv.debug.Telemetry.Severity.ERROR,
+                    "Live proxy bind unusable",
+                )
+                return@runCatching false
+            }
             Log.i(TAG, "Proxy listening on 127.0.0.1:${server.listeningPort}")
+            true
+        }.getOrElse { e ->
+            Log.e(TAG, "Proxy bind failed: ${e.message}", e)
+            com.moviebox.tv.debug.Telemetry.note(
+                com.moviebox.tv.debug.Telemetry.Severity.ERROR,
+                "Live proxy bind failed: ${e.message?.take(120)}",
+            )
+            false
         }
     }
 
@@ -78,11 +114,12 @@ class LiveStreamProxy(
     }
 
     /**
-     * Stable URL ExoPlayer should play. Survives token refreshes; survives
-     * channel re-taps. Caller must ensure [start] has been called.
+     * Stable URL ExoPlayer should play, or null if the proxy isn't running.
+     * Caller is expected to handle null by falling back to the direct
+     * stream URL (which works for ~60 min on a fresh resolve).
      */
-    fun proxyUrl(channelId: String): String {
-        check(server.isAlive) { "LiveStreamProxy.start() must be called first" }
+    fun proxyUrl(channelId: String): String? {
+        if (!server.isAlive || server.listeningPort <= 0) return null
         return "http://127.0.0.1:${server.listeningPort}/master/$channelId"
     }
 

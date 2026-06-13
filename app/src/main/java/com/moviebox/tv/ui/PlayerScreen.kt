@@ -8,8 +8,10 @@ import android.view.View
 import android.view.ViewGroup
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.height
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -505,6 +507,111 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                             fontSize = 12.sp, fontWeight = FontWeight.Medium,
                         )
                     }
+                }
+            }
+        }
+
+        // ---- Up Next overlay (VOD series, last 30s of an episode) ----
+        // Netflix-style: appears bottom-right ~30s before the end with a
+        // countdown + next episode info + Play Now / Cancel buttons. Auto-
+        // advances when the timer hits 0 so the user doesn't have to do
+        // anything. The user complaint was "the app fails to proceed
+        // automatically when one episode ends" — ExoPlayer's STATE_ENDED
+        // doesn't always fire cleanly on the heavier aoneroom resources,
+        // and even when it does the seasons array may not be populated
+        // yet. This overlay short-circuits both paths.
+        val upNext = nextEpisodeFor(state)
+        val showUpNext = play != null && !play.isLive &&
+            state.currentSe != null && upNext != null &&
+            durationMs > 0 &&
+            positionMs >= (durationMs - UP_NEXT_WINDOW_MS)
+        AnimatedVisibility(
+            visible = showUpNext,
+            modifier = Modifier.align(Alignment.BottomEnd)
+                .padding(end = 22.dp, bottom = 82.dp),
+            enter = androidx.compose.animation.fadeIn() +
+                androidx.compose.animation.slideInVertically { it / 4 },
+            exit = androidx.compose.animation.fadeOut(),
+        ) {
+            if (upNext != null) {
+                val remaining = ((durationMs - positionMs) / 1000)
+                    .coerceIn(0, UP_NEXT_WINDOW_MS / 1000)
+                UpNextCard(
+                    nextSeason = upNext.first,
+                    nextEpisode = upNext.second,
+                    secondsRemaining = remaining.toInt(),
+                    onPlayNow = { vm.playEpisode(upNext.first, upNext.second) },
+                    onDismiss = { vm.setAutoplay(false) },
+                )
+                // Auto-fire as soon as the player actually crosses the end.
+                LaunchedEffect(remaining, state.autoplayNext) {
+                    if (state.autoplayNext && remaining <= 0) {
+                        vm.playEpisode(upNext.first, upNext.second)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private const val UP_NEXT_WINDOW_MS: Long = 30_000
+
+/** Compute the next (season, episode) tuple based on current UiState, or
+ *  null if there is no next episode (last episode of last season, or
+ *  seasons data hasn't loaded yet). */
+private fun nextEpisodeFor(state: UiState): Pair<Int, Int>? {
+    val seasons = state.details?.seasons ?: return null
+    val se = state.currentSe ?: return null
+    val ep = state.currentEp ?: return null
+    val cur = seasons.firstOrNull { it.season == se } ?: return null
+    return if (ep < cur.episodes) se to (ep + 1)
+    else seasons.getOrNull(seasons.indexOfFirst { it.season == se } + 1)
+        ?.let { it.season to 1 }
+}
+
+@Composable
+private fun UpNextCard(
+    nextSeason: Int,
+    nextEpisode: Int,
+    secondsRemaining: Int,
+    onPlayNow: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Box(
+        Modifier.clip(RoundedCornerShape(14.dp))
+            .background(Color(0xEE0A0C12))
+            .border(1.dp, Color(0x55FFFFFF), RoundedCornerShape(14.dp))
+            .padding(14.dp),
+    ) {
+        Column(horizontalAlignment = Alignment.Start) {
+            Text("Up next in ${secondsRemaining}s",
+                color = Color(0xFFE8B341),
+                fontWeight = FontWeight.Bold, fontSize = 12.sp)
+            Spacer(Modifier.height(4.dp))
+            Text("S${nextSeason}·E${nextEpisode}",
+                color = Color.White,
+                fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+            Spacer(Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Box(
+                    Modifier.clip(RoundedCornerShape(18.dp))
+                        .background(Color.White)
+                        .clickable(onClick = onPlayNow)
+                        .padding(horizontal = 14.dp, vertical = 7.dp),
+                ) {
+                    Text("Play now",
+                        color = Color.Black,
+                        fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
+                }
+                Box(
+                    Modifier.clip(RoundedCornerShape(18.dp))
+                        .background(Color(0x33FFFFFF))
+                        .clickable(onClick = onDismiss)
+                        .padding(horizontal = 14.dp, vertical = 7.dp),
+                ) {
+                    Text("Cancel",
+                        color = Color.White,
+                        fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
                 }
             }
         }

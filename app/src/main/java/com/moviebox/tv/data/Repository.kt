@@ -371,7 +371,13 @@ class Repository(
         val data = api.resource(
             subjectId, resolution = concrete, page = page, perPage = PER_PAGE,
         ).unwrap()
-        val file = data.list.getOrNull(offsetInPage)
+        // Match by (se, ep) tag on the file rather than by positional offset
+        // — aoneroom sometimes returns multiple resolutions of the SAME
+        // episode in the list, which broke positional indexing and ended up
+        // pointing at the same big file for every episode (visible to the
+        // user as every episode showing the season's total runtime).
+        val file = data.list.firstOrNull { it.se == season && it.ep == episode }
+            ?: data.list.getOrNull(offsetInPage)
             ?: throw ApiException("Episode $episode of season $season missing.")
         return file to available
     }
