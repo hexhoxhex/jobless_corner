@@ -22,6 +22,12 @@ permissions:
   # release and upload assets via the per-job GITHUB_TOKEN.
   contents: write
 
+env:
+  # Silence the "Node.js 20 actions deprecated" warning. setup-java@v4
+  # and setup-gradle@v4 still ship a node20 binary; this opts them into
+  # node24 ahead of the June 16 2026 hard cutover.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
@@ -71,6 +77,9 @@ jobs:
           HEXHOXHEX_KEY_ALIAS=${{ secrets.HEXHOXHEX_KEY_ALIAS }}
           HEXHOXHEX_KEY_PASS=${{ secrets.HEXHOXHEX_KEY_PASS }}
           EOF
+
+      - name: Make gradlew executable
+        run: chmod +x gradlew
 
       - name: Build signed release APK
         run: ./gradlew :app:assembleRelease --no-daemon --stacktrace
