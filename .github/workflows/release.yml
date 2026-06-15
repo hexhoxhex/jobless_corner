@@ -79,7 +79,7 @@ jobs:
         id: apk
         run: |
           src=app/build/outputs/apk/release/app-release.apk
-          dst="moviebox-tv-${{ steps.tag.outputs.tag }}.apk"
+          dst="vijanabarubaru-${{ steps.tag.outputs.tag }}.apk"
           cp "$src" "$dst"
           echo "path=$dst" >> "$GITHUB_OUTPUT"
           echo "sha256=$(sha256sum "$dst" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
@@ -99,5 +99,5 @@ jobs:
 
             Install on a TV / phone:
             ```
-            adb install -r moviebox-tv-${{ steps.tag.outputs.tag }}.apk
+            adb install -r vijanabarubaru-${{ steps.tag.outputs.tag }}.apk
             ```
