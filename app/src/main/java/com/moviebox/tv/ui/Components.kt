@@ -6,6 +6,7 @@ import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.relocation.BringIntoViewRequester
@@ -79,13 +80,19 @@ fun Modifier.tvFocusable(
     borderWidth: Dp = 3.dp,
     borderColor: Color = Accent,
     onClick: () -> Unit,
+    /** Optional long-press handler. On phones triggers via touch hold;
+     *  on Android TV remotes the system surfaces a DPAD_CENTER long-press
+     *  as a long click here. Used by the LIVE tab's ChannelCard to let
+     *  the user star/unstar a channel without leaving the grid. */
+    onLongClick: (() -> Unit)? = null,
 ): Modifier = composed {
     val isTv = LocalIsTv.current
     if (!isTv) {
-        return@composed this.clickable(
+        return@composed this.combinedClickable(
             interactionSource = remember { MutableInteractionSource() },
             indication = null,
             onClick = onClick,
+            onLongClick = onLongClick,
         )
     }
     var focused by remember { mutableStateOf(false) }
@@ -119,10 +126,11 @@ fun Modifier.tvFocusable(
         .border(width = border, brush = SolidColor(borderColor), shape = shape)
         .onFocusChanged { focused = it.isFocused }
         .focusable()
-        .clickable(
+        .combinedClickable(
             interactionSource = remember { MutableInteractionSource() },
             indication = null,
             onClick = onClick,
+            onLongClick = onLongClick,
         )
 }
 

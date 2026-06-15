@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FileProvider exposes only the Downloads subdirectory of the app's
+  external-files dir — getExternalFilesDir(DIRECTORY_DOWNLOADS). That's
+  where UpdateInstaller writes the freshly-downloaded APK. Anything else
+  the app has on disk stays unexposed.
+-->
+<paths>
+    <external-files-path
+        name="updates"
+        path="Download/" />
+</paths>

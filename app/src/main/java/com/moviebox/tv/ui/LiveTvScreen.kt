@@ -37,6 +37,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
@@ -226,7 +227,13 @@ private fun ChannelsView(state: UiState, vm: MainViewModel, isTv: Boolean) {
                 verticalArrangement = Arrangement.spacedBy(if (isTv) 14.dp else 10.dp),
             ) {
                 items(filtered, key = { it.id }) { ch ->
-                    ChannelCard(ch, state.channelHealth[ch.id]) { vm.playChannel(ch) }
+                    ChannelCard(
+                        ch = ch,
+                        health = state.channelHealth[ch.id],
+                        isFavourite = ch.id in state.liveFavouriteIds,
+                        onClick = { vm.playChannel(ch) },
+                        onLongClick = { vm.toggleLiveFavourite(ch) },
+                    )
                 }
             }
         }
@@ -237,7 +244,9 @@ private fun ChannelsView(state: UiState, vm: MainViewModel, isTv: Boolean) {
 private fun ChannelCard(
     ch: Channel,
     health: ChannelHealthEntity?,
+    isFavourite: Boolean = false,
     onClick: () -> Unit,
+    onLongClick: (() -> Unit)? = null,
 ) {
     Column(
         modifier = Modifier
@@ -253,6 +262,7 @@ private fun ChannelCard(
                 borderWidth = 4.dp,
                 borderColor = Color.White,
                 onClick = onClick,
+                onLongClick = onLongClick,
             )
             .padding(8.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -289,6 +299,19 @@ private fun ChannelCard(
             ) {
                 Text("LIVE",
                     color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+            }
+            // Star overlay top-left when this channel is in the user's
+            // favourites. Long-press anywhere on the card toggles it.
+            if (isFavourite) {
+                Icon(
+                    Icons.Filled.Star,
+                    contentDescription = "Favourite",
+                    tint = Color(0xFFFFC857),
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(6.dp)
+                        .size(16.dp),
+                )
             }
             // Bottom-left "Often unstable" badge when this channel has
             // bounced through the recovery cascade multiple times.

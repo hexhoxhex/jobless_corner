@@ -127,6 +127,13 @@ data class UiState(
      *  no recorded trouble — Compose looks it up by id to decide whether
      *  to show the "Often unstable" badge on the grid card. */
     val channelHealth: Map<String, ChannelHealthEntity> = emptyMap(),
+    /** Set of channelIds the user has starred. Drives the star overlay
+     *  on each ChannelCard and the "Favourites" strip at the top of the
+     *  LIVE tab. */
+    val liveFavouriteIds: Set<String> = emptySet(),
+    /** Pinned channels in starred-order (newest first). Used to render
+     *  the favourites strip without joining ids back to the catalog. */
+    val liveFavouriteChannels: List<com.moviebox.tv.data.local.LiveFavouriteEntity> = emptyList(),
 )
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
@@ -144,6 +151,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val watchDao = db.watchHistory()
     private val downloadDao = db.downloads()
     private val channelHealthDao = db.channelHealth()
+    private val liveFavDao = db.liveFavourites()
 
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
@@ -168,6 +176,34 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         .map { it.toSet() }
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
 
+    /** Live-channel pins. Drives the "favourites strip" at the top of the
+     *  Live tab and the star icon on each ChannelCard. */
+    val liveFavourites: StateFlow<List<com.moviebox.tv.data.local.LiveFavouriteEntity>> =
+        liveFavDao.all()
+            .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    val liveFavouriteIds: StateFlow<Set<String>> = liveFavDao.allIds()
+        .map { it.toSet() }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
+
+    fun toggleLiveFavourite(channel: com.moviebox.tv.data.live.Channel) {
+        viewModelScope.launch {
+            if (liveFavDao.isFavourite(channel.id)) {
+                liveFavDao.remove(channel.id)
+            } else {
+                liveFavDao.add(
+                    com.moviebox.tv.data.local.LiveFavouriteEntity(
+                        channelId = channel.id,
+                        name = channel.name,
+                        logoUrl = channel.logo,
+                        group = channel.group,
+                        addedAt = System.currentTimeMillis(),
+                    )
+                )
+            }
+        }
+    }
+
     val continueWatching: StateFlow<List<WatchHistoryEntity>> =
         watchDao.continueWatching()
             .map { list ->
@@ -181,6 +217,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     init {
+        // Mirror live favourites into UiState so Compose can read it
+        // synchronously without each ChannelCard subscribing to a Flow.
+        viewModelScope.launch {
+            liveFavDao.all().collect { rows ->
+                _state.update {
+                    it.copy(
+                        liveFavouriteChannels = rows,
+                        liveFavouriteIds = rows.map { f -> f.channelId }.toSet(),
+                    )
+                }
+            }
+        }
         // Mirror channel health into UiState so Compose can read it
         // synchronously from `state.channelHealth[ch.id]` without each
         // ChannelCard subscribing to its own DAO query.
@@ -267,6 +315,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             android.net.Uri.parse(u.apkUrl.ifBlank { u.htmlUrl }),
         ).apply { addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK) }
         runCatching { context.startActivity(intent) }
+    }
+
+    /** One-tap in-app update: download via DownloadManager, then pop the
+     *  system install confirmation. Falls back to the browser path if the
+     *  release didn't expose a .apk asset (e.g. tag pushed before the CI
+     *  artifact uploaded). */
+    fun installUpdate(context: android.content.Context) {
+        val u = _state.value.updateAvailable ?: return
+        if (u.apkUrl.isBlank() || !u.apkUrl.endsWith(".apk", ignoreCase = true)) {
+            openUpdateInBrowser(context); return
+        }
+        com.moviebox.tv.debug.UpdateInstaller.download(
+            context, apkUrl = u.apkUrl, version = u.tag,
+        )
     }
 
     fun loadHome() {
@@ -619,7 +681,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
         viewModelScope.launch {
             val channels = runCatching { liveRepo.channels() }.getOrNull() ?: return@launch
-            _state.update { it.copy(liveChannels = channels) }
+            // Also warm the schedule cache. The Schedule tab won't show
+            // anything otherwise (the SPA + the TV's UI both read from
+            // `state.liveSchedule` which is set by the same loadLive flow
+            // the user usually triggers via the LIVE tab).
+            val schedule = runCatching { liveRepo.schedule() }.getOrNull().orEmpty()
+            _state.update { it.copy(liveChannels = channels, liveSchedule = schedule) }
+            android.util.Log.i(
+                "LiveDiag",
+                "VM playScheduleChannel cold-load: channels=${channels.size} " +
+                    "schedule=${schedule.size}",
+            )
             val ch = channels.firstOrNull { it.id == channelId } ?: return@launch
             playChannel(ch)
         }

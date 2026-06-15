@@ -12,6 +12,11 @@
          mid-stream — FLAG_KEEP_SCREEN_ON alone does not block Dream on
          TCL/Realtek builds. -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Auto-update: app polls GitHub Releases, downloads new APK via
+         DownloadManager, then triggers the system installer. Without
+         REQUEST_INSTALL_PACKAGES the user gets bounced to Settings every
+         upgrade. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!-- Phone touchscreen is optional so the app installs on Android TV -->
     <uses-feature
@@ -61,5 +66,19 @@
             android:name=".download.DownloadService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- FileProvider for in-app update install. DownloadManager writes
+             the APK to getExternalFilesDir(DIRECTORY_DOWNLOADS); the
+             provider exposes it as a content:// URI so the system
+             installer (running as a different process) can read it. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.updates"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/update_provider_paths" />
+        </provider>
     </application>
 </manifest>

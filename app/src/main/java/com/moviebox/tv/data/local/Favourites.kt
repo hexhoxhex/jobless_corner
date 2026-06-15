@@ -68,8 +68,9 @@ interface FavouriteDao {
         WatchHistoryEntity::class,
         DownloadEntity::class,
         ChannelHealthEntity::class,
+        LiveFavouriteEntity::class,
     ],
-    version = 5,
+    version = 6,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -77,9 +78,33 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun watchHistory(): WatchHistoryDao
     abstract fun downloads(): DownloadDao
     abstract fun channelHealth(): ChannelHealthDao
+    abstract fun liveFavourites(): LiveFavouriteDao
 
     companion object {
         @Volatile private var instance: AppDatabase? = null
+
+        /** v5 → v6: add live_favourites table for pinned channels.
+         *  Surgical — only creates one table, doesn't touch anything else.
+         *  Without this we'd fall back to destructive migration and wipe
+         *  the user's watch history + channel health stats on every
+         *  schema bump, which the auto-update story explicitly promised
+         *  not to do. */
+        private val MIGRATION_5_6 = object : androidx.room.migration.Migration(5, 6) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `live_favourites` (
+                        `channelId` TEXT NOT NULL,
+                        `name` TEXT NOT NULL,
+                        `logoUrl` TEXT,
+                        `group` TEXT,
+                        `addedAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`channelId`)
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
 
         fun get(context: Context): AppDatabase =
             instance ?: synchronized(this) {
@@ -87,7 +112,11 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "moviebox.db",
-                ).fallbackToDestructiveMigration().build().also { instance = it }
+                )
+                    .addMigrations(MIGRATION_5_6)
+                    .fallbackToDestructiveMigration()
+                    .build()
+                    .also { instance = it }
             }
     }
 }

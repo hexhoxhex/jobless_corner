@@ -93,7 +93,7 @@ fun HomeScreen(state: UiState, vm: MainViewModel) {
                 val ctx = androidx.compose.ui.platform.LocalContext.current
                 UpdateBanner(
                     update = u,
-                    onUpdate = { vm.openUpdateInBrowser(ctx) },
+                    onUpdate = { vm.installUpdate(ctx) },
                     onDismiss = { vm.dismissUpdateBanner() },
                 )
             }
