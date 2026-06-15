@@ -1,0 +1,103 @@
+name: Release APK
+
+# Cuts a GitHub release whenever a `v*.*.*` tag is pushed.
+# Local builds use `~/.hexhoxhex/release.jks`; CI decodes the same keystore
+# from the `HEXHOXHEX_KEYSTORE_B64` secret and signs the APK with the same
+# credentials, so APKs from local + CI installs interchangeably.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  # Allow manual re-run from the Actions tab if the tag-trigger build
+  # failed before the upload step.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v0.1.20). Must already exist.'
+        required: true
+
+permissions:
+  # `softprops/action-gh-release` needs contents:write to create the
+  # release and upload assets via the per-job GITHUB_TOKEN.
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Decode keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.HEXHOXHEX_KEYSTORE_B64 }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::error::HEXHOXHEX_KEYSTORE_B64 secret is empty"
+            exit 1
+          fi
+          mkdir -p "$HOME/.hexhoxhex"
+          echo "$KEYSTORE_B64" | base64 -d > "$HOME/.hexhoxhex/release.jks"
+          # Pass the path through to gradle via the same local.properties
+          # mechanism the local build uses. local.properties is gitignored
+          # so this is throwaway scratch in the runner.
+          cat > local.properties <<EOF
+          HEXHOXHEX_KEYSTORE=$HOME/.hexhoxhex/release.jks
+          HEXHOXHEX_STORE_PASS=${{ secrets.HEXHOXHEX_STORE_PASS }}
+          HEXHOXHEX_KEY_ALIAS=${{ secrets.HEXHOXHEX_KEY_ALIAS }}
+          HEXHOXHEX_KEY_PASS=${{ secrets.HEXHOXHEX_KEY_PASS }}
+          EOF
+
+      - name: Build signed release APK
+        run: ./gradlew :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Rename APK to include version
+        id: apk
+        run: |
+          src=app/build/outputs/apk/release/app-release.apk
+          dst="moviebox-tv-${{ steps.tag.outputs.tag }}.apk"
+          cp "$src" "$dst"
+          echo "path=$dst" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum "$dst" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: ${{ steps.apk.outputs.path }}
+          body: |
+            Sideload APK signed with the hexhoxhex release key.
+
+            **SHA-256:** `${{ steps.apk.outputs.sha256 }}`
+
+            Install on a TV / phone:
+            ```
+            adb install -r moviebox-tv-${{ steps.tag.outputs.tag }}.apk
+            ```
