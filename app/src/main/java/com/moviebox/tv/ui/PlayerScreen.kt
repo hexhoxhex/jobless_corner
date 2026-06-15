@@ -56,8 +56,16 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.focusable
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
@@ -188,8 +196,64 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
         }
     }
 
+    // Physical-remote input. Because we run with PlayerView.useController=false
+    // and own all chrome in Compose, there is NO other listener for hardware
+    // remote presses — without this block the TV remote does nothing on the
+    // player screen (which is why Netflix/Crackle work and we don't). We grab
+    // focus on mount and intercept the standard set of D-pad + media keys.
+    val playerFocus = remember { FocusRequester() }
+    LaunchedEffect(play?.mediaUrl) {
+        if (play?.mediaUrl?.isNotBlank() == true) {
+            runCatching { playerFocus.requestFocus() }
+        }
+    }
+    val seekStep = 10_000L  // mirrors the SPA's ±10s buttons for muscle-memory consistency
+
     Box(
         Modifier.fillMaxSize().background(Color.Black)
+            .focusRequester(playerFocus)
+            .focusable()
+            .onKeyEvent { evt ->
+                // Compose fires both Down and Up; only act on Down so a single
+                // press doesn't double-fire.
+                if (evt.type != KeyEventType.KeyDown) return@onKeyEvent false
+                val exo = exoRef ?: return@onKeyEvent false
+                // Surface any key press by showing the controls, so the user
+                // sees the affordances they're navigating with.
+                controlsVisible = true
+                when (evt.key) {
+                    Key.DirectionLeft, Key.MediaRewind, Key.MediaSkipBackward -> {
+                        // Seek 10s back; clamp at 0 so we don't trigger
+                        // re-prepare on a -ve position.
+                        exo.seekTo((exo.currentPosition - seekStep).coerceAtLeast(0))
+                        true
+                    }
+                    Key.DirectionRight, Key.MediaFastForward, Key.MediaSkipForward -> {
+                        exo.seekTo(exo.currentPosition + seekStep)
+                        true
+                    }
+                    Key.MediaPlayPause -> {
+                        exo.playWhenReady = !exo.isPlaying
+                        true
+                    }
+                    Key.MediaPlay -> { exo.playWhenReady = true; true }
+                    Key.MediaPause -> { exo.playWhenReady = false; true }
+                    Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> {
+                        // OK button: toggle play/pause if controls are
+                        // already up; otherwise just bring them up. Matches
+                        // Netflix's behaviour.
+                        if (controlsVisible) exo.playWhenReady = !exo.isPlaying
+                        true
+                    }
+                    Key.DirectionUp, Key.DirectionDown -> {
+                        // Just show the overlay — when the custom Compose
+                        // controls grow nav-target focusables, those will
+                        // own up/down for picker focus.
+                        true
+                    }
+                    else -> false
+                }
+            }
             // Tap anywhere on the player surface toggles the controls. When
             // controls are hidden we treat the next tap as "show", not as
             // "interact" — feels much more like Netflix / Apple TV.
@@ -206,6 +270,11 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
             LiveWebPlayer(
                 channel = state.currentLiveChannel,
                 onAllPathsFailed = { msg ->
+                    // Both layers of the cascade are now exhausted —
+                    // record a bounce so subsequent taps short-circuit
+                    // straight to the WebView path and the grid card
+                    // can flag this channel as unstable.
+                    vm.recordChannelBounce(state.currentLiveChannel.id)
                     vm.surfaceError(msg)
                     vm.back()
                 },
@@ -238,32 +307,42 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                 resizeMode = resizeMode,
                 isLive = play.isLive,
                 onLiveError = { msg ->
-                    // Long-haul resilience: never bounce the user out for a
-                    // transient failure. The cascade is:
-                    //   1) try re-resolving the URL via LiveResolver. Token
-                    //      expiry (the 10-minute-mark complaint) is fixed
-                    //      by a fresh token.
-                    //   2) only if re-resolve has failed ~10 minutes' worth
-                    //      of attempts, try the WebView iframe fallback.
-                    //   3) only after BOTH layers fail does the user see the
-                    //      "Couldn't connect" banner and bounce.
+                    // Long-haul resilience cascade. Returns true if the
+                    // caller should also call exo.prepare() to attempt
+                    // in-place recovery. Returns false if we've routed to
+                    // a different recovery (WebView fallback) or are
+                    // bailing entirely, in which case prepare() would
+                    // just thrash a doomed ExoPlayer instance.
                     when {
                         state.currentLiveChannel == null || state.useLiveWebPlayer -> {
-                            // Already in WebView mode or no channel context —
-                            // we've exhausted the native path, let the
-                            // existing path handle the user-visible error.
                             vm.surfaceError(msg)
                             vm.back()
+                            false
                         }
                         vm.shouldFallbackToWebPlayer() -> {
+                            // Stop battering the same channel with the
+                            // same recovery cycle — the loop-detection
+                            // window has elapsed, switch transports.
                             vm.fallbackToWebPlayer()
+                            false
                         }
                         else -> {
-                            // Most common case for a 10-min-in failure:
-                            // token expired. Refresh in place; player sees
-                            // the new URL and reloads. No bounce.
+                            // Most common case: token expired OR a
+                            // recoverable upstream blip. refreshLiveStream
+                            // invalidates the proxy cache + bumps the
+                            // failure counter; PlayerScreen's caller then
+                            // re-prepares ExoPlayer on the fresh state.
                             vm.refreshLiveStream()
+                            true
                         }
+                    }
+                },
+                preferSoftwareDecoder = state.currentLiveChannel?.id?.let {
+                    vm.preferSoftwareDecoderFor(it)
+                } ?: false,
+                onCodecFlapping = {
+                    state.currentLiveChannel?.id?.let {
+                        vm.markChannelAsCodecFlapping(it)
                     }
                 },
                 title = play.let {
@@ -757,7 +836,20 @@ private fun VideoPlayer(
     isLive: Boolean,
     /** Called when a live HLS stream errors fatally (token expiry, upstream
      *  offline, etc). Distinct from VOD, where we try downgrading quality. */
-    onLiveError: (String) -> Unit = {},
+    /** Live-only callback fired when ExoPlayer cannot make progress
+     *  (Source error, silent freeze, etc.). The outer layer decides
+     *  whether we re-prepare in place (return true) or have already
+     *  initiated a different recovery — typically the WebView fallback
+     *  after the in-place retry has failed too many times — in which
+     *  case the player should NOT call prepare() (return false). */
+    onLiveError: (String) -> Boolean = { true },
+    /** When true, ExoPlayer is built with the FFmpeg-preferred renderer
+     *  factory — software decode — to sidestep a hardware codec that
+     *  flaps on the current channel's content. See [LiveCodecFlapDetector]. */
+    preferSoftwareDecoder: Boolean = false,
+    /** Fired when [LiveCodecFlapDetector] sees the hardware decoder
+     *  being torn down + rebuilt too often on a live stream. */
+    onCodecFlapping: () -> Unit = {},
     title: String,
     modifier: Modifier = Modifier,
 ) {
@@ -776,6 +868,17 @@ private fun VideoPlayer(
     // Live-stream resilience tracker. Kept outside ExoPlayer.Listener so the
     // listener block stays clean; the listener just feeds it events.
     val resilience = remember(isLive) { LiveResilience() }
+    // Catches the "silent freeze" case where ExoPlayer stays in READY or
+    // BUFFERING with playWhenReady=true but currentPosition stops
+    // advancing — no Source error, no STATE_ENDED, so none of the other
+    // recovery paths trigger. Ticks every 2 s while live playback is
+    // active; fires recovery after 20 s of no position progress.
+    val freezeWatchdog = remember(isLive) { LiveFreezeWatchdog() }
+    // Hardware-decoder flap detector. Counts decoder-init events; when
+    // they cluster (≥8 in 12 s), we know the Realtek/AML SoC is reading
+    // every segment boundary as a format change and we should switch
+    // to the software (FFmpeg) renderer for this channel.
+    val flapDetector = remember(isLive) { LiveCodecFlapDetector() }
     // VOD slow-motion detector. ExoPlayer reports dropped video frames via
     // AnalyticsListener; if sustained drops exceed ~12% over an 8s window
     // the hardware decoder can't keep up with the chosen variant — fire
@@ -785,10 +888,27 @@ private fun VideoPlayer(
     // Track selector shared between the player and the resilience logic —
     // resilience uses it to cap max bitrate after repeated stalls.
     val trackSelector = remember(isLive) {
-        androidx.media3.exoplayer.trackselection.DefaultTrackSelector(context)
+        androidx.media3.exoplayer.trackselection.DefaultTrackSelector(context).apply {
+            // Tunneled video — only for live. SurfaceFlinger on this TCL
+            // panel was composing the BLAST surface at ~31 fps even though
+            // the source is 59.94 fps; result was the codec dropping ~32
+            // frames/sec at render and the user seeing 1 fps choppy video
+            // they perceived as "the stream is reconnecting". Tunneling
+            // pipes codec output past SurfaceFlinger straight to the
+            // display, which is the path TCL/Realtek actually optimize
+            // for live TV. VOD doesn't show the symptom (24/30 fps source
+            // composites cleanly under SurfaceFlinger), so leave it off
+            // there — tunneling makes some Compose UI overlays harder to
+            // mix and we don't want to regress the movies path.
+            if (isLive) {
+                parameters = buildUponParameters()
+                    .setTunnelingEnabled(true)
+                    .build()
+            }
+        }
     }
 
-    val exo = remember(isLive) {
+    val exo = remember(isLive, preferSoftwareDecoder) {
         // Live streams (public CDN, CORS open, no auth) want a CLEAN factory —
         // injecting the MovieBox Referer would either be ignored or rejected.
         // VOD reuses the header-injecting factory the rest of the app relies on.
@@ -834,8 +954,16 @@ private fun VideoPlayer(
             // bufferForPlayback means we don't START until we have a
             // real cushion (vs 5s where a hiccup in the first 5s puts
             // us right back to buffering).
+            // bufferForPlaybackAfterRebuffer was 15 s. That made every
+            // recovery user-visible: even when the codec decoded its first
+            // new frame in <3 s, ExoPlayer would sit on it dragging the
+            // buffer up to 15 s of content before unpausing — and live
+            // segments come down at roughly real-time, so that's 15 s of
+            // wallclock with "Reconnecting…" on screen. 3 s is enough to
+            // ride out a single segment hiccup without flapping; the deep
+            // 45 s minBuffer still protects steady-state playback.
             DefaultLoadControl.Builder()
-                .setBufferDurationsMs(45_000, 90_000, 10_000, 15_000)
+                .setBufferDurationsMs(45_000, 90_000, 10_000, 3_000)
                 .build()
         } else {
             DefaultLoadControl.Builder()
@@ -875,14 +1003,39 @@ private fun VideoPlayer(
         } else {
             DefaultMediaSourceFactory(dataSourceFactory)
         }
-        ExoPlayer.Builder(context)
+        // Renderer factory: when [preferSoftwareDecoder] is set (the SoC
+        // flapped on this channel earlier in the session), filter the
+        // MediaCodec selector down to software-only decoders. Every
+        // Android device ships built-in C2 software decoders
+        // (c2.android.avc.decoder for H.264, c2.android.hevc.decoder for
+        // HEVC, etc.) — no extra .so files needed. They're slower than
+        // hardware but tolerate segment-boundary format hints without
+        // tearing the codec down, which was the Realtek failure mode.
+        val renderersFactory = androidx.media3.exoplayer.DefaultRenderersFactory(context)
+        if (preferSoftwareDecoder) {
+            renderersFactory.setMediaCodecSelector { mimeType, requiresSecure, requiresTunneling ->
+                androidx.media3.exoplayer.mediacodec.MediaCodecUtil
+                    .getDecoderInfos(mimeType, requiresSecure, requiresTunneling)
+                    .filter { !it.hardwareAccelerated }
+            }
+        }
+        ExoPlayer.Builder(context, renderersFactory)
             .setMediaSourceFactory(sourceFactory)
             .setLoadControl(loadControl)
             .setTrackSelector(trackSelector)
             .setAudioAttributes(AudioAttributes.DEFAULT, true)
             .setHandleAudioBecomingNoisy(true)
+            .setWakeMode(androidx.media3.common.C.WAKE_MODE_NETWORK)
             .build()
             .apply { playWhenReady = true }
+        // WAKE_MODE_NETWORK = partial wake lock + Wi-Fi lock held while
+        // the player is playing. Released when the player is paused,
+        // stopped, or destroyed. The wake lock counts as ongoing user
+        // activity to Android's PowerManagerService, which prevents the
+        // TV's DreamX bedtime / DayDream screensaver from triggering
+        // mid-stream. FLAG_KEEP_SCREEN_ON (set in the outer PlayerScreen
+        // DisposableEffect) handles the panel; the wake lock handles the
+        // "should we start a Dream" check that fires independently.
     }
 
     LaunchedEffect(mediaUrl, contentKey) {
@@ -966,7 +1119,32 @@ private fun VideoPlayer(
             override fun onPlaybackStateChanged(playbackState: Int) {
                 val isBuffering = playbackState == Player.STATE_BUFFERING
                 bufferingState.value(isBuffering)
-                if (playbackState == Player.STATE_ENDED) endedState.value()
+                if (playbackState == Player.STATE_ENDED) {
+                    if (liveState.value) {
+                        // Live streams should never genuinely "end" while the
+                        // user is watching. ExoPlayer transitions to ENDED
+                        // when the upstream HLS playlist either returned an
+                        // `#EXT-X-ENDLIST` tag (upstream signed off) or
+                        // simply stopped advancing past the live edge
+                        // (network blip, origin hiccup). Either way the
+                        // recovery is the same: seek to live edge and
+                        // re-prepare. Was previously a no-op via endedState,
+                        // which left the player silently paused — that's
+                        // exactly the "channel pausing by itself" behaviour
+                        // the user reported.
+                        stabilisingState.value("Reconnecting…")
+                        com.moviebox.tv.debug.Telemetry.note(
+                            com.moviebox.tv.debug.Telemetry.Severity.WARN,
+                            "Live STATE_ENDED — seeking to live edge",
+                        )
+                        runCatching {
+                            exo.seekTo(androidx.media3.common.C.TIME_UNSET)
+                            exo.prepare()
+                        }
+                    } else {
+                        endedState.value()
+                    }
+                }
                 if (isBuffering && playbackState != Player.STATE_BUFFERING) {
                     // No-op; left for parallel structure with the telemetry
                     // call below — we only want to count "transition INTO
@@ -997,11 +1175,16 @@ private fun VideoPlayer(
                 com.moviebox.tv.debug.Telemetry.onPlayFailed(
                     error.cause?.message ?: error.message ?: "playback error",
                 )
+                val httpCode = (error.cause as? androidx.media3.datasource
+                    .HttpDataSource.InvalidResponseCodeException)?.responseCode
+                android.util.Log.w(
+                    "LiveDiag",
+                    "PLAYER onPlayerError live=${liveState.value} " +
+                        "code=$httpCode errName=${error.errorCodeName} " +
+                        "cause=${error.cause?.javaClass?.simpleName} " +
+                        "msg=${error.cause?.message ?: error.message}",
+                )
                 if (liveState.value) {
-                    // Live HLS doesn't have a quality ladder to drop into, and
-                    // a token-expiry or upstream-offline failure leaves the
-                    // player stuck at 00:00 with no feedback. Surface a
-                    // friendly error and pop back to the channel grid.
                     val cause = error.cause
                     val msg = when {
                         cause is androidx.media3.datasource.HttpDataSource
@@ -1010,7 +1193,46 @@ private fun VideoPlayer(
                             "This channel is offline right now."
                         else -> "Couldn't connect — try another channel."
                     }
-                    liveErrorState.value(msg)
+                    // Recover the player IN PLACE. Previously we only surfaced
+                    // a friendly message and let the outer onLiveError chain
+                    // call vm.refreshLiveStream() — which only bumped a counter
+                    // without ever telling ExoPlayer to leave ERROR state. The
+                    // channel would stay paused with the last decoded frame on
+                    // screen until the user manually navigated away. This is
+                    // the "channel pauses itself" symptom the user reported
+                    // for the case where the upstream cut wins the race
+                    // against the LiveStreamProxy stall detector (15 s
+                    // threshold) — e.g. a single segment 4xx that ExoPlayer
+                    // sees direct from the CDN, never via our proxy.
+                    //
+                    // Order matters here. The outer onLiveError callback
+                    // runs synchronously when we invoke liveErrorState.value,
+                    // and for the in-place-retry branch it calls
+                    // vm.refreshLiveStream() → liveProxy.invalidate(channelId).
+                    // We need that cache invalidation to complete BEFORE
+                    // exo.prepare() fires its first /master/+/inner/ fetches,
+                    // otherwise ExoPlayer races the invalidate and lands on
+                    // the still-stale cache entry.
+                    //
+                    // Sequence: surface message → outer invalidates proxy
+                    // → exo.seekTo+prepare picks up clean state.
+                    stabilisingState.value("Reconnecting…")
+                    com.moviebox.tv.debug.Telemetry.note(
+                        com.moviebox.tv.debug.Telemetry.Severity.WARN,
+                        "Live source error — re-preparing",
+                    )
+                    val shouldPrepare = liveErrorState.value(msg)
+                    if (shouldPrepare) {
+                        runCatching {
+                            exo.seekTo(androidx.media3.common.C.TIME_UNSET)
+                            exo.prepare()
+                        }
+                    }
+                    // If shouldPrepare == false the outer handler already
+                    // routed to a different recovery (WebView fallback or
+                    // bounce back to channel grid). Re-preparing would just
+                    // start a new BUFFERING cycle on a player that's about
+                    // to be disposed.
                     return
                 }
                 // VOD: try one notch lower (e.g. 1080P HEVC → 720P / 480P H.264).
@@ -1048,14 +1270,96 @@ private fun VideoPlayer(
                     }
                 }
             }
+            // Live-only: hardware-decoder flap detection. Each codec
+            // init event is fed into [flapDetector]; when it crosses
+            // its threshold, [onCodecFlapping] tells the VM to remember
+            // this channel needs software decode, which bumps a state
+            // counter that recomposes us with `preferSoftwareDecoder =
+            // true`, rebuilding `exo` with the FFmpeg renderer.
+            override fun onVideoDecoderInitialized(
+                eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+                decoderName: String,
+                initializedTimestampMs: Long,
+                initializationDurationMs: Long,
+            ) {
+                if (!liveState.value || preferSoftwareDecoder) return
+                flapDetector.onDecoderInitialized()
+                if (flapDetector.isFlapping()) {
+                    com.moviebox.tv.debug.Telemetry.note(
+                        com.moviebox.tv.debug.Telemetry.Severity.WARN,
+                        "Codec flapping on $decoderName — falling back to software",
+                    )
+                    stabilisingState.value("Switching decoder…")
+                    onCodecFlapping()
+                    flapDetector.reset()
+                }
+            }
         }
         exo.addAnalyticsListener(analytics)
+
+        // Silent-freeze watchdog. Only meaningful for live: VOD plays a
+        // finite media item; a "freeze" there is just an end-of-stream
+        // condition handled elsewhere.
+        //
+        // CAUTION — tunneled video disables this watchdog. With tunneling,
+        // codec frames go straight to the display and Media3's
+        // `currentPosition` stops ticking back through the normal
+        // reporting path. The watchdog reads currentPosition to decide
+        // "frozen"; under tunneling it sees a stationary position even on
+        // perfectly healthy playback and fires every 30 s (cooldown).
+        // Each fire = seekTo + prepare = a visible "stop and play" the
+        // user perceives as reconnecting. 10 false-positive fires in 5 min
+        // exhaust [MAX_RESOLVE_FAILURES_BEFORE_WEBVIEW] and dump the user
+        // into the Adscore-blocked WebView path. Diag log from one such
+        // session:
+        //
+        //   10:37:41 FREEZE_WATCHDOG firing → count=6
+        //   10:38:11 FREEZE_WATCHDOG firing → count=7
+        //   ...
+        //   10:40:11 FALLBACK_WEB after=10 failures
+        //
+        // while every PROXY ch=303 inner OK fetch in between reported
+        // mediaSeq advancing normally — the stream WAS playing fine.
+        //
+        // The original failure mode this watchdog was added for (codec
+        // QIB dropping to zero with no error fired) cannot happen under
+        // tunneling: the render path is entirely different and the codec
+        // can't get stuck composing into a SurfaceFlinger layer that the
+        // OS has throttled. So we lose nothing by skipping the watchdog
+        // here, and lose a major source of user-visible flapping.
+        val tunnelingOn = trackSelector.parameters.tunnelingEnabled
+        if (liveState.value && !tunnelingOn) {
+            freezeWatchdog.start(exo) {
+                android.util.Log.w(
+                    "LiveDiag",
+                    "PLAYER FREEZE_WATCHDOG firing — re-preparing",
+                )
+                // Same shape as onPlayerError's recovery path.
+                stabilisingState.value("Reconnecting…")
+                com.moviebox.tv.debug.Telemetry.note(
+                    com.moviebox.tv.debug.Telemetry.Severity.WARN,
+                    "Live silent freeze — re-preparing",
+                )
+                // Trigger the outer error handler so it invalidates the
+                // proxy cache (and may also decide to fall back to
+                // WebView once the in-place retry budget is exhausted).
+                // Mirrors the onPlayerError order above.
+                val shouldPrepare = liveErrorState.value("Reconnecting…")
+                if (shouldPrepare) {
+                    runCatching {
+                        exo.seekTo(androidx.media3.common.C.TIME_UNSET)
+                        exo.prepare()
+                    }
+                }
+            }
+        }
 
         onDispose {
             if (exo.duration > 0) {
                 progressState.value(exo.currentPosition, exo.duration)
             }
             RemoteController.clearPlayback()
+            freezeWatchdog.stop()
             exo.removeListener(listener)
             exo.removeAnalyticsListener(analytics)
             exo.release()
@@ -1084,5 +1388,15 @@ private fun VideoPlayer(
             }
         },
         update = { it.resizeMode = resizeMode },
+        // SURFACE LEAK FIX: PlayerView holds a SurfaceView whose GPU
+        // render-target only gets freed if we explicitly detach the player
+        // before the view leaves composition. On TCL Android TVs the GPU
+        // has 8 RTS IDs total; after 8 reconnect cycles without this
+        // cleanup the GPU panics with "HWPerfSetSurfaceInfo: Max RTS IDs
+        // (8) reached" and subsequent ExoPlayer surfaces refuse to render
+        // — visible to the user as "reconnecting" with a black screen.
+        onRelease = { playerView ->
+            runCatching { playerView.player = null }
+        },
     )
 }

@@ -57,6 +57,34 @@ class LiveStreamProxy(
     private val refreshLocks = ConcurrentHashMap<String, Mutex>()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    /**
+     * Per-channel inner-fetch state across multiple HTTP requests. Lets us:
+     *   - Avoid yanking a sibling on the first transient 5xx (count
+     *     consecutive failures before deciding the sibling is dead).
+     *   - Mark "the next /inner/ response needs an EXT-X-DISCONTINUITY"
+     *     after a rotation, so ExoPlayer treats the splice as a clean
+     *     boundary instead of a confusing media-sequence time-warp.
+     */
+    private data class InnerState(
+        var consecutive5xx: Int = 0,
+        var rotationPending: Boolean = false,
+        /** URL we successfully served from on the previous inner request.
+         *  If it differs from the URL we serve from now, we've crossed an
+         *  upstream boundary (background refresh, rotation, etc.) and need
+         *  to inject an EXT-X-DISCONTINUITY. */
+        var lastServedFrom: String? = null,
+        /** Most recent successful inner-playlist body and when it was
+         *  fetched. Lets us absorb a brief upstream 5xx by returning the
+         *  same body again so ExoPlayer keeps consuming the segments it
+         *  already saw (they're hosted on a separate CDN node and usually
+         *  stay alive across nginx hiccups). Without this, every transient
+         *  upstream blip surfaces as a 503 → ExoPlayer pauses → user sees
+         *  "stop and play". */
+        var lastGoodBody: String? = null,
+        var lastGoodAtMs: Long = 0L,
+    )
+    private val innerState = ConcurrentHashMap<String, InnerState>()
+
     private val httpClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(8, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
@@ -187,18 +215,41 @@ class LiveStreamProxy(
             scope.launch { refreshCache(channelId) }
         }
 
-        // Try the cached upstream URL up to MAX_INNER_RETRIES times before
-        // giving up. A single failure used to bubble through as HTTP 500 to
-        // ExoPlayer, which counted that against its (also-thin) retry budget
-        // and threw a Source error after a couple of attempts — visible to
-        // the user as "Reconnecting…" → freeze → bounce. Retrying here
-        // catches transient Wi-Fi blips before they ever reach ExoPlayer.
+        val state = innerState.getOrPut(channelId) { InnerState() }
+        val tStart = System.currentTimeMillis()
+
+        // Try the cached upstream URL up to MAX_INNER_RETRIES times. The
+        // rotation policy is intentionally conservative now:
+        //   - 4xx auth codes (401/403/410) mean the signed token is dead —
+        //     rotate immediately, retrying the same URL is pointless.
+        //   - 5xx codes mean origin/CDN trouble. We retry the SAME upstream
+        //     a few times across THIS request, and only commit to a sibling
+        //     rotation after [ROTATE_AFTER_5XX_RUN] **consecutive** request
+        //     boundaries have failed. The previous policy rotated on the
+        //     first 5xx, which during normal phantemlis hiccups would yank
+        //     ExoPlayer onto a different sibling whose playlist has its OWN
+        //     EXT-X-MEDIA-SEQUENCE numbering — surfaced as "the stream
+        //     plays then jumps backward and repeats some content," which
+        //     is what the user has been reporting.
         var lastResponseCode: Int? = null
+        var lastWasAuthDead = false
         for (attempt in 1..MAX_INNER_RETRIES) {
             val r = runCatching { fetchUpstreamInner(entry.innerUrl) }
             val resp = r.getOrNull()
             if (resp != null && resp.first.isSuccessful) {
-                val body = resp.second
+                state.consecutive5xx = 0
+                val sourceChanged = state.lastServedFrom != null &&
+                    state.lastServedFrom != entry.innerUrl
+                val needsDisc = state.rotationPending || sourceChanged
+                val body = if (needsDisc) injectDiscontinuity(resp.second) else resp.second
+                state.rotationPending = false
+                state.lastServedFrom = entry.innerUrl
+                state.lastGoodBody = body
+                state.lastGoodAtMs = System.currentTimeMillis()
+                val dt = System.currentTimeMillis() - tStart
+                Log.i(DIAG, "PROXY ch=$channelId inner OK attempt=$attempt " +
+                    "dt=${dt}ms disc=$needsDisc host=${hostOf(entry.innerUrl)} " +
+                    "mediaSeq=${extractMediaSeq(resp.second)}")
                 return NanoHTTPD.newFixedLengthResponse(
                     NanoHTTPD.Response.Status.OK,
                     "application/vnd.apple.mpegurl",
@@ -208,38 +259,135 @@ class LiveStreamProxy(
             if (resp != null) {
                 lastResponseCode = resp.first.code
                 com.moviebox.tv.debug.Telemetry.onHttpError(resp.first.code, entry.innerUrl)
-                // If upstream told us the token died, force a fresh resolve
-                // immediately and retry with the new URL.
-                if (resp.first.code in listOf(401, 403, 410)) {
-                    val refreshed = runBlocking { refreshCache(channelId) }
-                    if (refreshed != null) {
-                        runCatching {
-                            return fetchUpstreamInner(refreshed.innerUrl).let {
-                                NanoHTTPD.newFixedLengthResponse(
-                                    NanoHTTPD.Response.Status.OK,
-                                    "application/vnd.apple.mpegurl", it.second,
-                                )
-                            }
-                        }
-                    }
-                }
+                lastWasAuthDead = resp.first.code in listOf(401, 403, 410)
+                if (lastWasAuthDead) break  // token death — go rotate now
             } else {
-                // Throw (e.g. SocketTimeout). Log and keep trying.
                 Log.w(TAG, "inner attempt $attempt for $channelId: " +
                     "${r.exceptionOrNull()?.message}")
             }
             if (attempt < MAX_INNER_RETRIES) {
-                // Exponential backoff between attempts: 200ms, 400ms, 800ms.
                 runCatching { Thread.sleep((200L shl (attempt - 1)).coerceAtMost(1_000)) }
             }
         }
-        // Out of retries. Tell ExoPlayer it was upstream's fault so it doesn't
-        // count this against its own retry budget — 503 is "retry me" rather
-        // than "give up".
+
+        // Decide whether this request justifies a sibling rotation.
+        val transientServerErr = lastResponseCode != null &&
+            (lastResponseCode in 500..504 || lastResponseCode in 520..524)
+        if (transientServerErr) {
+            state.consecutive5xx += 1
+        }
+        val shouldRotate = lastWasAuthDead ||
+            (transientServerErr && state.consecutive5xx >= ROTATE_AFTER_5XX_RUN)
+
+        if (shouldRotate) {
+            Log.i(DIAG, "PROXY ch=$channelId ROTATE code=$lastResponseCode " +
+                "authDead=$lastWasAuthDead 5xxRun=${state.consecutive5xx} " +
+                "fromHost=${hostOf(entry.innerUrl)}")
+            cache.remove(channelId)
+            val refreshed = runBlocking { refreshCache(channelId) }
+            if (refreshed != null && refreshed.innerUrl != entry.innerUrl) {
+                runCatching { fetchUpstreamInner(refreshed.innerUrl) }
+                    .getOrNull()
+                    ?.takeIf { it.first.isSuccessful }
+                    ?.let { ok ->
+                        state.consecutive5xx = 0
+                        state.rotationPending = false
+                        state.lastServedFrom = refreshed.innerUrl
+                        state.lastGoodBody = ok.second
+                        state.lastGoodAtMs = System.currentTimeMillis()
+                        val body = injectDiscontinuity(ok.second)
+                        Log.i(DIAG, "PROXY ch=$channelId ROTATE OK " +
+                            "newHost=${hostOf(refreshed.innerUrl)} " +
+                            "mediaSeq=${extractMediaSeq(ok.second)}")
+                        return NanoHTTPD.newFixedLengthResponse(
+                            NanoHTTPD.Response.Status.OK,
+                            "application/vnd.apple.mpegurl", body,
+                        )
+                    }
+                // Resolver swap happened but the new URL also failed right
+                // now. Mark the rotation as pending so the *next* successful
+                // /inner/ response carries the discontinuity tag.
+                state.rotationPending = true
+            }
+        }
+
+        // Last-good cache: if we have a successful body that's still
+        // fresh, return it. ExoPlayer keeps reading the segments inside
+        // (which usually still work — they live on a separate CDN node
+        // than the playlist endpoint that just 5xx'd). This is the most
+        // impactful smoothing knob: hides upstream nginx hiccups from
+        // the user entirely instead of surfacing them as "stop and play".
+        val cached = state.lastGoodBody
+        val cacheAge = System.currentTimeMillis() - state.lastGoodAtMs
+        if (cached != null && cacheAge < LAST_GOOD_TTL_MS) {
+            Log.i(DIAG, "PROXY ch=$channelId CACHE_HIT age=${cacheAge}ms " +
+                "code=$lastResponseCode")
+            return NanoHTTPD.newFixedLengthResponse(
+                NanoHTTPD.Response.Status.OK,
+                "application/vnd.apple.mpegurl", cached,
+            )
+        }
+        Log.w(DIAG, "PROXY ch=$channelId GIVE_UP code=$lastResponseCode " +
+            "cacheAge=${cacheAge}ms (returning 503)")
+        // Out of retries AND no fresh cache. 503 = "retry me" rather than
+        // "give up" so ExoPlayer doesn't burn its own retry budget on
+        // this one.
         return NanoHTTPD.newFixedLengthResponse(
             NanoHTTPD.Response.Status.SERVICE_UNAVAILABLE,
             "text/plain", "upstream busy (${lastResponseCode ?: "timeout"})",
         )
+    }
+
+    /**
+     * Insert an `#EXT-X-DISCONTINUITY` tag before the first segment in the
+     * playlist body. Tells ExoPlayer "the stream you're about to read is
+     * NOT the same continuous timeline as what came before" — required by
+     * HLS spec when stitching across upstreams that may have unrelated
+     * media-sequence numbering. Without this, the player either time-warps
+     * (segments at a wildly different sequence number are treated as
+     * gap-filling and re-rendered) or throws a behind-live-window error
+     * and snaps back, which is what the user described as "repeats some
+     * parts when reconnecting".
+     */
+    private fun hostOf(url: String): String =
+        runCatching { url.substringAfter("//").substringBefore('/') }
+            .getOrDefault("?")
+
+    private fun extractMediaSeq(body: String): String {
+        for (line in body.lineSequence()) {
+            val l = line.trim()
+            if (l.startsWith("#EXT-X-MEDIA-SEQUENCE:")) {
+                return l.substringAfter(':')
+            }
+        }
+        return "?"
+    }
+
+    private fun injectDiscontinuity(body: String): String {
+        val lines = body.lines().toMutableList()
+        // Find the first non-comment, non-blank line — that's the first
+        // segment URI. Insert a discontinuity tag just above it.
+        var firstSegIdx = -1
+        for ((i, raw) in lines.withIndex()) {
+            val line = raw.trim()
+            if (line.isNotEmpty() && !line.startsWith("#")) {
+                firstSegIdx = i; break
+            }
+        }
+        if (firstSegIdx < 0) return body
+        // The EXTINF for that segment is on the line directly above (or a
+        // few lines above if EXT-X-KEY/EXT-X-PROGRAM-DATE-TIME tags exist).
+        // Walk back to find the EXTINF and put EXT-X-DISCONTINUITY above it.
+        var insertAt = firstSegIdx
+        while (insertAt > 0 && !lines[insertAt - 1].trim().startsWith("#EXTINF")) {
+            insertAt -= 1
+            if (firstSegIdx - insertAt > 5) break
+        }
+        if (insertAt > 0 && lines[insertAt - 1].trim().startsWith("#EXTINF")) {
+            insertAt -= 1
+        }
+        lines.add(insertAt, "#EXT-X-DISCONTINUITY")
+        return lines.joinToString("\n")
     }
 
     private fun fetchUpstreamInner(url: String): Pair<okhttp3.Response, String> {
@@ -324,6 +472,10 @@ class LiveStreamProxy(
 
     companion object {
         private const val TAG = "LiveStreamProxy"
+        /** Single-stream diagnostic tag. Grep `adb logcat | grep LiveDiag`
+         *  to see every recovery event in chronological order across the
+         *  proxy, the ViewModel, and the player. */
+        private const val DIAG = "LiveDiag"
         /** Background-refresh the cached resolution after this much time.
          *  Donis tokens live ~60 min; refreshing at 40 min keeps a safe
          *  20-minute window of validity on every cache update. */
@@ -336,7 +488,19 @@ class LiveStreamProxy(
          *  At 200/400/800 ms backoff the worst case takes ~1.4 s and we've
          *  given the upstream three chances. Stops a single Wi-Fi blip from
          *  cascading into a Source error on ExoPlayer's side. */
-        private const val MAX_INNER_RETRIES: Int = 3
+        private const val MAX_INNER_RETRIES: Int = 5
+        /** Number of consecutive **request-level** 5xx failures before we
+         *  commit to swapping to a different sibling. Each individual request
+         *  already burns up to [MAX_INNER_RETRIES] attempts internally, so a
+         *  value of 2 means ~10 fetches across 2 ExoPlayer polls (~12 s of
+         *  wall-clock) before we rotate. Transient origin hiccups recover
+         *  inside that window; only sustained failure crosses the line. */
+        private const val ROTATE_AFTER_5XX_RUN: Int = 2
+        /** How fresh the last-good cached body has to be before we'll
+         *  reuse it instead of surfacing 503. 12 s = three segment-worth
+         *  of grace, comfortably under the live-edge window so ExoPlayer
+         *  never falls behind the playable range. */
+        private const val LAST_GOOD_TTL_MS: Long = 12_000L
         private const val CHROME_UA =
             "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 " +
                 "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"

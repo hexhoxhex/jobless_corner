@@ -67,14 +67,16 @@ interface FavouriteDao {
         FavouriteEntity::class,
         WatchHistoryEntity::class,
         DownloadEntity::class,
+        ChannelHealthEntity::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun favourites(): FavouriteDao
     abstract fun watchHistory(): WatchHistoryDao
     abstract fun downloads(): DownloadDao
+    abstract fun channelHealth(): ChannelHealthDao
 
     companion object {
         @Volatile private var instance: AppDatabase? = null

@@ -19,6 +19,7 @@ import com.moviebox.tv.data.live.LiveResolver
 import com.moviebox.tv.data.live.LiveTvRepository
 import com.moviebox.tv.data.live.ScheduleEvent
 import com.moviebox.tv.data.local.AppDatabase
+import com.moviebox.tv.data.local.ChannelHealthEntity
 import com.moviebox.tv.data.local.DownloadEntity
 import com.moviebox.tv.data.local.DownloadStatus
 import com.moviebox.tv.data.local.FavouriteEntity
@@ -50,8 +51,19 @@ private const val DEFAULT_QUALITY = "720p"
 /** How many native-HLS failures before we conclude the proxy + ExoPlayer
  *  path is genuinely broken and try the WebView iframe fallback. With the
  *  proxy in place this should almost never fire — it only matters if the
- *  proxy itself is unable to resolve, e.g. donis is down end-to-end. */
-private const val MAX_RESOLVE_FAILURES_BEFORE_WEBVIEW: Int = 6
+ *  proxy itself is unable to resolve, e.g. donis is down end-to-end.
+ *  Raised 6 → 10: with the proxy's last-good cache absorbing transient
+ *  upstream 5xx, a real upstream-down event is the only thing that
+ *  drives this counter up. A 5-minute session was hitting 6 too easily
+ *  on borderline-flaky channels and dumping the user into the (Adscore-
+ *  blocked) WebView path. */
+private const val MAX_RESOLVE_FAILURES_BEFORE_WEBVIEW: Int = 10
+
+/** Rolling window for the failure counter. A channel that's been quiet
+ *  for this long is presumed healthy again — reset the counter so a
+ *  brand-new failure doesn't immediately trigger fallback based on
+ *  ancient history. */
+private const val FAILURE_WINDOW_MS: Long = 5 * 60 * 1000L  // 5 minutes
 
 data class UiState(
     val tab: Tab = Tab.HOME,
@@ -102,6 +114,19 @@ data class UiState(
      *  the active live stream. Flipped by [MainViewModel.fallbackToWebPlayer]
      *  after the HLS path errors. */
     val useLiveWebPlayer: Boolean = false,
+
+    /** Monotonic counter bumped each time a channel is added to the
+     *  software-decoder set. PlayerScreen includes it in its `remember`
+     *  key for ExoPlayer so a hardware-flap-during-playback triggers a
+     *  one-shot rebuild with the FFmpeg-preferred renderer factory. The
+     *  *value* doesn't matter; only that it changes. */
+    val softwareDecoderRevision: Int = 0,
+
+    /** Per-channel playback health (keyed by channelId). Populated from
+     *  Room's `channel_health` table. Empty entries mean the channel has
+     *  no recorded trouble — Compose looks it up by id to decide whether
+     *  to show the "Often unstable" badge on the grid card. */
+    val channelHealth: Map<String, ChannelHealthEntity> = emptyMap(),
 )
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
@@ -118,6 +143,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val favDao = db.favourites()
     private val watchDao = db.watchHistory()
     private val downloadDao = db.downloads()
+    private val channelHealthDao = db.channelHealth()
 
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
@@ -153,6 +179,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val downloads: StateFlow<List<DownloadEntity>> =
         downloadDao.all()
             .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    init {
+        // Mirror channel health into UiState so Compose can read it
+        // synchronously from `state.channelHealth[ch.id]` without each
+        // ChannelCard subscribing to its own DAO query.
+        viewModelScope.launch {
+            channelHealthDao.all().collect { rows ->
+                val map = rows.associateBy { it.channelId }
+                _state.update { it.copy(channelHealth = map) }
+            }
+        }
+    }
 
     private val homeFlow = MutableStateFlow<HomeContent?>(null)
 
@@ -306,12 +344,53 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      *  are IP-bound to the scraper, not the playback device — see the
      *  IP-binding confirmation in `LIVE_TV_BUG_REPORT.md` §0.
      */
-    /** How many consecutive re-resolve attempts have failed for the current
-     *  channel. Resets on channel change. Drives the WebView fallback
-     *  threshold via [shouldFallbackToWebPlayer]. */
+    /** How many recovery attempts have fired in the current rolling window
+     *  for the current channel. Counts watchdog freezes and Source errors
+     *  alike. Drives the WebView fallback threshold via
+     *  [shouldFallbackToWebPlayer]. Resets on channel change, OR if the
+     *  last failure was longer than [FAILURE_WINDOW_MS] ago (channel
+     *  presumed recovered). */
     private var liveResolveFailures = 0
 
+    /** Wall-clock ms of the last [refreshLiveStream] call, used for the
+     *  rolling window reset. */
+    private var lastResolveFailureAt = 0L
+
+    /** Set of channelIds we've seen the TV's hardware decoder flap on
+     *  this app session — see [LiveCodecFlapDetector]. Playback for any
+     *  channel in this set is built with the FFmpeg software renderer
+     *  preferred over the SoC's MediaCodec, sidestepping the
+     *  segment-boundary tear-down storm we observed on the Realtek
+     *  hardware path. In-memory for now; survives until app restart. */
+    private val softwareDecoderChannels = mutableSetOf<String>()
+
+    fun preferSoftwareDecoderFor(channelId: String): Boolean =
+        channelId in softwareDecoderChannels
+
+    /** Called by PlayerScreen when [LiveCodecFlapDetector] crosses its
+     *  threshold. Adding the channel to the set + emitting a state
+     *  update triggers the PlayerScreen's `remember(...)` key to change,
+     *  which rebuilds ExoPlayer with the FFmpeg-preferred renderer. */
+    fun markChannelAsCodecFlapping(channelId: String) {
+        if (softwareDecoderChannels.add(channelId)) {
+            com.moviebox.tv.debug.Telemetry.note(
+                com.moviebox.tv.debug.Telemetry.Severity.WARN,
+                "Codec flap on $channelId — switching to software decoder",
+            )
+            // Bump a state field so the Compose tree recomposes; the
+            // value itself doesn't matter, only that it changed.
+            _state.update { it.copy(softwareDecoderRevision = it.softwareDecoderRevision + 1) }
+        }
+    }
+
     fun playChannel(ch: Channel) {
+        // If this channel has bounced ≥3 times back-to-back, the native
+        // HLS path almost certainly won't work this time either — skip
+        // the 90-s cascade and open the WebView fallback directly. A
+        // single successful playback (>2 min) resets the counter and
+        // re-enables the native attempt on the next tap.
+        val healthRow = _state.value.channelHealth[ch.id]
+        val webOnly = healthRow?.webOnlyHint == true
         // Flip into PLAYER immediately with a placeholder so the user sees
         // the player chrome populate while we resolve. mediaUrl stays blank
         // until the resolver lands — PlayerScreen waits on the blank URL
@@ -332,17 +411,37 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     isLive = true,
                     subtitle = ch.group ?: "Live TV",
                 ),
-                playLoading = true,
+                playLoading = !webOnly,
                 resumeMs = 0L,
                 detailItem = null,
                 details = null,
                 currentSe = null, currentEp = null,
                 error = null,
                 currentLiveChannel = ch,
-                useLiveWebPlayer = false,
+                useLiveWebPlayer = webOnly,
             )
         }
         liveResolveFailures = 0
+        lastResolveFailureAt = 0L
+        // Run the success-recorder on EVERY play, web or native. If the
+        // channel is still selected after 2 min, mark it healthy — this
+        // both unsticks unstableHint badges and clears webOnlyHint so
+        // the native cascade is tried again next time.
+        scheduleHealthSuccess(ch.id)
+        if (webOnly) {
+            // No resolve needed — PlayerScreen will render LiveWebPlayer
+            // straight away. Telemetry still fires so debug rollups see
+            // the play attempt.
+            com.moviebox.tv.debug.Telemetry.onPlayStart(
+                kind = "live", title = ch.displayName, channelId = ch.id,
+            )
+            com.moviebox.tv.debug.Telemetry.note(
+                com.moviebox.tv.debug.Telemetry.Severity.INFO,
+                "Channel ${ch.id} flagged web-only after " +
+                    "${healthRow?.bounceCount} bounce(s); skipping native cascade",
+            )
+            return
+        }
         viewModelScope.launch {
             // Spin up the proxy and prime its cache for this channel — the
             // first inner-playlist fetch triggers a sync resolve which we
@@ -417,7 +516,30 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      *  the same proxy URL via its existing source-error retry, and the
      *  next /inner request will force a fresh resolve. */
     fun refreshLiveStream(): Boolean {
+        val now = System.currentTimeMillis()
+        val chId = _state.value.currentLiveChannel?.id ?: "?"
+        val window = now - lastResolveFailureAt
+        // Rolling-window reset: if the last failure was a while ago, the
+        // channel has been healthy enough that we shouldn't hold the
+        // earlier flaps against it. Lets a channel that briefly hiccupped
+        // once an hour ago use its full retry budget on the new flap.
+        if (window > FAILURE_WINDOW_MS) {
+            liveResolveFailures = 0
+            lastResolveFailureAt = 0L
+        }
         liveResolveFailures += 1
+        lastResolveFailureAt = now
+        android.util.Log.w(
+            "LiveDiag",
+            "VM ch=$chId refreshLiveStream count=$liveResolveFailures " +
+                "/${MAX_RESOLVE_FAILURES_BEFORE_WEBVIEW} " +
+                "windowSinceLastFailMs=$window",
+        )
+        // (Cache invalidation removed — v0.1.11's LiveStreamProxy doesn't
+        // expose invalidate(); the proxy's own background refresh handles
+        // poisoned-cache recovery via its refresh-at-age logic. If a future
+        // proxy version reintroduces invalidate(), this is the place to
+        // call it.)
         return true
     }
 
@@ -427,6 +549,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      *  before we give up on the native player and try the iframe pages. */
     fun fallbackToWebPlayer() {
         if (_state.value.currentLiveChannel == null) return
+        android.util.Log.w(
+            "LiveDiag",
+            "VM ch=${_state.value.currentLiveChannel?.id} FALLBACK_WEB " +
+                "after=$liveResolveFailures failures",
+        )
         _state.update { it.copy(useLiveWebPlayer = true) }
     }
 
@@ -434,10 +561,68 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun shouldFallbackToWebPlayer(): Boolean =
         liveResolveFailures >= MAX_RESOLVE_FAILURES_BEFORE_WEBVIEW
 
-    /** From a schedule chip — look up the channel by id and play it. */
+    /** Per-channel job that records playback success after 2 min of
+     *  uninterrupted "this channel is still selected" time. Cancelled
+     *  if the user navigates away before that window elapses. */
+    private var healthSuccessJob: kotlinx.coroutines.Job? = null
+
+    private fun scheduleHealthSuccess(channelId: String) {
+        healthSuccessJob?.cancel()
+        healthSuccessJob = viewModelScope.launch {
+            kotlinx.coroutines.delay(120_000)
+            val stillOn = _state.value.currentLiveChannel?.id == channelId
+            if (stillOn) {
+                // BUG FIX: previously this recorded success to the DAO but did
+                // NOT reset liveResolveFailures. So cumulative transient blips
+                // across multiple healthy-recovery cycles slowly counted toward
+                // MAX_RESOLVE_FAILURES_BEFORE_WEBVIEW. After ~3 brief outages
+                // the user got doom-looped into the WebView (Adscore-blocked =
+                // permanent black screen). Two minutes of healthy play is
+                // strong evidence the channel is fine — give it a fresh budget.
+                liveResolveFailures = 0
+                lastResolveFailureAt = 0L
+                runCatching {
+                    channelHealthDao.recordSuccess(
+                        channelId, System.currentTimeMillis(),
+                    )
+                }
+            }
+        }
+    }
+
+    /** Called by [LiveWebPlayer] via [PlayerScreen] when the cascade has
+     *  exhausted: native HLS tried [MAX_RESOLVE_FAILURES_BEFORE_WEBVIEW]
+     *  times AND the WebView iframe also failed for all backends.
+     *
+     *  We record one bounce per cascade-exhaustion. After [ChannelHealthEntity
+     *  .UNSTABLE_THRESHOLD] the grid shows a badge, after [ChannelHealthEntity
+     *  .WEB_ONLY_THRESHOLD] the next tap skips the native attempt entirely. */
+    fun recordChannelBounce(channelId: String) {
+        viewModelScope.launch {
+            runCatching {
+                channelHealthDao.recordBounce(
+                    channelId, System.currentTimeMillis(),
+                )
+            }
+        }
+    }
+
+    /** From a schedule chip — look up the channel by id and play it.
+     *  Also the entry point for the mobile-remote `/api/live/play` endpoint:
+     *  if the user invokes it before the LIVE tab has loaded, we load the
+     *  catalog first, then play. Without that, hitting the API from cold
+     *  silently no-ops because `liveChannels` is empty. */
     fun playScheduleChannel(channelId: String) {
-        val ch = _state.value.liveChannels.firstOrNull { it.id == channelId } ?: return
-        playChannel(ch)
+        val cached = _state.value.liveChannels.firstOrNull { it.id == channelId }
+        if (cached != null) {
+            playChannel(cached); return
+        }
+        viewModelScope.launch {
+            val channels = runCatching { liveRepo.channels() }.getOrNull() ?: return@launch
+            _state.update { it.copy(liveChannels = channels) }
+            val ch = channels.firstOrNull { it.id == channelId } ?: return@launch
+            playChannel(ch)
+        }
     }
 
 
@@ -771,6 +956,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 Screen.PLAYER -> when {
                     it.play?.isLive == true -> {
                         liveResolveFailures = 0
+                        lastResolveFailureAt = 0L
                         com.moviebox.tv.debug.Telemetry.onPlayStopped()
                         it.copy(
                             screen = Screen.TABS, tab = Tab.LIVE,
@@ -840,7 +1026,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val s = _state.value
         val play = s.play ?: return
         val item = s.detailItem
-        val key = WatchHistoryEntity.keyOf(subjectId, s.currentSe, s.currentEp)
+        // BUG FIX: use play.season/episode (what's actually playing) rather
+        // than state.currentSe/Ep. When the user taps the next episode,
+        // playEpisode() updates currentSe/Ep IMMEDIATELY, but the previous
+        // player's onDispose runs a final saveProgress *after* that — which
+        // used to write the old episode's final position under the NEW
+        // episode's key, causing the next episode to resume mid-way through.
+        val saveSe = if (play.season > 0) play.season else null
+        val saveEp = if (play.episode > 0) play.episode else null
+        val key = WatchHistoryEntity.keyOf(subjectId, saveSe, saveEp)
         viewModelScope.launch {
             watchDao.upsert(
                 WatchHistoryEntity(

@@ -6,6 +6,12 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Used by ExoPlayer's setWakeMode(WAKE_MODE_NETWORK). Holds a
+         partial wake lock + Wi-Fi lock during playback so the TV's
+         PowerManager doesn't fire its bedtime / DreamX screensaver
+         mid-stream — FLAG_KEEP_SCREEN_ON alone does not block Dream on
+         TCL/Realtek builds. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <!-- Phone touchscreen is optional so the app installs on Android TV -->
     <uses-feature

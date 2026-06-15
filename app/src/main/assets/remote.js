@@ -694,14 +694,31 @@ const fmt = (ms) => { const s = Math.floor(ms / 1000);
 /** True while the user is actively dragging the volume slider — we want to
  *  pause the refresh→update→snap-back loop until they let go. */
 let volSliding = false;
+/** Same idea for the position scrubber. */
+let posSliding = false;
+let lastDurationMs = 0;
 
 async function refresh() {
   try {
     const s = await get("/api/state");
     $("#npTitle").textContent = s.title || "Nothing playing";
-    $("#npPos").textContent = fmt(s.position || 0);
+    // Position display — skip while the user is dragging; their drag is
+    // already updating the time text via the slider's `input` handler.
+    if (!posSliding) {
+      $("#npPos").textContent = fmt(s.position || 0);
+    }
     $("#npDur").textContent = fmt(s.duration || 0);
-    $("#npBar").style.width = (s.duration ? (s.position / s.duration * 100) : 0) + "%";
+    lastDurationMs = s.duration || 0;
+    // Position scrubber: range is 0..1000 (thousandths of duration). Avoid
+    // the snap-back fight by skipping the write while the user is dragging.
+    if (!posSliding) {
+      const pct = s.duration ? Math.round(s.position / s.duration * 1000) : 0;
+      const scrub = $("#npScrub");
+      if (Number(scrub.value) !== pct) scrub.value = pct;
+      // Disable the scrubber for live streams (duration is 0/unknown) and
+      // for movies that haven't started loading yet.
+      scrub.disabled = !s.duration;
+    }
     // Skip the play/pause icon swap if it's already correct — every textContent
     // / innerHTML write is a layout invalidation, which is what made tapping
     // feel like the page "jumped" each second when the poll fired.
@@ -755,11 +772,60 @@ function fillSelect(sel, options, current, onPick) {
   });
   sel.onchange = () => onPick(sel.value);
 }
-$("#pp").onclick     = async () => { await post("/api/playpause"); refresh(); };
-$("#back10").onclick = async () => { await post("/api/seekby?ms=-10000"); refresh(); };
-$("#fwd10").onclick  = async () => { await post("/api/seekby?ms=10000");  refresh(); };
-$("#volUp").onclick  = async () => { await post("/api/volume?up=1");      refresh(); };
-$("#volDown").onclick= async () => { await post("/api/volume?down=1");    refresh(); };
+// Transport / volume buttons — fire-and-forget + optimistic UI. The previous
+// version `await`-ed each POST and then called refresh(), so the user saw two
+// network round trips per tap (~250-500ms over home Wi-Fi). Now we update the
+// local UI immediately and let the existing 1s state poll reconcile if our
+// guess was wrong. Feels snappy like Netflix's mobile control.
+$("#pp").onclick = () => {
+  // Optimistic icon swap so the button feels responsive even before the TV
+  // acknowledges. The next /api/state poll will overwrite if we're wrong.
+  const swap = $("#pp").dataset.icon === "play" ? "pause" : "play";
+  $("#pp").innerHTML = ic(swap, "lg");
+  $("#pp").dataset.icon = swap;
+  post("/api/playpause");
+};
+$("#back10").onclick = () => {
+  post("/api/seekby?ms=-10000");
+  // Pull the displayed position back optimistically so the time text and
+  // scrubber don't lag a second behind the user's tap.
+  if (lastDurationMs) {
+    const cur = Math.max(0, parseTime($("#npPos").textContent) - 10_000);
+    $("#npPos").textContent = fmt(cur);
+    $("#npScrub").value = Math.round(cur / lastDurationMs * 1000);
+  }
+};
+$("#fwd10").onclick = () => {
+  post("/api/seekby?ms=10000");
+  if (lastDurationMs) {
+    const cur = Math.min(lastDurationMs, parseTime($("#npPos").textContent) + 10_000);
+    $("#npPos").textContent = fmt(cur);
+    $("#npScrub").value = Math.round(cur / lastDurationMs * 1000);
+  }
+};
+$("#volUp").onclick = () => {
+  // Bump the displayed volume by one step so the user gets immediate feedback
+  // — Android's AudioManager steps in ~6.7% chunks on STREAM_MUSIC.
+  const cur = Number($("#volSlider").value) || 0;
+  const next = Math.min(100, cur + 7);
+  $("#volSlider").value = next;
+  $("#volPct").textContent = next + "%";
+  post("/api/volume?up=1");
+};
+$("#volDown").onclick = () => {
+  const cur = Number($("#volSlider").value) || 0;
+  const next = Math.max(0, cur - 7);
+  $("#volSlider").value = next;
+  $("#volPct").textContent = next + "%";
+  post("/api/volume?down=1");
+};
+
+/** "m:ss" -> ms. Round-trip-safe for the optimistic seek logic above. */
+function parseTime(s) {
+  const parts = (s || "0:00").split(":").map(n => Number(n) || 0);
+  if (parts.length === 3) return ((parts[0] * 60 + parts[1]) * 60 + parts[2]) * 1000;
+  return (parts[0] * 60 + parts[1]) * 1000;
+}
 
 /* ---------- volume slider ---------- */
 let volSendTimer = null;
@@ -771,9 +837,35 @@ $("#volSlider").addEventListener("input", (e) => {
   $("#volPct").textContent = v + "%";
   clearTimeout(volSendTimer);
   // Debounce the network call — sliding fires `input` many times per second.
+  // 60ms is below the perceptible threshold but still drops 90%+ of redundant
+  // POSTs on a typical 5-second slide. Lower had glitchier feel on slow Wi-Fi.
   volSendTimer = setTimeout(() => {
     post("/api/volume?set=" + v);
-  }, 120);
+  }, 60);
+});
+
+/* ---------- position scrubber ---------- */
+// `input` fires continuously while the user drags — we only update the
+// preview time text. `change` fires once when they let go — that's when we
+// actually tell the TV to seek. This matches how every native scrubber UX
+// behaves (vs the volume slider where a debounced network call during drag
+// is fine because each step is independent).
+$("#npScrub").addEventListener("pointerdown",   () => { posSliding = true; });
+$("#npScrub").addEventListener("pointerup",     () => { posSliding = false; });
+$("#npScrub").addEventListener("pointercancel", () => { posSliding = false; });
+$("#npScrub").addEventListener("input", (e) => {
+  // Live preview of the target time while dragging. lastDurationMs is the
+  // duration as of the most recent /api/state poll, refreshed each second.
+  if (!lastDurationMs) return;
+  const targetMs = Math.round(Number(e.target.value) / 1000 * lastDurationMs);
+  $("#npPos").textContent = fmt(targetMs);
+});
+$("#npScrub").addEventListener("change", async (e) => {
+  if (!lastDurationMs) return;
+  const targetMs = Math.round(Number(e.target.value) / 1000 * lastDurationMs);
+  await post("/api/seek?ms=" + targetMs);
+  // Force the next poll to pick up the new position promptly.
+  refresh();
 });
 
 /* ---------- history ---------- */

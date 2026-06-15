@@ -109,6 +109,13 @@ class RemoteServer(
             uri == "/api/seekby" -> {
                 RemoteController.seekBy(p("ms")?.toLongOrNull() ?: 0L); ok()
             }
+            uri == "/api/seek" -> {
+                // Absolute seek — used by the SPA scrubber when the user drops
+                // the thumb. Clamped to [0, duration-1s] so we don't trigger
+                // STATE_ENDED accidentally.
+                val target = p("ms")?.toLongOrNull() ?: 0L
+                RemoteController.seekTo(target); ok()
+            }
             uri == "/api/volume" -> {
                 when {
                     p("up") != null -> RemoteController.volumeUp()

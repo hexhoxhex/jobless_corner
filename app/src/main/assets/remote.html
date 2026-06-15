@@ -248,7 +248,12 @@
   <section id="pane-np" class="pane">
     <div class="card np-card">
       <div class="np-title" id="npTitle">Nothing playing</div>
-      <div class="bar"><div id="npBar"></div></div>
+      <!-- Scrubber: drag to seek the TV's playback. Pattern mirrors the
+           volume slider below — input drives a live preview, the actual
+           seek fires on `change` (mouse/touch up) so we don't spam the
+           player while the user drags. -->
+      <input id="npScrub" type="range" min="0" max="1000" value="0"
+             class="pos-slider" aria-label="Position" />
       <div class="time"><span id="npPos">0:00</span><span id="npDur">0:00</span></div>
       <div class="row">
         <button id="back10">

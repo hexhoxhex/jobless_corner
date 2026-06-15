@@ -22,7 +22,15 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -47,6 +55,7 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.moviebox.tv.data.live.Channel
 import com.moviebox.tv.data.live.ScheduleEvent
+import com.moviebox.tv.data.local.ChannelHealthEntity
 import com.moviebox.tv.ui.theme.Accent
 import com.moviebox.tv.ui.theme.Surface
 import com.moviebox.tv.ui.theme.SurfaceElevated
@@ -112,33 +121,65 @@ private fun ChannelsView(state: UiState, vm: MainViewModel, isTv: Boolean) {
         state.liveChannels.mapNotNull { it.group }.distinct()
     }
 
+    // On TV, D-pad focus on a BasicTextField pops the on-screen keyboard
+    // immediately, which the user hits before they even reach the channel
+    // grid below. Two-state pattern: a focusable preview chip that just
+    // shows the current query, and a separate edit mode entered only on OK
+    // press. BackHandler exits edit mode without leaving the LIVE tab.
+    var liveSearchEditing by remember { mutableStateOf(false) }
+    val searchFocus = remember { FocusRequester() }
+    if (liveSearchEditing) {
+        BackHandler(enabled = true) { liveSearchEditing = false }
+        // When we enter edit mode, request focus into the text field — this
+        // is what triggers the IME on TV.
+        LaunchedEffect(Unit) { runCatching { searchFocus.requestFocus() } }
+    }
+
     Column(Modifier.fillMaxSize()) {
-        // Search box
+        // Search bar — preview-vs-edit state.
         Box(
             Modifier.fillMaxWidth()
                 .padding(horizontal = if (isTv) 32.dp else 16.dp)
                 .padding(bottom = 8.dp)
                 .clip(RoundedCornerShape(12.dp))
                 .background(SurfaceElevated)
+                .tvFocusable(
+                    shape = RoundedCornerShape(12.dp),
+                    onClick = { liveSearchEditing = true },
+                )
                 .padding(horizontal = 12.dp, vertical = 10.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Filled.Search, null, tint = TextMuted,
                     modifier = Modifier.size(18.dp))
-                BasicTextField(
-                    value = state.liveQuery,
-                    onValueChange = vm::onLiveQuery,
-                    singleLine = true,
-                    textStyle = TextStyle(color = TextPrimary, fontSize = 14.sp),
-                    cursorBrush = androidx.compose.ui.graphics.SolidColor(Accent),
-                    modifier = Modifier.fillMaxWidth().padding(start = 8.dp),
-                    decorationBox = { inner ->
-                        if (state.liveQuery.isEmpty()) {
-                            Text("Search channels…", color = TextMuted, fontSize = 14.sp)
-                        }
-                        inner()
-                    },
-                )
+                if (liveSearchEditing) {
+                    BasicTextField(
+                        value = state.liveQuery,
+                        onValueChange = vm::onLiveQuery,
+                        singleLine = true,
+                        textStyle = TextStyle(color = TextPrimary, fontSize = 14.sp),
+                        cursorBrush = androidx.compose.ui.graphics.SolidColor(Accent),
+                        modifier = Modifier
+                            .fillMaxWidth().padding(start = 8.dp)
+                            .focusRequester(searchFocus),
+                        decorationBox = { inner ->
+                            if (state.liveQuery.isEmpty()) {
+                                Text("Type to search…",
+                                    color = TextMuted, fontSize = 14.sp)
+                            }
+                            inner()
+                        },
+                    )
+                } else {
+                    // Read-only preview: shows current query (or placeholder)
+                    // without claiming D-pad focus or popping the IME.
+                    Text(
+                        text = state.liveQuery.ifEmpty { "Search channels — press OK" },
+                        color = if (state.liveQuery.isEmpty()) TextMuted else TextPrimary,
+                        fontSize = 14.sp,
+                        modifier = Modifier.fillMaxWidth().padding(start = 8.dp),
+                    )
+                }
             }
         }
 
@@ -158,38 +199,59 @@ private fun ChannelsView(state: UiState, vm: MainViewModel, isTv: Boolean) {
 
         // Channel grid - cards with logo + name + live dot
         val columns = if (isTv) 6 else 3
-        LazyVerticalGrid(
-            // focusRestorer so D-pad up from a row lands back at the same
-            // column it was on. Without this, vertical navigation on TV
-            // makes the cursor jump to the leftmost tile of each row
-            // which feels broken.
-            modifier = Modifier
-                .focusGroup()
-                .focusRestorer(),
-            columns = GridCells.Fixed(columns),
-            contentPadding = PaddingValues(
-                start = if (isTv) 32.dp else 16.dp,
-                end = if (isTv) 32.dp else 16.dp,
-                bottom = if (isTv) 32.dp else 24.dp,
-            ),
-            horizontalArrangement = Arrangement.spacedBy(if (isTv) 14.dp else 10.dp),
-            verticalArrangement = Arrangement.spacedBy(if (isTv) 14.dp else 10.dp),
-        ) {
-            items(filtered, key = { it.id }) { ch ->
-                ChannelCard(ch) { vm.playChannel(ch) }
+        // CRASH FIX: tapping a group chip (e.g. "USA") shrinks `filtered` and
+        // crashed the app with IllegalStateException "Release should only be
+        // called once" from LazyLayoutPinnableItem. The cause is focusRestorer
+        // holding a reference to a pinned item that disappears when the list
+        // shrinks. Wrapping the grid in key(group, q) forces a fresh
+        // LazyVerticalGrid (and a fresh focusRestorer state) whenever the
+        // filter changes — the buggy pinnable item gets released cleanly
+        // with the old composition instead of being touched twice.
+        key(group, q) {
+            LazyVerticalGrid(
+                // focusRestorer so D-pad up from a row lands back at the same
+                // column it was on. Without this, vertical navigation on TV
+                // makes the cursor jump to the leftmost tile of each row
+                // which feels broken.
+                modifier = Modifier
+                    .focusGroup()
+                    .focusRestorer(),
+                columns = GridCells.Fixed(columns),
+                contentPadding = PaddingValues(
+                    start = if (isTv) 32.dp else 16.dp,
+                    end = if (isTv) 32.dp else 16.dp,
+                    bottom = if (isTv) 32.dp else 24.dp,
+                ),
+                horizontalArrangement = Arrangement.spacedBy(if (isTv) 14.dp else 10.dp),
+                verticalArrangement = Arrangement.spacedBy(if (isTv) 14.dp else 10.dp),
+            ) {
+                items(filtered, key = { it.id }) { ch ->
+                    ChannelCard(ch, state.channelHealth[ch.id]) { vm.playChannel(ch) }
+                }
             }
         }
     }
 }
 
 @Composable
-private fun ChannelCard(ch: Channel, onClick: () -> Unit) {
+private fun ChannelCard(
+    ch: Channel,
+    health: ChannelHealthEntity?,
+    onClick: () -> Unit,
+) {
     Column(
         modifier = Modifier
             .clip(RoundedCornerShape(12.dp))
             .background(Surface)
+            // Brighter, thicker focus ring so the indicator reads from across
+            // a TV room. The default 3 dp Accent (purple) was lost on channel
+            // logos with dark backgrounds — users reported "can't see where
+            // the remote is at" when scrolling the grid.
             .tvFocusable(
                 shape = RoundedCornerShape(12.dp),
+                scaleOnFocus = 1.10f,
+                borderWidth = 4.dp,
+                borderColor = Color.White,
                 onClick = onClick,
             )
             .padding(8.dp),
@@ -227,6 +289,23 @@ private fun ChannelCard(ch: Channel, onClick: () -> Unit) {
             ) {
                 Text("LIVE",
                     color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+            }
+            // Bottom-left "Often unstable" badge when this channel has
+            // bounced through the recovery cascade multiple times.
+            // Amber so it reads as "warning, not blocking" — the channel
+            // is still tappable; user just won't be surprised by 110 s
+            // of "Reconnecting…" before it bounces back to the grid.
+            if (health?.unstableHint == true) {
+                Box(
+                    Modifier.align(Alignment.BottomStart).padding(6.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(Color(0xCCD97706))
+                        .padding(horizontal = 5.dp, vertical = 1.dp),
+                ) {
+                    Text("UNSTABLE",
+                        color = Color.White, fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold)
+                }
             }
         }
         Text(
@@ -283,9 +362,22 @@ private fun ScheduleView(state: UiState, vm: MainViewModel, isTv: Boolean) {
     val byId = remember(state.liveChannels) { state.liveChannels.associateBy { it.id } }
     val collapsed = remember { mutableStateMapOf<String, Boolean>() }
     val grouped = remember(state.liveSchedule) {
+        // Drop events that have already ended (best estimate: ~1h after
+        // start). dlhd doesn't publish runtimes, so we treat the next-hour
+        // mark as the cutoff — anything older than that has definitely
+        // aired. Without this filter the schedule shows yesterday's morning
+        // shows alongside tonight's events because the scraper still hands
+        // them up while they're inside the 3 h grace window.
+        val nowSec = System.currentTimeMillis() / 1000
+        val live = state.liveSchedule.filter {
+            val s = it.startUnix
+            s == null || s + 3_600 >= nowSec
+        }
         val buckets = LinkedHashMap<String, MutableList<ScheduleEvent>>()
-        for (e in state.liveSchedule) buckets.getOrPut(e.category) { mutableListOf() }.add(e)
-        buckets.map { (k, v) -> k to v.sortedBy { it.time } }
+        for (e in live) buckets.getOrPut(e.category) { mutableListOf() }.add(e)
+        // Sort inside each bucket by the authoritative startUnix when set;
+        // unparseable entries sink to the end.
+        buckets.map { (k, v) -> k to v.sortedBy { it.startUnix ?: Long.MAX_VALUE } }
     }
 
     LazyColumn(
@@ -336,7 +428,7 @@ private fun EventRow(
         Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(e.time, color = Color(0xFF9CC8FF), fontSize = 12.sp,
+            Text(formatEventTime(e), color = Color(0xFF9CC8FF), fontSize = 12.sp,
                 fontWeight = FontWeight.Medium,
                 modifier = Modifier.padding(end = 10.dp))
             Text(e.title, color = TextPrimary, fontSize = 13.sp,
@@ -374,6 +466,28 @@ private fun EventRow(
             }
         }
     }
+}
+
+/** Render an event's time in the viewer's local timezone. dlhd publishes
+ *  the raw `time` field in UK time, so a Kenyan viewer would otherwise see
+ *  a 2-hour-off label. When [ScheduleEvent.startUnix] is available we
+ *  format it through `java.text.DateFormat` so the device's locale and TZ
+ *  do the right thing (e.g. "21:00" in EAT vs "19:00" in UK). The raw
+ *  [ScheduleEvent.time] is kept as a fallback for old catalog dumps that
+ *  pre-date the start_unix field. If the event is tomorrow in the local
+ *  TZ (common for late-evening UK shows that wrap past midnight in EAT),
+ *  we prefix with "Tom" so the user isn't confused about same-day-vs-next.
+ */
+private fun formatEventTime(e: ScheduleEvent): String {
+    val s = e.startUnix ?: return e.time
+    val ms = s * 1000L
+    val now = java.util.Calendar.getInstance().apply { timeInMillis = System.currentTimeMillis() }
+    val evt = java.util.Calendar.getInstance().apply { timeInMillis = ms }
+    val sameDay = now.get(java.util.Calendar.YEAR) == evt.get(java.util.Calendar.YEAR) &&
+        now.get(java.util.Calendar.DAY_OF_YEAR) == evt.get(java.util.Calendar.DAY_OF_YEAR)
+    val fmt = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
+    val label = fmt.format(java.util.Date(ms))
+    return if (sameDay) label else "Tom $label"
 }
 
 /** Shortens "USA (DADDY LIVE)" -> "USA", "Soccer Coverage" -> "Soccer Coverage". */

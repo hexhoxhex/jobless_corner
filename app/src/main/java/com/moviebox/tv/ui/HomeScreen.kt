@@ -38,6 +38,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.runtime.key
 import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -105,19 +106,31 @@ fun HomeScreen(state: UiState, vm: MainViewModel) {
             if (continueWatching.isNotEmpty()) {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     SectionHeader("Continue Watching")
-                    LazyRow(
-                        // focusRestorer + focusGroup: when the D-pad enters
-                        // this row from above/below, focus lands back on the
-                        // last tile the user was on instead of jumping to
-                        // index 0. Single biggest UX win for TV scrolling.
-                        modifier = Modifier
-                            .focusGroup()
-                            .focusRestorer(),
-                        contentPadding = PaddingValues(horizontal = if (isTv) 32.dp else 16.dp),
-                        horizontalArrangement = Arrangement.spacedBy(if (isTv) 16.dp else 12.dp),
+                    // CRASH FIX: wrap each focusRestorer LazyRow in `key()`
+                    // tied to the items' identity. Compose Foundation
+                    // throws IllegalStateException "Release should only be
+                    // called once" when focusRestorer holds a reference to
+                    // a pinned item that gets removed/replaced on data
+                    // change. Keying on the items' boundary IDs forces a
+                    // fresh LazyRow + focusRestorer whenever the row's
+                    // contents materially shift — avoiding the stale
+                    // pinned-item reference. Same root cause as the
+                    // USA-filter crash on LiveTvScreen.
+                    key(
+                        continueWatching.size,
+                        continueWatching.firstOrNull()?.key,
+                        continueWatching.lastOrNull()?.key,
                     ) {
-                        items(continueWatching, key = { it.key }) { h ->
-                            ContinueCard(h, onClick = { vm.resumeFrom(h) })
+                        LazyRow(
+                            modifier = Modifier
+                                .focusGroup()
+                                .focusRestorer(),
+                            contentPadding = PaddingValues(horizontal = if (isTv) 32.dp else 16.dp),
+                            horizontalArrangement = Arrangement.spacedBy(if (isTv) 16.dp else 12.dp),
+                        ) {
+                            items(continueWatching, key = { it.key }) { h ->
+                                ContinueCard(h, onClick = { vm.resumeFrom(h) })
+                            }
                         }
                     }
                 }
@@ -128,15 +141,21 @@ fun HomeScreen(state: UiState, vm: MainViewModel) {
             if (recs.isNotEmpty()) {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     SectionHeader("For You")
-                    LazyRow(
-                        modifier = Modifier
-                            .focusGroup()
-                            .focusRestorer(),
-                        contentPadding = PaddingValues(horizontal = if (isTv) 32.dp else 16.dp),
-                        horizontalArrangement = Arrangement.spacedBy(if (isTv) 16.dp else 12.dp),
+                    key(
+                        recs.size,
+                        recs.firstOrNull()?.subjectId,
+                        recs.lastOrNull()?.subjectId,
                     ) {
-                        items(recs, key = { it.subjectId }) { item ->
-                            PosterCard(item) { vm.openItem(item) }
+                        LazyRow(
+                            modifier = Modifier
+                                .focusGroup()
+                                .focusRestorer(),
+                            contentPadding = PaddingValues(horizontal = if (isTv) 32.dp else 16.dp),
+                            horizontalArrangement = Arrangement.spacedBy(if (isTv) 16.dp else 12.dp),
+                        ) {
+                            items(recs, key = { it.subjectId }) { item ->
+                                PosterCard(item) { vm.openItem(item) }
+                            }
                         }
                     }
                 }
@@ -145,15 +164,21 @@ fun HomeScreen(state: UiState, vm: MainViewModel) {
         items(home.rows, key = { it.title }) { row ->
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 SectionHeader(row.title)
-                LazyRow(
-                    modifier = Modifier
-                        .focusGroup()
-                        .focusRestorer(),
-                    contentPadding = PaddingValues(horizontal = 16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                key(
+                    row.items.size,
+                    row.items.firstOrNull()?.subjectId,
+                    row.items.lastOrNull()?.subjectId,
                 ) {
-                    items(row.items, key = { it.subjectId }) { item ->
-                        PosterCard(item) { vm.openItem(item) }
+                    LazyRow(
+                        modifier = Modifier
+                            .focusGroup()
+                            .focusRestorer(),
+                        contentPadding = PaddingValues(horizontal = 16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        items(row.items, key = { it.subjectId }) { item ->
+                            PosterCard(item) { vm.openItem(item) }
+                        }
                     }
                 }
             }
