@@ -1,113 +1,126 @@
 package com.moviebox.tv.debug
 
-import android.app.DownloadManager
-import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
-import android.net.Uri
-import android.os.Build
 import android.os.Environment
 import android.util.Log
-import androidx.core.content.ContextCompat
+import android.widget.Toast
 import androidx.core.content.FileProvider
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import java.io.File
+import java.io.FileOutputStream
+import java.util.concurrent.TimeUnit
 
 /**
- * Downloads a release APK via the system DownloadManager and pops the
- * install confirmation so the upgrade lands in one tap. The whole thing
- * runs from the device — no GitHub visit needed.
+ * Downloads a release APK from a public URL (the GitHub release page redirect
+ * chain typically resolves to release-assets.githubusercontent.com with a
+ * signed JWT) and pops the install confirmation so the upgrade lands in one
+ * tap. The whole thing runs from the device — no GitHub visit needed.
  *
- * Why DownloadManager: it survives recomposition, handles redirects,
- * shows a system notification with progress, and resumes cleanly across
- * Wi-Fi flaps. Far less code than rolling OkHttp + a foreground service.
+ * **Why not DownloadManager.** Earlier versions of this updater used the
+ * system DownloadManager. Multiple users reported the install failing with
+ * an HTTP 401. The root cause is a known quirk: when DownloadManager
+ * follows GitHub's 302 redirect from the public download URL to the signed
+ * `release-assets.githubusercontent.com` URL, some ROMs leak the original
+ * request's headers (or a stale cookie from the cookie jar) onto the
+ * redirect target. The signed-URL endpoint rejects unexpected auth with
+ * 401 instead of ignoring it.
  *
- * Why FileProvider: from Nougat onwards `Intent.ACTION_VIEW` on a `file://`
- * URI throws `FileUriExposedException`. The provider hands the installer
- * a `content://` URI that's grant-readable across processes.
+ * OkHttp's redirect follower discards cross-host auth headers per RFC 7235
+ * / RFC 9110, which keeps the signed URL request clean. Bonus: we get
+ * actionable error reporting (HTTP code, exception type) into our own
+ * logs instead of opaque DownloadManager.STATUS_FAILED codes.
  */
 object UpdateInstaller {
 
     private const val TAG = "UpdateInstaller"
 
-    /**
-     * Kick off the download. The receiver registered below fires the install
-     * intent once the file is on disk. Returns the download ID, or -1 if
-     * we couldn't enqueue (no DownloadManager, malformed URL, etc.).
-     */
-    fun download(context: Context, apkUrl: String, version: String): Long {
-        val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as? DownloadManager
-            ?: return -1L
-        registerReceiverOnce(context)
-        val filename = "vijanabarubaru-$version.apk"
-        // Clean any stale copy with the same name — DownloadManager won't
-        // overwrite by default and would silently append " (1)" etc.
-        runCatching {
-            File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), filename).delete()
-        }
-        val req = DownloadManager.Request(Uri.parse(apkUrl))
-            .setTitle("Vijana BaruBaru update")
-            .setDescription("Downloading $version…")
-            .setMimeType("application/vnd.android.package-archive")
-            .setDestinationInExternalFilesDir(
-                context,
-                Environment.DIRECTORY_DOWNLOADS,
-                filename,
-            )
-            .setNotificationVisibility(
-                DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED,
-            )
-            .setAllowedOverMetered(true)
-        val id = dm.enqueue(req)
-        Log.i(TAG, "enqueued $apkUrl as id=$id")
-        return id
-    }
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    /** Tracks in-flight downloads so the broadcast receiver knows which file
-     *  to install when DownloadManager fires its completion broadcast. */
-    private val pending = mutableMapOf<Long, File>()
+    private val client: OkHttpClient = OkHttpClient.Builder()
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .build()
 
-    @Volatile private var receiverRegistered = false
-
-    /** Register a process-wide receiver exactly once. */
-    @Synchronized
-    private fun registerReceiverOnce(context: Context) {
-        if (receiverRegistered) return
+    /** Kick off the download. Non-blocking; returns the in-flight Job so
+     *  callers can cancel if the user backs out. Errors surface as toasts
+     *  + LiveDiag logs; on success the system installer pops up. */
+    fun download(context: Context, apkUrl: String, version: String): Job {
         val app = context.applicationContext
-        val filter = IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE)
-        val receiver = object : BroadcastReceiver() {
-            override fun onReceive(c: Context?, intent: Intent?) {
-                val id = intent?.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L)
-                    ?: return
-                onDownloadComplete(app, id)
+        return scope.launch {
+            val file = destinationFile(app, version)
+            runCatching { file.delete() }
+            toast(app, "Downloading update…")
+            try {
+                val req = Request.Builder()
+                    .url(apkUrl)
+                    // GitHub asks public clients to identify themselves.
+                    // No Authorization header — we are anonymous.
+                    .header("User-Agent", "vijana-barubaru-updater/$version")
+                    .build()
+                client.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) {
+                        Log.e(TAG, "download failed HTTP ${resp.code} from $apkUrl")
+                        toast(app, "Update failed: HTTP ${resp.code}")
+                        return@launch
+                    }
+                    val body = resp.body ?: run {
+                        toast(app, "Update failed: empty body")
+                        return@launch
+                    }
+                    val total = body.contentLength().takeIf { it > 0 } ?: -1L
+                    body.byteStream().use { input ->
+                        FileOutputStream(file).use { out ->
+                            val buf = ByteArray(64 * 1024)
+                            var soFar = 0L
+                            var lastReport = -1
+                            while (true) {
+                                val n = input.read(buf)
+                                if (n <= 0) break
+                                out.write(buf, 0, n)
+                                soFar += n
+                                if (total > 0) {
+                                    val pct = (soFar * 100 / total).toInt()
+                                    // Don't spam logcat — only on 10%
+                                    // boundaries.
+                                    if (pct / 10 != lastReport) {
+                                        lastReport = pct / 10
+                                        Log.i(TAG, "download $version: ${pct}%")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Log.i(TAG, "download complete: ${file.absolutePath} (${file.length()} bytes)")
+                withContext(Dispatchers.Main) { install(app, file) }
+            } catch (e: Exception) {
+                Log.e(TAG, "download exception: ${e.message}", e)
+                toast(app, "Update failed: ${e.message?.take(80) ?: e.javaClass.simpleName}")
             }
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            ContextCompat.registerReceiver(
-                app, receiver, filter, ContextCompat.RECEIVER_EXPORTED,
-            )
-        } else {
-            @Suppress("UnspecifiedRegisterReceiverFlag")
-            app.registerReceiver(receiver, filter)
-        }
-        receiverRegistered = true
     }
 
-    private fun onDownloadComplete(app: Context, id: Long) {
-        val dm = app.getSystemService(Context.DOWNLOAD_SERVICE) as? DownloadManager ?: return
-        val q = DownloadManager.Query().setFilterById(id)
-        dm.query(q)?.use { c ->
-            if (!c.moveToFirst()) return
-            val statusCol = c.getColumnIndex(DownloadManager.COLUMN_STATUS)
-            val uriCol = c.getColumnIndex(DownloadManager.COLUMN_LOCAL_URI)
-            val status = if (statusCol >= 0) c.getInt(statusCol) else -1
-            if (status != DownloadManager.STATUS_SUCCESSFUL) {
-                Log.w(TAG, "download $id ended with status=$status")
-                return
-            }
-            val localUri = if (uriCol >= 0) c.getString(uriCol) else null
-            val path = localUri?.let { Uri.parse(it).path } ?: return
-            install(app, File(path))
+    private fun destinationFile(context: Context, version: String): File {
+        val dir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+            ?: context.cacheDir
+        if (!dir.exists()) dir.mkdirs()
+        // Match the FileProvider path declared in res/xml/update_provider_paths.xml.
+        return File(dir, "vijanabarubaru-$version.apk")
+    }
+
+    private suspend fun toast(context: Context, message: String) {
+        withContext(Dispatchers.Main) {
+            runCatching { Toast.makeText(context, message, Toast.LENGTH_LONG).show() }
         }
     }
 
