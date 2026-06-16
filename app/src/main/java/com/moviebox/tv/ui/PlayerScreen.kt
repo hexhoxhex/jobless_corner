@@ -108,6 +108,30 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
     val isLandscape =
         LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
     var controlsVisible by remember { mutableStateOf(true) }
+    // Mirror overlay visibility to the singleton MainActivity's
+    // dispatchKeyEvent reads. Without this gate, DPAD_LEFT/RIGHT seeks
+    // 10s even while the user is trying to navigate the overlay's own
+    // buttons — the "remote becomes useless when watching" complaint.
+    LaunchedEffect(controlsVisible) {
+        com.moviebox.tv.remote.RemoteController.playerOverlayVisible = controlsVisible
+    }
+    // Mirror current episode coordinates into RemoteController so the
+    // phone SPA's /api/state can show or hide the "Next / Prev episode"
+    // controls based on whether we're on a series or a movie.
+    LaunchedEffect(state.currentSe, state.currentEp) {
+        com.moviebox.tv.remote.RemoteController.updateEpisode(
+            state.currentSe, state.currentEp,
+        )
+    }
+    DisposableEffect(Unit) {
+        onDispose {
+            // PlayerScreen left composition entirely — Home / list screens
+            // shouldn't be considered "overlay hidden" mode by the seek
+            // gate. Default back to "visible" so DPAD always passes
+            // through outside of playback.
+            com.moviebox.tv.remote.RemoteController.playerOverlayVisible = true
+        }
+    }
     var buffering by remember { mutableStateOf(false) }
     var playing by remember { mutableStateOf(true) }
     var statusPill by remember { mutableStateOf<String?>(null) }
@@ -599,11 +623,16 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
         // doesn't always fire cleanly on the heavier aoneroom resources,
         // and even when it does the seasons array may not be populated
         // yet. This overlay short-circuits both paths.
+        // Detection trigger: appear once we're inside the "credits window"
+        // (last 2 min by default). dlhd / aoneroom don't expose a real
+        // "credits start" timestamp, so we approximate — most episodes
+        // run end credits over the final ~90-120 s. Triggering this early
+        // means the user sees the Up Next card during credits and can
+        // either tap Play Now or wait for the 10-s auto-advance counter.
         val upNext = nextEpisodeFor(state)
-        val showUpNext = play != null && !play.isLive &&
-            state.currentSe != null && upNext != null &&
-            durationMs > 0 &&
+        val nearEnd = play != null && !play.isLive && durationMs > 0 &&
             positionMs >= (durationMs - UP_NEXT_WINDOW_MS)
+        val showUpNext = nearEnd && state.currentSe != null && upNext != null
         AnimatedVisibility(
             visible = showUpNext,
             modifier = Modifier.align(Alignment.BottomEnd)
@@ -613,27 +642,63 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
             exit = androidx.compose.animation.fadeOut(),
         ) {
             if (upNext != null) {
-                val remaining = ((durationMs - positionMs) / 1000)
-                    .coerceIn(0, UP_NEXT_WINDOW_MS / 1000)
-                UpNextCard(
-                    nextSeason = upNext.first,
-                    nextEpisode = upNext.second,
-                    secondsRemaining = remaining.toInt(),
-                    onPlayNow = { vm.playEpisode(upNext.first, upNext.second) },
-                    onDismiss = { vm.setAutoplay(false) },
-                )
-                // Auto-fire as soon as the player actually crosses the end.
-                LaunchedEffect(remaining, state.autoplayNext) {
-                    if (state.autoplayNext && remaining <= 0) {
+                // Independent 10-second auto-advance timer. Starts the moment
+                // the overlay first appears, NOT tied to wall-clock remaining
+                // duration — earlier versions kept the counter equal to "ms
+                // until duration end" which meant a 2-min credits window
+                // showed the counter at "120s, 119s, …" and only auto-fired
+                // at the very end of credits. The user's "10-second next
+                // button" complaint maps to a fixed 10-s window from when
+                // detection fires.
+                var counter by remember(upNext) { mutableStateOf(AUTO_ADVANCE_SECONDS) }
+                LaunchedEffect(upNext, state.autoplayNext) {
+                    counter = AUTO_ADVANCE_SECONDS
+                    while (counter > 0 && state.autoplayNext) {
+                        kotlinx.coroutines.delay(1_000)
+                        counter -= 1
+                    }
+                    if (state.autoplayNext) {
                         vm.playEpisode(upNext.first, upNext.second)
                     }
                 }
+                UpNextCard(
+                    nextSeason = upNext.first,
+                    nextEpisode = upNext.second,
+                    secondsRemaining = counter,
+                    onPlayNow = { vm.playEpisode(upNext.first, upNext.second) },
+                    onDismiss = { vm.setAutoplay(false) },
+                )
+            }
+        }
+        // End-of-content fallback when there's no next episode (movie OR
+        // last episode of the series). Drop the user back to the details
+        // page where "More like this" already lives — better than leaving
+        // them on a static last frame for the rest of the credits.
+        val endOfContent = nearEnd && state.currentSe == null && play?.isLive == false
+        val endOfSeries = nearEnd && state.currentSe != null && upNext == null
+        if (endOfContent || endOfSeries) {
+            LaunchedEffect(state.currentSe, play?.mediaUrl) {
+                // Wait for the actual end before bouncing — don't yank the
+                // user out mid-credits if they're enjoying them.
+                while (durationMs > 0 && positionMs < durationMs - 1_500) {
+                    kotlinx.coroutines.delay(500)
+                }
+                if (state.autoplayNext) vm.back()
             }
         }
     }
 }
 
-private const val UP_NEXT_WINDOW_MS: Long = 30_000
+/** How early (before content end) the Up Next overlay starts showing.
+ *  Sized for the typical end-credit length so the user sees the card during
+ *  credits instead of catching it in the last 30 seconds. */
+private const val UP_NEXT_WINDOW_MS: Long = 120_000
+
+/** Independent countdown that fires the next episode. Replaces the old
+ *  "remaining wall-clock until duration end" timer, which left users with
+ *  a 2-minute counter ticking through credits instead of giving them a
+ *  predictable 10-second window before auto-advance. */
+private const val AUTO_ADVANCE_SECONDS: Int = 10
 
 /** Compute the next (season, episode) tuple based on current UiState, or
  *  null if there is no next episode (last episode of last season, or

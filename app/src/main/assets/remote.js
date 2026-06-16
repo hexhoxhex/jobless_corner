@@ -727,6 +727,13 @@ async function refresh() {
       $("#pp").innerHTML = ic(wantPlay, "lg");
       $("#pp").dataset.icon = wantPlay;
     }
+    // Toggle the episode controls row visibility based on series state.
+    // CSS hides the row when data-show-eps="false" — we flip the attr so
+    // the user only sees Prev/Next/Stop while a series is playing.
+    const epsRow = document.querySelector(".np-eps");
+    if (epsRow) {
+      epsRow.dataset.showEps = (s.episode != null) ? "true" : "false";
+    }
     const volStr = (s.volume ?? "—") + (s.volume != null ? "%" : "");
     if ($("#volPct").textContent !== volStr) $("#volPct").textContent = volStr;
     if (!volSliding && typeof s.volume === "number" &&
@@ -785,6 +792,12 @@ $("#pp").onclick = () => {
   $("#pp").dataset.icon = swap;
   post("/api/playpause");
 };
+// Episode + close controls. Fire-and-forget POSTs — the next /api/state
+// poll refreshes the Now Playing card with the new episode title within
+// 1 s, so we don't bother waiting on the response.
+$("#epNext")?.addEventListener("click", () => post("/api/episode/next"));
+$("#epPrev")?.addEventListener("click", () => post("/api/episode/prev"));
+$("#npClose")?.addEventListener("click", () => post("/api/player/close"));
 $("#back10").onclick = () => {
   post("/api/seekby?ms=-10000");
   // Pull the displayed position back optimistically so the time text and

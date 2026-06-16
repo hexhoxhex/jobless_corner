@@ -60,12 +60,27 @@ object RemoteController {
 
     @Volatile var player: Player? = null
     @Volatile var audioManager: AudioManager? = null
+
+    /** True while PlayerScreen's overlay (transport buttons, progress
+     *  bar, title row, episode picker) is on screen. Read by
+     *  [MainActivity.dispatchKeyEvent] to decide whether DPAD_LEFT/RIGHT
+     *  should seek (overlay hidden — Netflix-style invisible-surface
+     *  seek) or pass through to the Compose focus tree so the user
+     *  navigates the overlay buttons (overlay visible). Defaults to true
+     *  because PlayerScreen mounts with the overlay open on entry. */
+    @Volatile var playerOverlayVisible: Boolean = true
     private var vmRef: WeakReference<MainViewModel>? = null
 
     @Volatile var nowPlayingTitle: String = ""
     @Volatile var positionMs: Long = 0
     @Volatile var durationMs: Long = 0
     @Volatile var isPlaying: Boolean = false
+    /** Current series episode coordinates. Null for movies + live TV. The
+     *  phone SPA reads these out of /api/state to decide whether to show
+     *  the "Prev / Next ep" controls — they'd be no-ops on a movie so we
+     *  hide them entirely there. */
+    @Volatile var currentSeason: Int? = null
+    @Volatile var currentEpisode: Int? = null
     @Volatile var selectedQuality: String = ""
     @Volatile var availableQualities: List<String> = emptyList()
     @Volatile var selectedDub: String = ""
@@ -91,6 +106,14 @@ object RemoteController {
         positionMs = 0; durationMs = 0; isPlaying = false
         selectedQuality = ""; availableQualities = emptyList()
         selectedDub = ""; availableDubs = emptyList()
+        currentSeason = null; currentEpisode = null
+    }
+
+    /** Mirror the currently-playing (season, episode) into RemoteController.
+     *  Pass null/null for movies + live so the SPA hides the episode
+     *  controls. Called by PlayerScreen when entry / episode change. */
+    fun updateEpisode(se: Int?, ep: Int?) {
+        currentSeason = se; currentEpisode = ep
     }
 
     fun updatePlayTracks(
@@ -209,6 +232,21 @@ object RemoteController {
         val s = vm?.state?.value ?: return@post
         if (!s.liveLoading && s.liveChannels.isEmpty()) vm?.loadLive()
     }
+
+    /** Advance to the next episode in the currently-playing series.
+     *  No-op for live or for movies. Triggered by the phone remote SPA
+     *  "Next ⏭" button — gave the user a way to skip ahead without
+     *  fumbling for the TV remote mid-show. */
+    fun nextEpisode() = main.post { vm?.nextEpisode() }
+
+    /** Drop back to the previous episode. Symmetric counterpart of
+     *  [nextEpisode]. Wraps backward across season boundaries. */
+    fun prevEpisode() = main.post { vm?.prevEpisode() }
+
+    /** Close the player and return to the previous screen — equivalent
+     *  to the user tapping Back. Lets the phone remote get out of a
+     *  playback the user picked up by accident. */
+    fun closePlayer() = main.post { vm?.back() }
 
     /** Play a live channel by its catalog id. */
     fun playLiveChannel(channelId: String) = main.post {

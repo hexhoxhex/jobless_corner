@@ -46,10 +46,18 @@ data class WatchHistoryEntity(
 
 @Dao
 interface WatchHistoryDao {
+    /**
+     * Raw continue-watching feed — every unfinished episode the user
+     * touched, newest first. Use [com.moviebox.tv.ui.MainViewModel.continueWatching]
+     * which groups by subjectId so the user sees ONE card per series
+     * (the most-recently-watched episode), not every episode they
+     * touched. Window functions would have been cleaner but Room's SQL
+     * parser doesn't accept them yet.
+     */
     @Query(
         "SELECT * FROM watch_history " +
             "WHERE durationMs = 0 OR positionMs < durationMs - 20000 " +
-            "ORDER BY updatedAt DESC LIMIT 30"
+            "ORDER BY updatedAt DESC LIMIT 90"
     )
     fun continueWatching(): Flow<List<WatchHistoryEntity>>
 

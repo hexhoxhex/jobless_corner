@@ -100,6 +100,12 @@ class RemoteServer(
             uri == "/api/state" -> json(stateJson())
 
             uri == "/api/playpause" -> { RemoteController.playPause(); ok() }
+            // Episode + close controls for the phone SPA — previously the
+            // user could only seek, not change episode or quit playback
+            // from the phone, which made the remote useless mid-series.
+            uri == "/api/episode/next" -> { RemoteController.nextEpisode(); ok() }
+            uri == "/api/episode/prev" -> { RemoteController.prevEpisode(); ok() }
+            uri == "/api/player/close" -> { RemoteController.closePlayer(); ok() }
             uri == "/api/quality" && method == Method.POST -> {
                 p("label")?.let { RemoteController.pickQuality(it) }; ok()
             }
@@ -506,6 +512,10 @@ class RemoteServer(
         .put("qualities", JSONArray(RemoteController.availableQualities))
         .put("dub", RemoteController.selectedDub)
         .put("dubs", JSONArray(RemoteController.availableDubs))
+        // SPA toggles the "Prev / Next episode" row on these. Null on
+        // movies + live (which don't have episode coordinates).
+        .put("season", RemoteController.currentSeason ?: JSONObject.NULL)
+        .put("episode", RemoteController.currentEpisode ?: JSONObject.NULL)
         .toString()
 
     private fun ok() = json("{\"ok\":true}")

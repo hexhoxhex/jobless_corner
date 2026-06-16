@@ -285,6 +285,10 @@ button.icon-btn { flex: 0 0 auto; padding: 8px 10px; }
   color: var(--muted); font-size: .75rem; margin-top: 5px;
 }
 .row { display: flex; gap: 10px; align-items: center; margin-top: 12px; }
+/* Episode-change controls live in their own row that only shows for a
+   series. The state poll flips data-show-eps based on whether the TV
+   reports a non-null episode. */
+.np-eps[data-show-eps="false"] { display: none; }
 .label-row { justify-content: space-between; align-items: center; margin: 0; }
 .list { display: flex; flex-direction: column; gap: 8px; }
 .list .row-item {

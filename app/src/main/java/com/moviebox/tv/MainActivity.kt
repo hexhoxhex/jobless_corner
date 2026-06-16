@@ -76,15 +76,36 @@ class MainActivity : ComponentActivity() {
         ) {
             val exo = RemoteController.player
             if (exo != null) {
+                val overlayUp = RemoteController.playerOverlayVisible
                 when (event.keyCode) {
-                    KeyEvent.KEYCODE_DPAD_LEFT,
+                    // DPAD_LEFT / DPAD_RIGHT are dual-purpose. When the
+                    // overlay is hidden (Netflix-style invisible surface
+                    // playback) DPAD seeks 10s. When the overlay is up,
+                    // DPAD navigates the overlay's own buttons (Play/Pause,
+                    // Episodes, Quality, Audio) — without this gate, the
+                    // overlay was unusable because every DPAD press just
+                    // seeked the stream and the focus never moved.
+                    // MEDIA_REWIND / MEDIA_FAST_FORWARD on dedicated remote
+                    // keys still seek unconditionally — those keys have
+                    // exactly one meaning.
+                    KeyEvent.KEYCODE_DPAD_LEFT -> {
+                        if (overlayUp) return super.dispatchKeyEvent(event)
+                        exo.seekTo((exo.currentPosition - 10_000).coerceAtLeast(0))
+                        vm.onDpadUsed()
+                        return true
+                    }
+                    KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                        if (overlayUp) return super.dispatchKeyEvent(event)
+                        exo.seekTo(exo.currentPosition + 10_000)
+                        vm.onDpadUsed()
+                        return true
+                    }
                     KeyEvent.KEYCODE_MEDIA_REWIND,
                     KeyEvent.KEYCODE_MEDIA_SKIP_BACKWARD -> {
                         exo.seekTo((exo.currentPosition - 10_000).coerceAtLeast(0))
                         vm.onDpadUsed()
                         return true
                     }
-                    KeyEvent.KEYCODE_DPAD_RIGHT,
                     KeyEvent.KEYCODE_MEDIA_FAST_FORWARD,
                     KeyEvent.KEYCODE_MEDIA_SKIP_FORWARD -> {
                         exo.seekTo(exo.currentPosition + 10_000)
@@ -101,8 +122,8 @@ class MainActivity : ComponentActivity() {
                     KeyEvent.KEYCODE_MEDIA_PAUSE -> {
                         exo.playWhenReady = false; return true
                     }
-                    // UP/DOWN/CENTER intentionally fall through so the
-                    // overlay's button focus + activation still work.
+                    // UP/DOWN/CENTER always fall through so the overlay's
+                    // button focus + activation work.
                 }
             }
         }

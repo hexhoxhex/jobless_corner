@@ -208,7 +208,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         watchDao.continueWatching()
             .map { list ->
                 val deny = TastePrefs.denyLanguages()
-                list.filter { Repository.keepByLanguage(it.title, deny) }
+                list.asSequence()
+                    .filter { Repository.keepByLanguage(it.title, deny) }
+                    // Collapse per-series: only the newest unfinished
+                    // episode per subjectId survives. Without this the
+                    // Continue Watching row shows every episode the user
+                    // ever touched — the "WHY are we showing all recent
+                    // episodes" complaint. Movies are unaffected (a movie
+                    // has exactly one row per subjectId anyway). Sequence
+                    // is already newest-first from the DAO, so distinctBy
+                    // keeps the freshest entry.
+                    .distinctBy { it.subjectId }
+                    .take(30)
+                    .toList()
             }
             .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
@@ -893,6 +905,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         else seasons.getOrNull(seasons.indexOfFirst { it.season == se } + 1)
             ?.let { it.season to 1 }
         next?.let { playEpisode(it.first, it.second) }
+    }
+
+    fun prevEpisode() {
+        val s = _state.value
+        val seasons = s.details?.seasons ?: return
+        val se = s.currentSe ?: return
+        val ep = s.currentEp ?: return
+        val prev = if (ep > 1) se to (ep - 1)
+        else {
+            val idx = seasons.indexOfFirst { it.season == se }
+            if (idx <= 0) null
+            else seasons[idx - 1].let { it.season to it.episodes.coerceAtLeast(1) }
+        }
+        prev?.let { playEpisode(it.first, it.second) }
     }
 
     fun toggleFavourite(item: Item) {
