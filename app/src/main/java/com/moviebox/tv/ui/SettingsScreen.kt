@@ -50,6 +50,7 @@ import com.moviebox.tv.ui.theme.Surface
 import com.moviebox.tv.ui.theme.SurfaceElevated
 import com.moviebox.tv.ui.theme.TextMuted
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 @Composable
 fun SettingsScreen(onClose: () -> Unit) {
@@ -62,121 +63,190 @@ fun SettingsScreen(onClose: () -> Unit) {
     val devices = RemoteAccess.all()
     val pairCode = RemoteAccess.pairCode
     val deny = TastePrefs.denyLanguages()
-    val scroll = rememberScrollState()
 
-    Column(
-        Modifier.fillMaxSize().background(Bg).verticalScroll(scroll),
+    // LazyColumn instead of Column + verticalScroll. On TV, focus
+    // traversal between focusable items inside a LazyColumn
+    // automatically scrolls them into view via the focus restorer.
+    // verticalScroll relies on touch / wheel only — DPAD presses
+    // landed on the offscreen items but the surrounding view never
+    // shifted, so the user couldn't reach the paired-devices section
+    // or the new About card with the remote.
+    LazyColumn(
+        Modifier.fillMaxSize().background(Bg),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        Row(
-            Modifier.fillMaxWidth().statusBarsPadding().padding(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            IconButton(onClick = onClose) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back")
+        item {
+            Row(
+                Modifier.fillMaxWidth().statusBarsPadding().padding(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = onClose) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back")
+                }
+                Text(
+                    "Settings — Remotes", fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold,
+                )
             }
-            Text(
-                "Settings — Remotes", fontSize = 20.sp,
-                fontWeight = FontWeight.Bold,
-            )
         }
 
         // Pair-code card
-        Column(
-            Modifier.fillMaxWidth().padding(horizontal = 16.dp)
-                .clip(RoundedCornerShape(14.dp)).background(Surface)
-                .padding(16.dp),
-        ) {
-            Text("Pair code", color = TextMuted, fontSize = 12.sp)
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
+        item {
+            Column(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp)
+                    .clip(RoundedCornerShape(14.dp)).background(Surface)
+                    .padding(16.dp),
             ) {
-                Text(
-                    pairCode, color = Accent, fontWeight = FontWeight.Bold,
-                    fontSize = 28.sp,
-                )
-                Spacer(Modifier.weight(1f))
-                OutlinedButton(onClick = { RemoteAccess.regeneratePairCode(); tick++ }) {
-                    Text("Regenerate")
+                Text("Pair code", color = TextMuted, fontSize = 12.sp)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Text(
+                        pairCode, color = Accent, fontWeight = FontWeight.Bold,
+                        fontSize = 28.sp,
+                    )
+                    Spacer(Modifier.weight(1f))
+                    OutlinedButton(onClick = { RemoteAccess.regeneratePairCode(); tick++ }) {
+                        Text("Regenerate")
+                    }
                 }
-            }
-            Text(
-                "Anyone who scans the QR or enters this code is added as a new remote.",
-                color = TextMuted, fontSize = 12.sp,
-            )
-        }
-
-        Spacer(Modifier.size(14.dp))
-
-        // Allow-all toggle
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text("Allow all devices on the Wi-Fi", fontWeight = FontWeight.SemiBold)
                 Text(
-                    "When off, new phones land in Pending until you approve them here.",
+                    "Anyone who scans the QR or enters this code is added as a new remote.",
                     color = TextMuted, fontSize = 12.sp,
                 )
             }
-            Switch(checked = allowAll, onCheckedChange = {
-                RemoteAccess.allowAll = it; tick++
-            })
         }
 
-        Spacer(Modifier.size(14.dp))
+        // Allow-all toggle
+        item {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Allow all devices on the Wi-Fi", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "When off, new phones land in Pending until you approve them here.",
+                        color = TextMuted, fontSize = 12.sp,
+                    )
+                }
+                Switch(checked = allowAll, onCheckedChange = {
+                    RemoteAccess.allowAll = it; tick++
+                })
+            }
+        }
 
         // Languages to hide (e.g. drop [Hindi] / [Tamil] titles)
-        Column(
-            Modifier.fillMaxWidth().padding(horizontal = 16.dp)
-                .clip(RoundedCornerShape(14.dp)).background(Surface)
-                .padding(16.dp),
-        ) {
-            Text("Languages to hide", fontWeight = FontWeight.SemiBold)
-            Text(
-                "Titles tagged with these (e.g. \"Hulk [Hindi]\") won't appear " +
-                    "in Home or Search.",
-                color = TextMuted, fontSize = 12.sp,
-            )
-            Spacer(Modifier.size(10.dp))
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+        item {
+            Column(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp)
+                    .clip(RoundedCornerShape(14.dp)).background(Surface)
+                    .padding(16.dp),
             ) {
-                LANG_OPTIONS.forEach { (code, label) ->
-                    LangChip(
-                        label = label, on = code in deny,
-                        onToggle = {
-                            val next = deny.toMutableSet()
-                            if (code in next) next.remove(code) else next.add(code)
-                            TastePrefs.setDenyLanguages(next); tick++
-                        }
-                    )
+                Text("Languages to hide", fontWeight = FontWeight.SemiBold)
+                Text(
+                    "Titles tagged with these (e.g. \"Hulk [Hindi]\") won't appear " +
+                        "in Home or Search.",
+                    color = TextMuted, fontSize = 12.sp,
+                )
+                Spacer(Modifier.size(10.dp))
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    LANG_OPTIONS.forEach { (code, label) ->
+                        LangChip(
+                            label = label, on = code in deny,
+                            onToggle = {
+                                val next = deny.toMutableSet()
+                                if (code in next) next.remove(code) else next.add(code)
+                                TastePrefs.setDenyLanguages(next); tick++
+                            }
+                        )
+                    }
                 }
             }
         }
 
-        Spacer(Modifier.size(14.dp))
-
-        Text(
-            "Paired devices", color = TextMuted, fontSize = 12.sp,
-            modifier = Modifier.padding(horizontal = 16.dp),
-        )
+        item {
+            Text(
+                "Paired devices", color = TextMuted, fontSize = 12.sp,
+                modifier = Modifier.padding(horizontal = 16.dp),
+            )
+        }
 
         if (devices.isEmpty()) {
-            Box(Modifier.fillMaxWidth().padding(28.dp), Alignment.Center) {
-                Text("No phones paired yet.", color = TextMuted)
+            item {
+                Box(Modifier.fillMaxWidth().padding(28.dp), Alignment.Center) {
+                    Text("No phones paired yet.", color = TextMuted)
+                }
             }
         } else {
-            Column(
-                Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                devices.forEach { d -> DeviceRow(d) { tick++ } }
-            }
+            items(devices, key = { it.token }) { d -> DeviceRow(d) { tick++ } }
         }
-        Spacer(Modifier.size(24.dp))
+
+        // About / version card. Lives at the bottom so the user can see
+        // which build is on the TV — the "is my update actually applied?"
+        // question came up enough that a visible version string is just
+        // table stakes. "Check now" forces an UpdateChecker refresh.
+        item { AboutCard() }
+    }
+}
+
+@Composable
+private fun AboutCard() {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val versionName = com.moviebox.tv.BuildConfig.VERSION_NAME
+    val versionCode = com.moviebox.tv.BuildConfig.VERSION_CODE
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp)
+            .clip(RoundedCornerShape(14.dp)).background(Surface)
+            .padding(16.dp),
+    ) {
+        Text("About this build", color = TextMuted, fontSize = 12.sp)
+        Spacer(Modifier.size(6.dp))
+        Text(
+            "Vijana BaruBaru TV", fontWeight = FontWeight.SemiBold,
+            fontSize = 16.sp,
+        )
+        Text(
+            "v$versionName (build $versionCode)",
+            color = TextMuted, fontSize = 13.sp,
+        )
+        Spacer(Modifier.size(10.dp))
+        Text(
+            "Updates publish automatically via GitHub Releases. Open this " +
+                "card after a tag push to confirm the new version installed.",
+            color = TextMuted, fontSize = 12.sp,
+        )
+        Spacer(Modifier.size(10.dp))
+        OutlinedButton(onClick = {
+            android.widget.Toast.makeText(
+                ctx,
+                "Checking GitHub Releases…",
+                android.widget.Toast.LENGTH_SHORT,
+            ).show()
+            // Defer to the existing UpdateChecker via a fresh CoroutineScope —
+            // re-using viewModelScope would couple this card to the VM and
+            // we'd rather keep the About card self-contained.
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                runCatching {
+                    com.moviebox.tv.debug.UpdateChecker()
+                        .check(com.moviebox.tv.BuildConfig.VERSION_NAME)
+                }
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    android.widget.Toast.makeText(
+                        ctx,
+                        "Done — banner appears on Home if a new version was found.",
+                        android.widget.Toast.LENGTH_SHORT,
+                    ).show()
+                }
+            }
+        }) {
+            Text("Check for updates")
+        }
     }
 }
 

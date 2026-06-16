@@ -58,24 +58,36 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Decode keystore
+      - name: Decode keystore + write local.properties
         env:
           KEYSTORE_B64: ${{ secrets.HEXHOXHEX_KEYSTORE_B64 }}
+          TMDB_TOKEN: ${{ secrets.TMDB_TOKEN }}
         run: |
           if [ -z "$KEYSTORE_B64" ]; then
             echo "::error::HEXHOXHEX_KEYSTORE_B64 secret is empty"
             exit 1
           fi
+          if [ -z "$TMDB_TOKEN" ]; then
+            echo "::error::TMDB_TOKEN secret is empty — runtime would 401 on TMDB calls"
+            exit 1
+          fi
           mkdir -p "$HOME/.hexhoxhex"
           echo "$KEYSTORE_B64" | base64 -d > "$HOME/.hexhoxhex/release.jks"
-          # Pass the path through to gradle via the same local.properties
+          # Pass paths + tokens through to gradle via the same local.properties
           # mechanism the local build uses. local.properties is gitignored
           # so this is throwaway scratch in the runner.
+          #
+          # TMDB_TOKEN ends up in BuildConfig at compile time via
+          # app/build.gradle.kts buildConfigField. Without it the
+          # Retrofit calls to api.themoviedb.org return 401 and the app
+          # can't render any movie metadata — that was the user's
+          # "github-built APK shows 401" report.
           cat > local.properties <<EOF
           HEXHOXHEX_KEYSTORE=$HOME/.hexhoxhex/release.jks
           HEXHOXHEX_STORE_PASS=${{ secrets.HEXHOXHEX_STORE_PASS }}
           HEXHOXHEX_KEY_ALIAS=${{ secrets.HEXHOXHEX_KEY_ALIAS }}
           HEXHOXHEX_KEY_PASS=${{ secrets.HEXHOXHEX_KEY_PASS }}
+          TMDB_TOKEN=${TMDB_TOKEN}
           EOF
 
       - name: Make gradlew executable
