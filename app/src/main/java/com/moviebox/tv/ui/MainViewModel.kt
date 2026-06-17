@@ -551,8 +551,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             // stored URL even if it might be expired — at least the user
             // sees something attempt to play instead of staring at a
             // loading spinner with no feedback.
-            val proxyUrl = if (proxyReady && resolved != null)
-                liveProxy.proxyUrl(ch.id) else null
+            //
+            // IMPORTANT — the gate used to be `proxyReady && resolved != null`,
+            // which meant a failure of the pre-resolve here (transient
+            // donis 5xx, briefly-dead daddy endpoint, anything) skipped
+            // the proxy entirely and pushed the user onto the catalog's
+            // IP-bound URL — which then 403s on any device that doesn't
+            // share the scraper's egress IP. The proxy already does its
+            // own resolve on the first /inner request, so the pre-resolve
+            // is purely a "prime the cache" optimisation. Don't let it
+            // gate the proxy URL.
+            val proxyUrl = if (proxyReady) liveProxy.proxyUrl(ch.id) else null
             val finalUrl = proxyUrl
                 ?: resolved
                 ?: ch.streamUrl

@@ -112,8 +112,17 @@ class LiveResolver(
                 "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 
         private fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
-            .connectTimeout(8, TimeUnit.SECONDS)
-            .readTimeout(8, TimeUnit.SECONDS)
+            // Tight timeouts because the proxy's [LiveStreamProxy.ensureCached]
+            // runBlocks on resolveStream — every second wasted here is a
+            // second NanoHTTPD's client thread is blocked, after which
+            // ExoPlayer's source-timeout fires and the connection drops
+            // with "broken pipe at NanoHTTPD" and the player stuck on
+            // the loading spinner. Old 8 s × 5 endpoints = 40 s worst
+            // case hang. New 4 s × 5 = 20 s; with the early-return on
+            // first success, typical resolve is <2 s.
+            .connectTimeout(4, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(4, java.util.concurrent.TimeUnit.SECONDS)
+            .callTimeout(6, java.util.concurrent.TimeUnit.SECONDS)
             // Follow donis -> Cloudflare redirects but not endlessly.
             .followRedirects(true)
             .followSslRedirects(true)

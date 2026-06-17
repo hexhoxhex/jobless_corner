@@ -402,10 +402,24 @@ class LiveStreamProxy(
     }
 
 
-    /** Returns a cached entry, resolving synchronously if necessary. */
+    /** Returns a cached entry, resolving synchronously if necessary.
+     *
+     *  Wrapped in a hard timeout so a flaky donis (sometimes 21 s before
+     *  returning anything from a Kenyan ISP) can't block NanoHTTPD's
+     *  client thread indefinitely. Without this, ExoPlayer's source-
+     *  timeout fires first and the connection drops with the "broken
+     *  pipe at NanoHTTPD" stack trace that left users stuck on the
+     *  loading spinner forever. Returning null here surfaces as a 503
+     *  to ExoPlayer, which retries — and the next /master request can
+     *  find a cache populated by the background refresh that's still
+     *  running on the IO dispatcher. */
     private fun ensureCached(channelId: String): CacheEntry? {
         cache[channelId]?.let { return it }
-        return runBlocking { refreshCache(channelId) }
+        return runBlocking {
+            kotlinx.coroutines.withTimeoutOrNull(ENSURE_CACHED_TIMEOUT_MS) {
+                refreshCache(channelId)
+            }
+        }
     }
 
     /** Re-resolve donis for this channel; populate the cache. Serialized
@@ -501,6 +515,12 @@ class LiveStreamProxy(
          *  of grace, comfortably under the live-edge window so ExoPlayer
          *  never falls behind the playable range. */
         private const val LAST_GOOD_TTL_MS: Long = 12_000L
+        /** Hard ceiling on how long [ensureCached] will block the NanoHTTPD
+         *  client thread waiting for a fresh donis resolution. Sized to
+         *  fit safely inside ExoPlayer's HLS source-timeout (default 8 s
+         *  for OkHttpDataSource); anything longer surfaces as a broken
+         *  pipe + stuck loading spinner. */
+        private const val ENSURE_CACHED_TIMEOUT_MS: Long = 7_000L
         private const val CHROME_UA =
             "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 " +
                 "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
