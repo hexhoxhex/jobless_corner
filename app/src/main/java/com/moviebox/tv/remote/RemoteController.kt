@@ -243,6 +243,12 @@ object RemoteController {
      *  [nextEpisode]. Wraps backward across season boundaries. */
     fun prevEpisode() = main.post { vm?.prevEpisode() }
 
+    /** SPA-triggered "Restart live playback" — bounces the LiveStreamProxy
+     *  socket and resets the failure counter. Recovery hatch for the
+     *  long-haul stuck-channel case where the proxy's socket has
+     *  silently degraded. */
+    fun resetLivePlayback() = main.post { vm?.resetLivePlayback() }
+
     /** Close the player and return to the previous screen — equivalent
      *  to the user tapping Back. Lets the phone remote get out of a
      *  playback the user picked up by accident. */

@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -458,11 +459,17 @@ private fun EventRow(
                 fontWeight = FontWeight.Medium, maxLines = 2,
                 overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
         }
-        Row(
+        FlowRow(
             Modifier.fillMaxWidth().padding(top = 6.dp, start = 60.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            e.channels.take(6).forEach { ref ->
+            // Was take(6). A FIFA World Cup row in the schedule can list 100+
+            // mirror channels (dlhd.pk dumps every country feed under one
+            // event) — clipping to 6 left users staring at "+98 hidden"
+            // worth of regional broadcasts. Show them all; FlowRow wraps
+            // onto additional lines and the lazy schedule list scrolls.
+            e.channels.forEach { ref ->
                 val real = byId[ref.id]
                 val available = real != null
                 Box(

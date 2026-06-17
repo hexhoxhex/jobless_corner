@@ -229,6 +229,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     init {
+        // Start the LiveStreamProxy eagerly so its 127.0.0.1 socket is
+        // bound by the time the user picks their first channel. The lazy
+        // start-on-first-playChannel path was prone to a race: if the
+        // user tapped a channel before the NanoHTTPD bind completed,
+        // [LiveStreamProxy.proxyUrl] returned null and playback fell
+        // through to the catalog's cached (often expired) stream URL —
+        // observed on the TV after a fresh launch where logcat showed
+        // no PROXY events and no listening port in /proc/$PID/net/tcp.
+        // Calling start() here is idempotent and cheap (~5 ms to bind).
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching { liveProxy.start() }
+        }
         // Mirror live favourites into UiState so Compose can read it
         // synchronously without each ChannelCard subscribing to a Flow.
         viewModelScope.launch {
@@ -905,6 +917,26 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         else seasons.getOrNull(seasons.indexOfFirst { it.season == se } + 1)
             ?.let { it.season to 1 }
         next?.let { playEpisode(it.first, it.second) }
+    }
+
+    /** Tear down + recreate the LiveStreamProxy + drop ExoPlayer state.
+     *  Called by the SPA's "Restart playback" button when the device has
+     *  been on a single playback long enough that the live subsystem has
+     *  silently degraded (NanoHTTPD socket pile-up, refresh coroutines
+     *  stuck, etc). Cheaper than a full force-stop because it leaves the
+     *  user on the same screen with state intact. */
+    fun resetLivePlayback() {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching { liveProxy.stop() }
+            runCatching { liveProxy.start() }
+            android.util.Log.w(
+                "LiveDiag",
+                "VM resetLivePlayback — proxy bounced",
+            )
+        }
+        liveResolveFailures = 0
+        lastResolveFailureAt = 0L
+        _state.update { it.copy(useLiveWebPlayer = false) }
     }
 
     fun prevEpisode() {

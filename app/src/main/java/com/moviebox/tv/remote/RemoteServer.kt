@@ -106,6 +106,13 @@ class RemoteServer(
             uri == "/api/episode/next" -> { RemoteController.nextEpisode(); ok() }
             uri == "/api/episode/prev" -> { RemoteController.prevEpisode(); ok() }
             uri == "/api/player/close" -> { RemoteController.closePlayer(); ok() }
+            // SPA-triggered live reset. Bounces the LiveStreamProxy socket
+            // and clears the resolve-failure counter without restarting
+            // the whole app. Surfaced as the "Restart live" button on the
+            // Live tab of the phone remote.
+            uri == "/api/live/reset" && method == Method.POST -> {
+                RemoteController.resetLivePlayback(); ok()
+            }
             uri == "/api/quality" && method == Method.POST -> {
                 p("label")?.let { RemoteController.pickQuality(it) }; ok()
             }
@@ -257,12 +264,16 @@ class RemoteServer(
                 val group = p("group").orEmpty()
                 val channels = RemoteController.liveChannels()
                 val arr = JSONArray()
+                // No artificial cap — the catalog has ~750 playable channels
+                // and clipping at 500 hid ~250 of them from the SPA's grid.
+                // The SPA already paginates client-side, so we can ship the
+                // whole list without bloating the wire (channels.json is
+                // ~200 KB JSON, fine over Wi-Fi).
                 channels
                     .asSequence()
                     .filter { it.isPlayable }
                     .filter { group.isEmpty() || it.group == group }
                     .filter { q.isEmpty() || it.name.lowercase().contains(q) }
-                    .take(500)
                     .forEach { c ->
                         arr.put(
                             JSONObject()
