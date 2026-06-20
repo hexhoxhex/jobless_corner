@@ -330,6 +330,7 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                     LocalConfiguration.current.locales[0].language,
                 resizeMode = resizeMode,
                 isLive = play.isLive,
+                onFatalLiveError = { vm.forceFallbackToWebPlayer() },
                 onLiveError = { msg ->
                     // Long-haul resilience cascade. Returns true if the
                     // caller should also call exo.prepare() to attempt
@@ -908,6 +909,13 @@ private fun VideoPlayer(
      *  after the in-place retry has failed too many times — in which
      *  case the player should NOT call prepare() (return false). */
     onLiveError: (String) -> Boolean = { true },
+    /** Permanent error that the native HLS path can never recover from
+     *  for this specific stream (e.g. AUDIO_TRACK_INIT_FAILED on a
+     *  channel whose audio sample-rate the device's AudioTrack rejects).
+     *  Caller is expected to switch transports immediately (force-fall
+     *  to the WebView player) rather than burn the resilience cascade
+     *  on errors that will recur every re-prepare. */
+    onFatalLiveError: () -> Unit = {},
     /** When true, ExoPlayer is built with the FFmpeg-preferred renderer
      *  factory — software decode — to sidestep a hardware codec that
      *  flaps on the current channel's content. See [LiveCodecFlapDetector]. */
@@ -926,6 +934,7 @@ private fun VideoPlayer(
     val downgradeState = rememberUpdatedState(tryDowngrade)
     val progressState = rememberUpdatedState(onProgress)
     val liveErrorState = rememberUpdatedState(onLiveError)
+    val fatalLiveState = rememberUpdatedState(onFatalLiveError)
     val stabilisingState = rememberUpdatedState(onStabilising)
     var lastKey by remember { mutableStateOf<String?>(null) }
     val liveState = rememberUpdatedState(isLive)
@@ -1303,7 +1312,7 @@ private fun VideoPlayer(
                         )
                         // Tell the resilience cascade to skip its retry
                         // budget and switch transports immediately.
-                        vm.forceFallbackToWebPlayer()
+                        fatalLiveState.value()
                         return
                     }
                     val msg = when {
