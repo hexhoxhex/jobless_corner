@@ -652,6 +652,23 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(useLiveWebPlayer = true) }
     }
 
+    /** Skip the resilience cascade entirely and switch to the WebView
+     *  fallback right now. Used by PlayerScreen when it catches an
+     *  unrecoverable native-player error (e.g.
+     *  ERROR_CODE_AUDIO_TRACK_INIT_FAILED on FOXNY USA — the stream's
+     *  24 kHz audio config is permanently rejected by this TCL's audio
+     *  system, no number of retries will fix it). Bypasses the
+     *  10-failure threshold of [shouldFallbackToWebPlayer]. */
+    fun forceFallbackToWebPlayer() {
+        if (_state.value.currentLiveChannel == null) return
+        android.util.Log.w(
+            "LiveDiag",
+            "VM ch=${_state.value.currentLiveChannel?.id} FORCE_FALLBACK_WEB " +
+                "(unrecoverable native error)",
+        )
+        _state.update { it.copy(useLiveWebPlayer = true) }
+    }
+
     /** Used by PlayerScreen to decide whether to fall back. */
     fun shouldFallbackToWebPlayer(): Boolean =
         liveResolveFailures >= MAX_RESOLVE_FAILURES_BEFORE_WEBVIEW

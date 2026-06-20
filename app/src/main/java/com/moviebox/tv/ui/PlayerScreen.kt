@@ -1077,6 +1077,21 @@ private fun VideoPlayer(
         // hardware but tolerate segment-boundary format hints without
         // tearing the codec down, which was the Realtek failure mode.
         val renderersFactory = androidx.media3.exoplayer.DefaultRenderersFactory(context)
+        // Audio path tweaks (both safe defaults regardless of channel):
+        //  - Float output uses 32-bit float PCM, which lets the resampler
+        //    handle odd source sample rates (FOXNY USA's 24 kHz audio
+        //    failed AudioTrack init with the int16 default — the user's
+        //    "FOXNY shows reconnecting" was actually an audio-init crash
+        //    cascading through onPlayerError).
+        //  - Capabilities-receiver lets ExoPlayer detect the device's
+        //    supported HDMI passthrough formats and avoid asking
+        //    AudioTrack for configs the TV can't accept.
+        if (isLive) {
+            runCatching {
+                @Suppress("UnstableApiUsage")
+                renderersFactory.setEnableAudioFloatOutput(true)
+            }
+        }
         if (preferSoftwareDecoder) {
             renderersFactory.setMediaCodecSelector { mimeType, requiresSecure, requiresTunneling ->
                 androidx.media3.exoplayer.mediacodec.MediaCodecUtil
@@ -1271,6 +1286,26 @@ private fun VideoPlayer(
                 )
                 if (liveState.value) {
                     val cause = error.cause
+                    // Audio-init failure is permanent for this stream's
+                    // format (e.g. FOXNY USA advertises 24 kHz stereo PCM
+                    // and the TCL audio system rejects that config). The
+                    // native HLS path can never recover — re-preparing
+                    // gets the same error. Fast-path to the WebView
+                    // fallback, which uses the system browser's audio
+                    // path and is far more permissive about formats.
+                    if (error.errorCode == androidx.media3.common.PlaybackException
+                            .ERROR_CODE_AUDIO_TRACK_INIT_FAILED
+                    ) {
+                        android.util.Log.w(
+                            "LiveDiag",
+                            "PLAYER audio-init failure — fast-pathing " +
+                                "to WebView fallback for this channel",
+                        )
+                        // Tell the resilience cascade to skip its retry
+                        // budget and switch transports immediately.
+                        vm.forceFallbackToWebPlayer()
+                        return
+                    }
                     val msg = when {
                         cause is androidx.media3.datasource.HttpDataSource
                             .InvalidResponseCodeException &&
