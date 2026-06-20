@@ -115,6 +115,26 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
     LaunchedEffect(controlsVisible) {
         com.moviebox.tv.remote.RemoteController.playerOverlayVisible = controlsVisible
     }
+    // When the WebView fallback (LiveWebPlayer) is active, ExoPlayer's
+    // periodic updatePlayback never fires, so RemoteController.title and
+    // friends sit at whatever the last ExoPlayer call left them — the
+    // phone SPA / Now Playing card show "" instead of the channel name.
+    // Mirror the channel directly so the user can see what's on TV from
+    // any remote pane while the WebView is doing the playing.
+    LaunchedEffect(
+        state.useLiveWebPlayer,
+        state.currentLiveChannel?.id,
+        state.play?.title,
+    ) {
+        if (state.useLiveWebPlayer && state.currentLiveChannel != null) {
+            com.moviebox.tv.remote.RemoteController.updatePlayback(
+                title = state.currentLiveChannel.displayName,
+                pos = 0L,
+                dur = 0L,
+                playing = true,
+            )
+        }
+    }
     // Mirror current episode coordinates into RemoteController so the
     // phone SPA's /api/state can show or hide the "Next / Prev episode"
     // controls based on whether we're on a series or a movie.
