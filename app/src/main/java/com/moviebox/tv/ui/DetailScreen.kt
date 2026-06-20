@@ -172,7 +172,29 @@ fun DetailScreen(state: UiState, vm: MainViewModel) {
                 when {
                     state.detailLoading ->
                         CircularProgressIndicator(Modifier.size(28.dp))
-                    state.details != null -> SeriesEpisodes(state, vm)
+                    state.details != null -> {
+                        // Don't render the episode picker if the source has
+                        // no seasons OR no episodes inside any season. TMDB
+                        // sometimes classifies a single-release film as
+                        // mediaType=tv and aoneroom answers with an empty
+                        // seasons array — the old code rendered the picker
+                        // anyway, so the user tapped an episode chip and
+                        // got the "episode not available" error. Show
+                        // an honest "no episodes available yet" line
+                        // instead so the user knows it's not them.
+                        val seasons = state.details?.seasons.orEmpty()
+                        val hasEpisodes = seasons.any { it.episodes > 0 }
+                        if (hasEpisodes) {
+                            SeriesEpisodes(state, vm)
+                        } else {
+                            Text(
+                                "No episodes available yet — the source hasn't " +
+                                    "indexed this series. Try again later.",
+                                color = TextMuted, fontSize = 13.sp,
+                                modifier = Modifier.padding(top = 8.dp),
+                            )
+                        }
+                    }
                 }
             }
             Spacer(Modifier.height(12.dp))

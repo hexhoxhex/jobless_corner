@@ -376,9 +376,32 @@ class Repository(
         // episode in the list, which broke positional indexing and ended up
         // pointing at the same big file for every episode (visible to the
         // user as every episode showing the season's total runtime).
-        val file = data.list.firstOrNull { it.se == season && it.ep == episode }
-            ?: data.list.getOrNull(offsetInPage)
-            ?: throw ApiException("Episode $episode of season $season missing.")
+        val taggedMatch = data.list.firstOrNull { it.se == season && it.ep == episode }
+        val file = taggedMatch
+            ?: run {
+                // No (se, ep) tag match. Positional fallback is dangerous
+                // here — aoneroom's seasonInfo.maxEp counts go stale (see
+                // bug report: "series at S3E1 sometimes plays from other
+                // seasons"). When the page we computed via offsetEpisodes
+                // returns a file whose embedded (se, ep) tag doesn't match
+                // what we asked for, we previously silently played it
+                // anyway. That's how the user got S1E5 when they meant
+                // S3E1. Validate the positional pick instead.
+                val positional = data.list.getOrNull(offsetInPage)
+                    ?: throw ApiException("Episode $episode of season $season missing.")
+                val posSe = positional.se
+                val posEp = positional.ep
+                if (posSe != null && posEp != null &&
+                    (posSe != season || posEp != episode)
+                ) {
+                    throw ApiException(
+                        "Episode $episode of season $season missing " +
+                            "(positional fallback picked S${posSe}E${posEp}, " +
+                            "refusing to silently play wrong content).",
+                    )
+                }
+                positional
+            }
         return file to available
     }
 

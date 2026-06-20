@@ -903,6 +903,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun playEpisode(se: Int, ep: Int, restoreResume: Boolean = false) {
         skipResumeNext = !restoreResume
         _state.update { it.copy(currentSe = se, currentEp = ep) }
+        // Mirror to RemoteController *synchronously*, before the resolve
+        // coroutine runs. The PlayerScreen LaunchedEffect that used to
+        // do this fires on Compose recomposition, which can be a frame
+        // (~16 ms) behind the state mutation — and during that frame
+        // the SPA polling /api/state shows the OLD episode. Fixing the
+        // mirror here means every poll sees the new episode the moment
+        // the user tapped Next.
+        com.moviebox.tv.remote.RemoteController.updateEpisode(se, ep)
         resolve()
     }
 

@@ -82,6 +82,14 @@ class LiveStreamProxy(
          *  "stop and play". */
         var lastGoodBody: String? = null,
         var lastGoodAtMs: Long = 0L,
+        /** Last few segment URIs we actually served to ExoPlayer (newest
+         *  last). When we cross a sibling boundary, scan the new playlist
+         *  for any of these — if we find one, the new playlist overlaps
+         *  what the player just buffered, and we can trim the overlap
+         *  off and skip the EXT-X-DISCONTINUITY tag entirely. That kills
+         *  the "replay last 20 seconds at rotation" symptom users
+         *  reported. */
+        var recentSegments: ArrayDeque<String> = ArrayDeque(),
     )
     private val innerState = ConcurrentHashMap<String, InnerState>()
 
@@ -240,20 +248,38 @@ class LiveStreamProxy(
                 state.consecutive5xx = 0
                 val sourceChanged = state.lastServedFrom != null &&
                     state.lastServedFrom != entry.innerUrl
-                val needsDisc = state.rotationPending || sourceChanged
-                val body = if (needsDisc) injectDiscontinuity(resp.second) else resp.second
+                val crossingBoundary = state.rotationPending || sourceChanged
+
+                // Discontinuity-suppression: if we just crossed a sibling
+                // boundary but the new playlist's first segment is one we
+                // already served (mirror feeds + adjacent CDN nodes often
+                // share the same segment filenames in the live window),
+                // it's a true CONTINUATION — trim the overlap and skip
+                // the EXT-X-DISCONTINUITY tag. Without this, ExoPlayer
+                // would flush the codec at the splice and re-render the
+                // overlap segments from the new sibling, producing the
+                // "replay last 20s on rotation" symptom.
+                val (servedBody, discInserted) = if (crossingBoundary) {
+                    trimOverlapOrInjectDiscontinuity(
+                        resp.second, state.recentSegments,
+                    )
+                } else resp.second to false
+
                 state.rotationPending = false
                 state.lastServedFrom = entry.innerUrl
-                state.lastGoodBody = body
+                state.lastGoodBody = servedBody
                 state.lastGoodAtMs = System.currentTimeMillis()
+                rememberRecentSegments(state, servedBody)
+
                 val dt = System.currentTimeMillis() - tStart
                 Log.i(DIAG, "PROXY ch=$channelId inner OK attempt=$attempt " +
-                    "dt=${dt}ms disc=$needsDisc host=${hostOf(entry.innerUrl)} " +
-                    "mediaSeq=${extractMediaSeq(resp.second)}")
+                    "dt=${dt}ms disc=$discInserted host=${hostOf(entry.innerUrl)} " +
+                    "mediaSeq=${extractMediaSeq(servedBody)} " +
+                    "crossedBoundary=$crossingBoundary")
                 return NanoHTTPD.newFixedLengthResponse(
                     NanoHTTPD.Response.Status.OK,
                     "application/vnd.apple.mpegurl",
-                    body,
+                    servedBody,
                 )
             }
             if (resp != null) {
@@ -293,15 +319,22 @@ class LiveStreamProxy(
                         state.consecutive5xx = 0
                         state.rotationPending = false
                         state.lastServedFrom = refreshed.innerUrl
-                        state.lastGoodBody = ok.second
+                        // Same continuation check as the main success
+                        // path — trim overlap if the new sibling shares
+                        // segment URIs with what we just served.
+                        val (servedBody, disc) =
+                            trimOverlapOrInjectDiscontinuity(
+                                ok.second, state.recentSegments,
+                            )
+                        state.lastGoodBody = servedBody
                         state.lastGoodAtMs = System.currentTimeMillis()
-                        val body = injectDiscontinuity(ok.second)
+                        rememberRecentSegments(state, servedBody)
                         Log.i(DIAG, "PROXY ch=$channelId ROTATE OK " +
                             "newHost=${hostOf(refreshed.innerUrl)} " +
-                            "mediaSeq=${extractMediaSeq(ok.second)}")
+                            "mediaSeq=${extractMediaSeq(servedBody)} disc=$disc")
                         return NanoHTTPD.newFixedLengthResponse(
                             NanoHTTPD.Response.Status.OK,
-                            "application/vnd.apple.mpegurl", body,
+                            "application/vnd.apple.mpegurl", servedBody,
                         )
                     }
                 // Resolver swap happened but the new URL also failed right
@@ -361,6 +394,139 @@ class LiveStreamProxy(
             }
         }
         return "?"
+    }
+
+    /**
+     * Decide what to serve at a sibling boundary. Walks the new playlist's
+     * segment URIs; if any of them match a segment we recently served,
+     * everything up to and including that segment is overlap — drop it,
+     * serve only the new tail, and skip the EXT-X-DISCONTINUITY tag (the
+     * timeline really IS continuous, just hosted on a different host).
+     * If no overlap, fall back to injecting EXT-X-DISCONTINUITY before
+     * the first segment so ExoPlayer treats the splice as a fresh
+     * boundary instead of a media-sequence time-warp.
+     *
+     * Returns (body-to-serve, didInjectDiscontinuity).
+     */
+    private fun trimOverlapOrInjectDiscontinuity(
+        upstreamBody: String,
+        recentSegments: Collection<String>,
+    ): Pair<String, Boolean> {
+        if (recentSegments.isEmpty()) {
+            return upstreamBody to false
+        }
+        val seenSet = recentSegments.toHashSet()
+        val lines = upstreamBody.lines()
+        // Find segment line indices (non-blank, non-# lines).
+        val segmentLineIdx = lines.withIndex()
+            .filter { (_, raw) ->
+                val t = raw.trim()
+                t.isNotEmpty() && !t.startsWith("#")
+            }
+            .map { it.index }
+        if (segmentLineIdx.isEmpty()) {
+            return upstreamBody to false
+        }
+        // Walk segments newest-to-oldest in our recent set; find the
+        // LATEST overlapping segment in the new playlist and trim there.
+        var trimAtSegmentIdx = -1
+        for ((idx, lineIdx) in segmentLineIdx.withIndex()) {
+            val uri = lines[lineIdx].trim()
+            if (uri in seenSet) {
+                trimAtSegmentIdx = idx  // 0-based within the segment list
+            }
+        }
+        if (trimAtSegmentIdx < 0) {
+            // No overlap — true splice. Inject discontinuity.
+            return injectDiscontinuity(upstreamBody) to true
+        }
+        if (trimAtSegmentIdx == segmentLineIdx.lastIndex) {
+            // Every new segment is something we already served — there's
+            // nothing fresh to play. Serve the body unchanged; ExoPlayer
+            // will skip the dup segments by URI and we wait for the next
+            // playlist refresh.
+            return upstreamBody to false
+        }
+        // Compose a trimmed body: keep headers (#EXT-*) and the segments
+        // AFTER the overlap point. The MEDIA-SEQUENCE number must be
+        // bumped by the number of segments we dropped, so ExoPlayer
+        // stays in sync with the original numbering.
+        val keepFromSegment = trimAtSegmentIdx + 1
+        val droppedCount = trimAtSegmentIdx + 1
+        // The kept segment range starts at the (keepFromSegment)-th
+        // segment's preceding tags (EXTINF, EXT-X-KEY, etc). Easiest: keep
+        // all header lines, then iterate from the first segment line of
+        // the kept range outward, walking back to include each segment's
+        // EXTINF immediately above it.
+        val firstKeptLineIdx = segmentLineIdx[keepFromSegment]
+        // Find the start of the kept segment's group: walk back from
+        // firstKeptLineIdx while we see #EXT-X-* tags that belong to
+        // this segment (EXTINF, EXT-X-KEY, EXT-X-PROGRAM-DATE-TIME,
+        // EXT-X-DISCONTINUITY, EXT-X-BYTERANGE).
+        var groupStart = firstKeptLineIdx
+        while (groupStart > 0) {
+            val t = lines[groupStart - 1].trim()
+            if (t.startsWith("#EXTINF") ||
+                t.startsWith("#EXT-X-KEY") ||
+                t.startsWith("#EXT-X-PROGRAM-DATE-TIME") ||
+                t.startsWith("#EXT-X-BYTERANGE") ||
+                t.startsWith("#EXT-X-DISCONTINUITY")
+            ) {
+                groupStart -= 1
+            } else break
+        }
+        // Headers = everything before the first segment in the original.
+        val headerEnd = segmentLineIdx[0]
+        // Walk back from headerEnd to skip any per-segment tags that
+        // immediately preceded the first segment (they belong to it).
+        var headerCut = headerEnd
+        while (headerCut > 0) {
+            val t = lines[headerCut - 1].trim()
+            if (t.startsWith("#EXTINF") ||
+                t.startsWith("#EXT-X-KEY") ||
+                t.startsWith("#EXT-X-PROGRAM-DATE-TIME") ||
+                t.startsWith("#EXT-X-BYTERANGE") ||
+                t.startsWith("#EXT-X-DISCONTINUITY")
+            ) {
+                headerCut -= 1
+            } else break
+        }
+        val rebuilt = buildString {
+            for (i in 0 until headerCut) {
+                val raw = lines[i]
+                val t = raw.trim()
+                // Rewrite MEDIA-SEQUENCE: bump by the number of dropped
+                // segments so ExoPlayer's sequence math stays correct.
+                if (t.startsWith("#EXT-X-MEDIA-SEQUENCE:")) {
+                    val n = t.substringAfter(':').trim().toIntOrNull() ?: 0
+                    append("#EXT-X-MEDIA-SEQUENCE:")
+                    append(n + droppedCount)
+                    append('\n')
+                } else {
+                    append(raw); append('\n')
+                }
+            }
+            for (i in groupStart..lines.lastIndex) {
+                append(lines[i]); if (i < lines.lastIndex) append('\n')
+            }
+        }
+        return rebuilt to false
+    }
+
+    /** Push the new playlist's segment URIs into [InnerState.recentSegments],
+     *  keeping at most [RECENT_SEGMENTS_KEEP] of them. ExoPlayer's HLS
+     *  source buffers a handful of segments ahead; 12 is plenty to cover
+     *  the typical 60 s of live-edge buffer without bloating memory. */
+    private fun rememberRecentSegments(state: InnerState, body: String) {
+        for (raw in body.lineSequence()) {
+            val t = raw.trim()
+            if (t.isNotEmpty() && !t.startsWith("#")) {
+                state.recentSegments.addLast(t)
+                while (state.recentSegments.size > RECENT_SEGMENTS_KEEP) {
+                    state.recentSegments.removeFirst()
+                }
+            }
+        }
     }
 
     private fun injectDiscontinuity(body: String): String {
@@ -521,6 +687,12 @@ class LiveStreamProxy(
          *  for OkHttpDataSource); anything longer surfaces as a broken
          *  pipe + stuck loading spinner. */
         private const val ENSURE_CACHED_TIMEOUT_MS: Long = 7_000L
+        /** Keep this many recent segment URIs per channel so we can detect
+         *  overlap when the proxy crosses a sibling boundary. ExoPlayer's
+         *  live buffer is ~60 s at 4 s segments → ~15 segments, so 20 is
+         *  a comfortable ceiling that covers replays even when the proxy
+         *  has been silent for a couple of refresh cycles. */
+        private const val RECENT_SEGMENTS_KEEP: Int = 20
         private const val CHROME_UA =
             "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 " +
                 "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
