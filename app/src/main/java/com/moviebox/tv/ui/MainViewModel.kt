@@ -891,10 +891,25 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         resolve()
     }
 
-    fun playEpisode(se: Int, ep: Int) {
+    /** Switch playback to (se, ep). Defaults to a fresh start; opt into
+     *  resume-from-saved-position with [restoreResume]=true (used by the
+     *  episode list inside the details screen where "continue where I
+     *  left off" is the obvious expectation). The explicit Next/Prev
+     *  buttons leave restoreResume at its default false — tapping Next
+     *  has to start the next episode at 00:00, not 10 min in just
+     *  because the user happens to have grazed that episode before.
+     *  That was the "skip plays 10 mins forward" bug on the SPA + the
+     *  in-app Up Next card. */
+    fun playEpisode(se: Int, ep: Int, restoreResume: Boolean = false) {
+        skipResumeNext = !restoreResume
         _state.update { it.copy(currentSe = se, currentEp = ep) }
         resolve()
     }
+
+    /** One-shot flag consumed by [resolve] to decide whether to load the
+     *  saved watch-history position. Set by [playEpisode] when the caller
+     *  explicitly wants a fresh start. */
+    @Volatile private var skipResumeNext: Boolean = false
 
     fun changeQuality(label: String) { quality = label; resolve() }
     fun changeDub(name: String) { dub = name; resolve() }
@@ -1129,7 +1144,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val key = WatchHistoryEntity.keyOf(
                     subjectId, _state.value.currentSe, _state.value.currentEp,
                 )
-                val resume = watchDao.positionOf(key) ?: 0L
+                // Honour the one-shot "fresh start" request from
+                // playEpisode(restoreResume=false). Consumed here so the
+                // next ordinary resolve (quality/dub change) still gets
+                // the saved position.
+                val resume = if (skipResumeNext) 0L
+                else watchDao.positionOf(key) ?: 0L
+                skipResumeNext = false
                 _state.update {
                     it.copy(play = p, playLoading = false, resumeMs = resume)
                 }

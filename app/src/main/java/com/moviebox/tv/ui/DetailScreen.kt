@@ -231,7 +231,11 @@ private fun SeriesEpisodes(state: UiState, vm: MainViewModel) {
                     .clip(RoundedCornerShape(8.dp))
                     .background(SurfaceElevated)
                     .combinedClickable(
-                        onClick = { vm.playEpisode(season, ep) },
+                        // restoreResume=true — from the episode list inside
+                        // details, tapping an episode means "continue where
+                        // I left off". Different intent from the Next ⏭
+                        // button which restarts the next episode at 00:00.
+                        onClick = { vm.playEpisode(season, ep, restoreResume = true) },
                         onLongClick = {
                             if (dItem != null) vm.downloadEpisode(dItem, season, ep)
                         },
