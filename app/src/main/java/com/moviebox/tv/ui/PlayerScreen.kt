@@ -1083,6 +1083,26 @@ private fun VideoPlayer(
                     .getDecoderInfos(mimeType, requiresSecure, requiresTunneling)
                     .filter { !it.hardwareAccelerated }
             }
+        } else if (isLive) {
+            // Hardware-first selector. Default Media3 selector returned
+            // c2.android.avc.decoder (Google's software AVC) for some live
+            // channels (e.g. FOXNY USA 720p60) when tunneling was on, even
+            // though the TCL Realtek hardware AVC decoder is present and
+            // capable. The fallback happens because the hardware decoder
+            // refused tunneling for that specific stream's CSD; the
+            // selector then picked the next "tunneling-supporting" entry,
+            // which on Android is always the software decoder. The result
+            // was 720p60 software decode → MediaCodec::flush every 2 s and
+            // ~600 dropped frames per minute (the user's "reconnecting"
+            // complaint). Sort hardware-accelerated decoders first;
+            // tunneling still applies if the chosen HW one supports it,
+            // otherwise we get a non-tunneled HW decoder which is still
+            // dramatically better than tunneled software.
+            renderersFactory.setMediaCodecSelector { mimeType, requiresSecure, requiresTunneling ->
+                androidx.media3.exoplayer.mediacodec.MediaCodecUtil
+                    .getDecoderInfos(mimeType, requiresSecure, requiresTunneling)
+                    .sortedByDescending { it.hardwareAccelerated }
+            }
         }
         ExoPlayer.Builder(context, renderersFactory)
             .setMediaSourceFactory(sourceFactory)
