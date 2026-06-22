@@ -1176,16 +1176,25 @@ private fun VideoPlayer(
                 .setUri(mediaUrl)
                 .setMimeType(MimeTypes.APPLICATION_M3U8)
                 .setLiveConfiguration(
-                    // Sit ~22s behind live (was 12s). At a 4s segment cadence
-                    // that's ~5 segments of cushion against an upstream
-                    // hiccup. The wider min/max bounds let ExoPlayer drift
-                    // back without snapping.
+                    // Target offset trimmed 22s → 10s and max 45s → 24s.
+                    // dlhd publishes a typical 6-segment × 4 s = ~24 s
+                    // manifest window; sitting 22 s back left only ~2 s
+                    // of buffer to the back edge before BehindLiveWindow
+                    // fired, and a maxOffset of 45 s allowed drift WELL
+                    // past the manifest window length. Nick / kolis with
+                    // ~1 s playlist fetches looped on this every 30-60 s
+                    // — error, snap to default position (still old slow
+                    // offset), drift again. New numbers keep us closer to
+                    // the live edge so a slow CDN can't push us off the
+                    // back. Also bump maxPlaybackSpeed to 1.10 so the
+                    // player can speed up to catch up to live edge after
+                    // a hiccup before falling out of the window.
                     MediaItem.LiveConfiguration.Builder()
-                        .setTargetOffsetMs(22_000)
-                        .setMinOffsetMs(15_000)
-                        .setMaxOffsetMs(45_000)
+                        .setTargetOffsetMs(10_000)
+                        .setMinOffsetMs(4_000)
+                        .setMaxOffsetMs(24_000)
                         .setMinPlaybackSpeed(0.95f)
-                        .setMaxPlaybackSpeed(1.05f)
+                        .setMaxPlaybackSpeed(1.10f)
                         .build()
                 )
                 .build()
