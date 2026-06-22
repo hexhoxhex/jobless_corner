@@ -1315,6 +1315,32 @@ private fun VideoPlayer(
                 )
                 if (liveState.value) {
                     val cause = error.cause
+                    // BEHIND_LIVE_WINDOW: the player drifted further behind
+                    // the live edge than the manifest covers (typical on
+                    // slow CDN siblings — kolis often does ~1 s playlist
+                    // fetches that drain the 22 s buffer faster than it
+                    // fills). The right recovery is just to jump to the
+                    // current live edge — NOT to refresh the proxy cache,
+                    // which doesn't help and counts against the WebView
+                    // fallback budget. Without this specific handler the
+                    // player loops every 30 s: error → refreshLiveStream
+                    // → re-prepare → buffers ~30 s → falls behind again
+                    // → error. User reported as "Nick plays for 30 s then
+                    // shows black screen / trying to recover" forever.
+                    if (error.errorCode == androidx.media3.common.PlaybackException
+                            .ERROR_CODE_BEHIND_LIVE_WINDOW
+                    ) {
+                        android.util.Log.w(
+                            "LiveDiag",
+                            "PLAYER BEHIND_LIVE_WINDOW — snap to live edge " +
+                                "(no proxy refresh, no failure-count bump)",
+                        )
+                        runCatching {
+                            exo.seekToDefaultPosition()
+                            exo.prepare()
+                        }
+                        return
+                    }
                     // Audio-init failure is permanent for this stream's
                     // format (e.g. FOXNY USA advertises 24 kHz stereo PCM
                     // and the TCL audio system rejects that config). The
