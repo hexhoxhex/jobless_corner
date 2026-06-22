@@ -99,12 +99,22 @@ fun LiveWebPlayer(
             )
         }
 
-        // Single hard 7s deadline per backend. We have no reliable way to
-        // know whether the inner video player has actually started
-        // (Adscore-protected pages load fine and stay black), so the safest
-        // signal is: if you've been staring at this backend for 7s, move on.
+        // Per-backend deadlines. We have no reliable way to know whether
+        // the inner video player has actually started (Adscore-protected
+        // pages load fine and stay black), so we time out blindly. BUT —
+        // the FIRST backend deserves real time: Chrome cold-start + the
+        // dlhd shell + the Adscore handshake + the iframe player's first
+        // frame easily takes 15-25 s on this TCL, especially right after
+        // ExoPlayer was just torn down. The old single 7 s deadline ate
+        // FOX USA's only working backend before it could even load (user
+        // report: "FOX USA not playing" — the WebView was being killed
+        // and recreated three times in ~21 s, never giving stream/54
+        // long enough to render). Give the first backend 25 s; later
+        // backends keep the shorter 8 s as a fast cycle-through.
         LaunchedEffect(pathIndex) {
-            kotlinx.coroutines.delay(7_000)
+            val budget = if (pathIndex == 0) FIRST_BACKEND_TIMEOUT_MS
+                else NEXT_BACKEND_TIMEOUT_MS
+            kotlinx.coroutines.delay(budget)
             if (pathIndex < paths.size - 1) pathIndex += 1
             else failedRef.value(
                 "\"${channel.displayName}\" isn't streaming right now.",
@@ -316,6 +326,17 @@ private fun WebViewBox(
  * we don't touch it. Designed to fail open — any exception during patch
  * leaves the rest of the page running normally.
  */
+/** How long to give the FIRST backend (usually "stream") to render
+ *  something. The big spike — Chrome cold start (~3 s on TCL) plus the
+ *  Adscore handshake (~5-10 s) plus the iframe player's first frame
+ *  (~3-5 s) — easily exceeds 15 s, so we budget 25 s here. */
+private const val FIRST_BACKEND_TIMEOUT_MS: Long = 25_000L
+
+/** Subsequent backends inherit the Chrome process already warmed by the
+ *  first attempt, so a quick 8 s cycle is enough to give each a chance
+ *  without leaving the user staring at black for ages. */
+private const val NEXT_BACKEND_TIMEOUT_MS: Long = 8_000L
+
 private const val ADSCORE_COUNTER_JS = """
 (function() {
   try {
