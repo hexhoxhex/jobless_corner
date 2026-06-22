@@ -69,12 +69,19 @@ fun LiveWebPlayer(
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    // Iframe pages tend to behave the same regardless of path — first 3 are
-    // enough. The rest just keep the user staring at black.
+    // Try all available backend paths, up to a hard cap. The first three
+    // (stream / cast / watch) all route to the donis infrastructure in
+    // most catalogs — when that's the failure mode, they ALL fail and
+    // capping at 3 means we never reach the later backends (plus /
+    // casting / player) that route to DIFFERENT hosts entirely
+    // (junkieembeds.pages.dev, wikisport.club, ksohls.ru) and can rescue
+    // the channel. Repro: FOX USA on this TCL — donis-served iframes
+    // sit in an Adscore challenge that never resolves; junkieembeds-
+    // served iframe loads in ~5 s. Old code never reached it.
     val paths = remember(channel.id) {
         channel.playerPaths.ifEmpty {
-            listOf("stream", "cast", "watch")
-        }.take(3)
+            listOf("stream", "cast", "watch", "plus", "casting", "player")
+        }.take(6)
     }
     var pathIndex by remember(channel.id) { mutableIntStateOf(0) }
     val failedRef = rememberUpdatedState(onAllPathsFailed)
