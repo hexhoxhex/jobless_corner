@@ -210,6 +210,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val deny = TastePrefs.denyLanguages()
                 list.asSequence()
                     .filter { Repository.keepByLanguage(it.title, deny) }
+                    // Drop subjectIds we've already learned are dead —
+                    // a movie that surfaced once, was tapped, failed to
+                    // resolve and got UnavailableCatalog.mark'd. Without
+                    // this filter it would still appear in Continue
+                    // Watching and the user would tap it again, get the
+                    // same error ("the recent shows a thing that isn't
+                    // actually there"). Same filter Repository uses for
+                    // home rows — keeps the two surfaces consistent.
+                    .filter { !UnavailableCatalog.isUnavailable(it.subjectId) }
                     // Collapse per-series: only the newest unfinished
                     // episode per subjectId survives. Without this the
                     // Continue Watching row shows every episode the user

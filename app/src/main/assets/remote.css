@@ -770,6 +770,17 @@ button.icon-btn { flex: 0 0 auto; padding: 8px 10px; }
   cursor: pointer; white-space: nowrap;
 }
 .schedule-event .ch-pill:active { transform: scale(.96); }
+/* Overflow channel dropdown — shows for events with 5+ mirror feeds
+   (FIFA / Premier League rows can list 80-100 of them). Styled to
+   blend with the surrounding pills. */
+.schedule-event .ch-more {
+  background: var(--surface-2); color: var(--fg);
+  border: 1px solid var(--line); border-radius: 12px;
+  font-size: .65rem; font-weight: 700;
+  padding: 3px 8px; cursor: pointer; appearance: none;
+  -webkit-appearance: none; -moz-appearance: none;
+  max-width: 140px;
+}
 
 .livegrid {
   display: grid; grid-template-columns: 1fr 1fr 1fr;
@@ -785,6 +796,15 @@ button.icon-btn { flex: 0 0 auto; padding: 8px 10px; }
   position: relative;
 }
 .livecard:active { transform: scale(.97); }
+/* Now-playing channel: green border + glow + scale lock so the tile
+   reads as "this is what you're watching", not "tap to play". */
+.livecard.now-playing {
+  border-color: #30a46c;
+  box-shadow: 0 0 0 1px #30a46c inset, 0 0 12px rgba(48, 164, 108, .35);
+  cursor: default;
+}
+.livecard.now-playing:active { transform: none; }
+.livecard.now-playing .live-pill { background: #30a46c; }
 .livecard .logo-wrap {
   width: 100%; aspect-ratio: 16/10; background: #0a0d14;
   border-radius: 8px; display: flex; align-items: center; justify-content: center;

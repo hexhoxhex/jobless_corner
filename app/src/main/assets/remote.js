@@ -734,6 +734,14 @@ async function refresh() {
     if (epsRow) {
       epsRow.dataset.showEps = (s.episode != null) ? "true" : "false";
     }
+    // Cache the title for the Live channel grid render so the
+    // currently-playing tile shows a "NOW PLAYING" badge instead of
+    // being clickable. Re-render the grid only when the title actually
+    // changed — otherwise every 1 s poll thrashes the DOM.
+    if (s.title !== lastNowPlayingTitle) {
+      lastNowPlayingTitle = s.title || "";
+      if (liveChannelsAll.length) renderLiveChannels();
+    }
     const volStr = (s.volume ?? "—") + (s.volume != null ? "%" : "");
     if ($("#volPct").textContent !== volStr) $("#volPct").textContent = volStr;
     if (!volSliding && typeof s.volume === "number" &&
@@ -1110,6 +1118,12 @@ function renderLiveChannels() {
     grid.innerHTML = `<div class="muted small" style="grid-column:1/-1">No channels match.</div>`;
     return;
   }
+  // Compare against the title in /api/state (case-insensitive, ignoring
+  // dlhd's group suffixes) so the currently-playing channel is marked
+  // visually and tapping it is a no-op — answers the user request
+  // "prevent users from clicking or picking the same channel that's
+  // already playing".
+  const nowPlaying = (lastNowPlayingTitle || "").trim().toLowerCase();
   grid.innerHTML = "";
   liveChannelsAll.forEach(ch => {
     const card = document.createElement("div");
@@ -1117,25 +1131,33 @@ function renderLiveChannels() {
     const logoHtml = ch.logo
       ? `<img src="${escapeHtml(ch.logo)}" alt="" onerror="this.remove()"/>`
       : `<span class="ph-letters">${escapeHtml((ch.name||"").slice(0,3).toUpperCase())}</span>`;
+    const isCurrent = nowPlaying && (ch.name || "").trim().toLowerCase() === nowPlaying;
+    if (isCurrent) card.classList.add("now-playing");
     card.innerHTML = `
       <div class="logo-wrap">
         ${logoHtml}
-        <span class="live-pill">LIVE</span>
+        <span class="live-pill">${isCurrent ? "NOW PLAYING" : "LIVE"}</span>
       </div>
       <div class="name">${escapeHtml(ch.name)}</div>`;
-    card.addEventListener("click", async () => {
-      try {
-        // Server reads params from the query string only (NanoHTTPD doesn't
-        // auto-parse form bodies). Match the /api/play VOD pattern.
-        await post("/api/live/play?id=" + encodeURIComponent(ch.id));
-        showToast(`Playing ${ch.name}`);
-      } catch (e) {
-        showToast("Couldn't play");
-      }
-    });
+    if (!isCurrent) {
+      card.addEventListener("click", async () => {
+        try {
+          // Server reads params from the query string only (NanoHTTPD doesn't
+          // auto-parse form bodies). Match the /api/play VOD pattern.
+          await post("/api/live/play?id=" + encodeURIComponent(ch.id));
+          showToast(`Playing ${ch.name}`);
+        } catch (e) {
+          showToast("Couldn't play");
+        }
+      });
+    }
     grid.appendChild(card);
   });
 }
+
+// Updated by the /api/state poll. The render loop compares this against
+// each channel's name to mark the now-playing tile.
+let lastNowPlayingTitle = "";
 
 async function renderLiveGroups() {
   // Distinct groups from the currently-loaded channel set (cheap, no extra fetch).
@@ -1328,15 +1350,30 @@ function renderLiveSchedule(data) {
       const row = document.createElement("div");
       row.className = "schedule-event";
       // Channel chips clickable — playing a channel from the schedule
-      // does the same as tapping it in the grid.
-      const chsHtml = (ev.channels || []).slice(0, 4).map(ch => {
+      // does the same as tapping it in the grid. For FIFA World Cup-style
+      // events that list 50-100+ mirror feeds, slicing to a few inline
+      // pills hid the rest. Show 4 inline; if there are more, render a
+      // <select> dropdown listing them all so the user can pick by name
+      // without scrolling a wall of pills.
+      const channels = ev.channels || [];
+      const INLINE_CHIPS = 4;
+      const inline = channels.slice(0, INLINE_CHIPS);
+      const overflow = channels.slice(INLINE_CHIPS);
+      const chsHtml = inline.map(ch => {
         const safe = (ch.name || ch.id).replace(/['"<>&]/g, "");
         return `<span class="ch-pill" data-cid="${ch.id}">${escapeHtml(safe)}</span>`;
       }).join("");
+      const moreHtml = overflow.length === 0 ? "" : `
+        <select class="ch-more" data-eid="${escapeHtml(ev.title || '')}">
+          <option value="">+${overflow.length} more…</option>
+          ${overflow.map(ch =>
+            `<option value="${ch.id}">${escapeHtml(ch.name || ch.id)}</option>`,
+          ).join("")}
+        </select>`;
       row.innerHTML = `
         <span class="when">${escapeHtml(ev.time || "")}</span>
         <span class="what">${escapeHtml(ev.title || "")}</span>
-        <span class="chs">${chsHtml}</span>`;
+        <span class="chs">${chsHtml}${moreHtml}</span>`;
       row.querySelectorAll(".ch-pill").forEach(pill => {
         pill.addEventListener("click", async () => {
           try {
@@ -1345,6 +1382,20 @@ function renderLiveSchedule(data) {
           } catch (e) { showToast("Couldn't play"); }
         });
       });
+      // Overflow dropdown — same play action as a pill.
+      const moreSel = row.querySelector(".ch-more");
+      if (moreSel) {
+        moreSel.addEventListener("change", async (e) => {
+          const id = e.target.value;
+          if (!id) return;
+          const label = e.target.options[e.target.selectedIndex].textContent;
+          try {
+            await post("/api/live/play?id=" + encodeURIComponent(id));
+            showToast(`Playing ${label}`);
+          } catch (err) { showToast("Couldn't play"); }
+          e.target.selectedIndex = 0;   // reset back to "+N more…"
+        });
+      }
       block.appendChild(row);
     });
     list.appendChild(block);
