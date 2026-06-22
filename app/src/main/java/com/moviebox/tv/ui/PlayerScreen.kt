@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.net.Uri
+import android.os.SystemClock
 import android.view.View
 import android.view.ViewGroup
 import androidx.compose.animation.AnimatedVisibility
@@ -721,6 +722,17 @@ private const val UP_NEXT_WINDOW_MS: Long = 120_000
  *  predictable 10-second window before auto-advance. */
 private const val AUTO_ADVANCE_SECONDS: Int = 10
 
+/** A live channel that fires this many ERROR_CODE_BEHIND_LIVE_WINDOW
+ *  events inside [BEHIND_LIVE_WINDOW_MS] gets force-fallback'd to the
+ *  WebView player. Even with snap-to-live recovery on every error, some
+ *  CDN siblings serve a manifest window smaller than the player's
+ *  configured offsets allow — we drift back every ~30s and the user
+ *  sees "plays, stops, plays, stops" forever. BBC One UK on zalis was
+ *  the repro. WebView's playback stack doesn't share the same windowing
+ *  constraints so it usually rescues these. */
+private const val BEHIND_THRESHOLD: Int = 4
+private const val BEHIND_LIVE_WINDOW_MS: Long = 3 * 60 * 1000L
+
 /** Compute the next (season, episode) tuple based on current UiState, or
  *  null if there is no next episode (last episode of last season, or
  *  seasons data hasn't loaded yet). */
@@ -956,6 +968,11 @@ private fun VideoPlayer(
     val liveErrorState = rememberUpdatedState(onLiveError)
     val fatalLiveState = rememberUpdatedState(onFatalLiveError)
     val stabilisingState = rememberUpdatedState(onStabilising)
+    // Track BehindLiveWindow recovery timestamps per-channel-session.
+    // remember(mediaUrl) means this resets when the user switches
+    // channels, so a previous channel's rotting manifest doesn't
+    // count against a freshly-played one.
+    val behindLiveWindow = remember(mediaUrl) { mutableListOf<Long>() }
     var lastKey by remember { mutableStateOf<String?>(null) }
     val liveState = rememberUpdatedState(isLive)
 
@@ -1339,10 +1356,37 @@ private fun VideoPlayer(
                     if (error.errorCode == androidx.media3.common.PlaybackException
                             .ERROR_CODE_BEHIND_LIVE_WINDOW
                     ) {
+                        // Count BehindLiveWindow events per channel. After
+                        // BEHIND_THRESHOLD in a rolling window, the snap-
+                        // to-live recovery isn't actually keeping up — the
+                        // CDN's manifest window is shorter than our offsets
+                        // tolerate, so we drift back every 30 s no matter
+                        // what we do. Surface this as a permanent native-
+                        // path failure and let the WebView fallback take
+                        // over (it's a different playback stack that
+                        // doesn't have the same windowing constraints).
+                        val now = SystemClock.elapsedRealtime()
+                        val recentBehind = behindLiveWindow
+                            .filter { now - it < BEHIND_LIVE_WINDOW_MS }
+                            .toMutableList()
+                            .apply { add(now) }
+                        behindLiveWindow.clear(); behindLiveWindow.addAll(recentBehind)
+                        if (recentBehind.size >= BEHIND_THRESHOLD) {
+                            android.util.Log.w(
+                                "LiveDiag",
+                                "PLAYER BEHIND_LIVE_WINDOW × ${recentBehind.size}" +
+                                    " in ${BEHIND_LIVE_WINDOW_MS / 1000}s — manifest" +
+                                    " window too short for native player; force" +
+                                    " WebView fallback",
+                            )
+                            behindLiveWindow.clear()
+                            fatalLiveState.value()
+                            return
+                        }
                         android.util.Log.w(
                             "LiveDiag",
-                            "PLAYER BEHIND_LIVE_WINDOW — snap to live edge " +
-                                "(no proxy refresh, no failure-count bump)",
+                            "PLAYER BEHIND_LIVE_WINDOW (${recentBehind.size}" +
+                                "/$BEHIND_THRESHOLD) — snap to live edge",
                         )
                         runCatching {
                             exo.seekToDefaultPosition()
