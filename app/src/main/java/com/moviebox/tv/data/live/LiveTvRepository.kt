@@ -32,11 +32,14 @@ class LiveTvRepository {
     private val scheduleAdapter = moshi.adapter<List<ScheduleEvent>>(
         Types.newParameterizedType(List::class.java, ScheduleEvent::class.java)
     )
+    private val healthAdapter = moshi.adapter(HealthSnapshot::class.java)
 
     @Volatile private var cachedChannels: List<Channel>? = null
     @Volatile private var cachedChannelsAt: Long = 0L
     @Volatile private var cachedSchedule: List<ScheduleEvent>? = null
     @Volatile private var cachedScheduleAt: Long = 0L
+    @Volatile private var cachedHealth: Map<String, HealthEntry>? = null
+    @Volatile private var cachedHealthAt: Long = 0L
 
     private suspend fun fetch(url: String): String = withContext(Dispatchers.IO) {
         http.newCall(Request.Builder().url(url).get().build()).execute().use { r ->
@@ -89,6 +92,39 @@ class LiveTvRepository {
     private fun List<Channel>.filterPlayable(includeAll: Boolean): List<Channel> =
         if (includeAll) this else filter { it.isPlayable }
 
+    /**
+     * Latest deep-sweep health snapshot keyed by channel id. The sweep
+     * (eyepapcorn_iptv `scripts/sweep_health.py`) runs every 15 min on
+     * GitHub Actions and probes the full playback chain — including the
+     * first segment byte — for every channel the scraper marked ok.
+     *
+     * **Advisory only**: this map is used by the UI to dim flagged
+     * channels with a "Often offline" badge. It NEVER gates playback —
+     * the user can still tap a "down" channel because the sweep runs
+     * from a different network than the device and false positives are
+     * cheap to overlook (the device retries on its own). Hiding based
+     * on the sweep would risk blinding healthy channels for users
+     * whose ISP differs from the GitHub Actions runner's egress.
+     *
+     * Returns empty map if health.json hasn't been published yet or
+     * the fetch failed — caller treats absence as "no signal".
+     */
+    suspend fun health(force: Boolean = false): Map<String, HealthEntry> {
+        val now = System.currentTimeMillis()
+        val cached = cachedHealth
+        if (!force && cached != null && now - cachedHealthAt < HEALTH_TTL_MS) {
+            return cached
+        }
+        val map = runCatching {
+            val body = fetch(HEALTH_URL)
+            val snap = healthAdapter.fromJson(body) ?: return@runCatching emptyMap()
+            snap.results.associateBy { it.id }
+        }.getOrElse { emptyMap() }
+        cachedHealth = map
+        cachedHealthAt = now
+        return map
+    }
+
     companion object {
         private const val REPO = "hexhoxhex/mkurugenzi_viewer"
         private const val BRANCH = "main"
@@ -96,8 +132,26 @@ class LiveTvRepository {
             "https://raw.githubusercontent.com/$REPO/$BRANCH"
         const val CHANNELS_URL = "$BASE/data/channels.json"
         const val SCHEDULE_URL = "$BASE/data/schedule.json"
+        const val HEALTH_URL = "$BASE/data/health.json"
 
         private const val CHANNELS_TTL_MS = 30 * 60 * 1000L   // 30 min
         private const val SCHEDULE_TTL_MS = 5 * 60 * 1000L    //  5 min
+        private const val HEALTH_TTL_MS = 20 * 60 * 1000L     // 20 min
     }
 }
+
+@com.squareup.moshi.JsonClass(generateAdapter = true)
+data class HealthSnapshot(
+    @com.squareup.moshi.Json(name = "swept_at") val sweptAt: Long = 0L,
+    val results: List<HealthEntry> = emptyList(),
+)
+
+@com.squareup.moshi.JsonClass(generateAdapter = true)
+data class HealthEntry(
+    val id: String,
+    val name: String = "",
+    /** "ok" or "down". The sweep treats "unreachable" as down. */
+    val status: String,
+    @com.squareup.moshi.Json(name = "fail_reason") val failReason: String? = null,
+    @com.squareup.moshi.Json(name = "checked_at") val checkedAt: Long = 0L,
+)

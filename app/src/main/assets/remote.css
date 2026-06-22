@@ -805,6 +805,17 @@ button.icon-btn { flex: 0 0 auto; padding: 8px 10px; }
 }
 .livecard.now-playing:active { transform: none; }
 .livecard.now-playing .live-pill { background: #30a46c; }
+/* "OFFLINE?" advisory — the CI sweep saw this channel fail recently.
+   Stay tappable; just signal to the user that it might not work.
+   Bottom-left so it doesn't fight the top-right LIVE pill. */
+.livecard .offline-pill {
+  position: absolute; bottom: 4px; left: 4px;
+  background: #6e6e6e; color: #fff;
+  font-size: .55rem; font-weight: 800; letter-spacing: .03em;
+  padding: 2px 5px; border-radius: 3px;
+}
+.livecard.often-offline { opacity: .65; }
+.livecard.often-offline.now-playing { opacity: 1; }
 .livecard .logo-wrap {
   width: 100%; aspect-ratio: 16/10; background: #0a0d14;
   border-radius: 8px; display: flex; align-items: center; justify-content: center;

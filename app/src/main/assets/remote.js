@@ -1133,10 +1133,18 @@ function renderLiveChannels() {
       : `<span class="ph-letters">${escapeHtml((ch.name||"").slice(0,3).toUpperCase())}</span>`;
     const isCurrent = nowPlaying && (ch.name || "").trim().toLowerCase() === nowPlaying;
     if (isCurrent) card.classList.add("now-playing");
+    // ch.sweep === "down" means the CI deep-probe (data/health.json) saw
+    // this channel fail its full playback chain on the most recent sweep.
+    // Advisory only — we still let the user tap it, because the sweep
+    // runs from a different network than the user's device and false
+    // positives are common.
+    const oftenOffline = ch.sweep === "down";
+    if (oftenOffline) card.classList.add("often-offline");
     card.innerHTML = `
       <div class="logo-wrap">
         ${logoHtml}
         <span class="live-pill">${isCurrent ? "NOW PLAYING" : "LIVE"}</span>
+        ${oftenOffline ? `<span class="offline-pill">OFFLINE?</span>` : ""}
       </div>
       <div class="name">${escapeHtml(ch.name)}</div>`;
     if (!isCurrent) {

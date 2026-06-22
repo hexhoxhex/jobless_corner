@@ -127,6 +127,11 @@ data class UiState(
      *  no recorded trouble — Compose looks it up by id to decide whether
      *  to show the "Often unstable" badge on the grid card. */
     val channelHealth: Map<String, ChannelHealthEntity> = emptyMap(),
+    /** Latest deep-sweep results from data/health.json. Advisory only —
+     *  drives a "Often offline" badge on channel cards. Channels not in
+     *  this map have no recent sweep data; treat as "unknown" (no badge,
+     *  no penalty). */
+    val channelSweep: Map<String, com.moviebox.tv.data.live.HealthEntry> = emptyMap(),
     /** Set of channelIds the user has starred. Drives the star overlay
      *  on each ChannelCard and the "Favourites" strip at the top of the
      *  LIVE tab. */
@@ -422,6 +427,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }.onFailure { e ->
                 _state.update {
                     it.copy(liveLoading = false, liveError = e.message)
+                }
+            }
+            // Fetch the deep-sweep health snapshot in parallel. Best-effort
+            // — if data/health.json hasn't been published yet (sweep cron
+            // hasn't run), the map stays empty and nothing changes about
+            // the live grid. Never blocks the user's live tab from
+            // rendering.
+            runCatching {
+                val sweep = liveRepo.health(force = force)
+                if (sweep.isNotEmpty()) {
+                    _state.update { it.copy(channelSweep = sweep) }
                 }
             }
         }

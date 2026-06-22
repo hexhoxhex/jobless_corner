@@ -269,18 +269,25 @@ class RemoteServer(
                 // The SPA already paginates client-side, so we can ship the
                 // whole list without bloating the wire (channels.json is
                 // ~200 KB JSON, fine over Wi-Fi).
+                val sweep = RemoteController.liveSweep()
                 channels
                     .asSequence()
                     .filter { it.isPlayable }
                     .filter { group.isEmpty() || it.group == group }
                     .filter { q.isEmpty() || it.name.lowercase().contains(q) }
                     .forEach { c ->
+                        // "sweep" is an advisory hint from data/health.json.
+                        // SPA renders an "Often offline" badge when status
+                        // is "down" but keeps the card clickable. Null
+                        // when no sweep data is available yet.
+                        val sweepStatus = sweep[c.id]?.status
                         arr.put(
                             JSONObject()
                                 .put("id", c.id)
                                 .put("name", c.displayName)
                                 .put("logo", c.logo ?: JSONObject.NULL)
                                 .put("group", c.group ?: JSONObject.NULL)
+                                .put("sweep", sweepStatus ?: JSONObject.NULL)
                         )
                     }
                 json(

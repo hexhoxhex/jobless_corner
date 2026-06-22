@@ -231,6 +231,7 @@ private fun ChannelsView(state: UiState, vm: MainViewModel, isTv: Boolean) {
                     ChannelCard(
                         ch = ch,
                         health = state.channelHealth[ch.id],
+                        sweep = state.channelSweep[ch.id],
                         isFavourite = ch.id in state.liveFavouriteIds,
                         onClick = { vm.playChannel(ch) },
                         onLongClick = { vm.toggleLiveFavourite(ch) },
@@ -245,6 +246,12 @@ private fun ChannelsView(state: UiState, vm: MainViewModel, isTv: Boolean) {
 private fun ChannelCard(
     ch: Channel,
     health: ChannelHealthEntity?,
+    /** Last CI-side deep-sweep result for this channel. Null = no signal
+     *  (haven't been swept yet, or fetch failed). Status "down" gets a
+     *  grey "Often offline" overlay but the card stays clickable — the
+     *  sweep runs from a different network than the user's device and
+     *  false positives are common, so we never block playback on it. */
+    sweep: com.moviebox.tv.data.live.HealthEntry? = null,
     isFavourite: Boolean = false,
     onClick: () -> Unit,
     onLongClick: (() -> Unit)? = null,
@@ -300,6 +307,27 @@ private fun ChannelCard(
             ) {
                 Text("LIVE",
                     color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+            }
+            // "Often offline" badge — the CI sweep saw this channel fail
+            // its full playback chain on the most recent run. Bottom-end
+            // corner so it sits opposite the existing UNSTABLE badge
+            // (bottom-start) and below the LIVE pill. Channel stays
+            // clickable — this is an advisory not a block, because the
+            // sweep runs from a different network and false positives
+            // are common.
+            if (sweep?.status == "down") {
+                Box(
+                    Modifier.align(Alignment.BottomEnd).padding(6.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(Color(0xCC6E6E6E))
+                        .padding(horizontal = 5.dp, vertical = 1.dp),
+                ) {
+                    Text(
+                        "OFTEN OFFLINE",
+                        color = Color.White, fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
             }
             // Star overlay top-left when this channel is in the user's
             // favourites. Long-press anywhere on the card toggles it.

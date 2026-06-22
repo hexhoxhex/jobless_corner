@@ -223,6 +223,13 @@ object RemoteController {
     fun liveSchedule(): List<ScheduleEvent> =
         vm?.state?.value?.liveSchedule ?: emptyList()
 
+    /** Latest deep-sweep health map (data/health.json). Keyed by channel
+     *  id. SPA's /api/live/channels reads this to attach a "sweep" hint
+     *  to each card so the phone can show the same "Often offline"
+     *  advisory the TV grid does. */
+    fun liveSweep(): Map<String, com.moviebox.tv.data.live.HealthEntry> =
+        vm?.state?.value?.channelSweep ?: emptyMap()
+
     /** True after the first successful fetch — lets the SPA stop polling. */
     fun liveLoaded(): Boolean = (vm?.state?.value?.liveChannels?.isNotEmpty()) == true
 
