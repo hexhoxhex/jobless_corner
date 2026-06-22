@@ -1057,24 +1057,29 @@ private fun VideoPlayer(
         // so a momentary network dip doesn't pause playback. Numbers in ms:
         //   minBuffer  / maxBuffer  / bufferForPlayback / bufferForPlaybackAfterRebuffer
         val loadControl = if (isLive) {
-            // Live: a deep buffer is our primary defense against the
-            // HTTP/1.1 head-of-line blocking that ExoPlayer's DefaultHttp
-            // DataSource is stuck with. minBuffer 45s gives us nearly a
-            // minute of pre-loaded chunks; maxBuffer 90s lets ExoPlayer
-            // get further ahead when the network IS cooperating. 10s
-            // bufferForPlayback means we don't START until we have a
-            // real cushion (vs 5s where a hiccup in the first 5s puts
-            // us right back to buffering).
-            // bufferForPlaybackAfterRebuffer was 15 s. That made every
-            // recovery user-visible: even when the codec decoded its first
-            // new frame in <3 s, ExoPlayer would sit on it dragging the
-            // buffer up to 15 s of content before unpausing — and live
-            // segments come down at roughly real-time, so that's 15 s of
-            // wallclock with "Reconnecting…" on screen. 3 s is enough to
-            // ride out a single segment hiccup without flapping; the deep
-            // 45 s minBuffer still protects steady-state playback.
+            // v0.1.44 — REAL fix for the stop/recover loop. The previous
+            // 45/90/10/3 numbers were impossible for dlhd live: the
+            // manifest window is ~24 s of content, but we were trying
+            // to buffer 45–90 s. ExoPlayer was constantly fighting to
+            // pre-load segments it couldn't actually get, and the 10 s
+            // bufferForPlayback meant every recovery paused for ten
+            // wallclock seconds even after the codec already had a
+            // frame ready.
+            //
+            // New profile fits inside the manifest:
+            //   minBuffer 8 s            — keep this much ahead
+            //   maxBuffer 18 s           — cap below the 24 s window so
+            //                              we never run out the back edge
+            //   bufferForPlayback 1.5 s  — start playing the moment we
+            //                              have ~1.5 s of content
+            //   bufferAfterRebuffer 1 s  — resume in ~1 s (was 3 s)
+            //
+            // The recovery-after-BLW prepare() now resumes in ~1 s of
+            // wallclock instead of 10 s — invisible to the user in most
+            // cases, vs the current visible black-screen pause.
             DefaultLoadControl.Builder()
-                .setBufferDurationsMs(45_000, 90_000, 10_000, 3_000)
+                .setBufferDurationsMs(8_000, 18_000, 1_500, 1_000)
+                .setBackBuffer(0, false)
                 .build()
         } else {
             DefaultLoadControl.Builder()
