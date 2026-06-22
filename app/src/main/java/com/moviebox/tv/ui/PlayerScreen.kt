@@ -733,6 +733,15 @@ private const val AUTO_ADVANCE_SECONDS: Int = 10
 private const val BEHIND_THRESHOLD: Int = 4
 private const val BEHIND_LIVE_WINDOW_MS: Long = 3 * 60 * 1000L
 
+/** Proactive drift prevention thresholds (v0.1.45). When the player's
+ *  position drops to within [DRIFT_DANGER_MS] of the back edge of the
+ *  live manifest window, silently seek forward to (duration −
+ *  [DRIFT_SAFE_OFFSET_MS]) before ExoPlayer errors out with
+ *  BEHIND_LIVE_WINDOW. The silent seek doesn't re-prepare, so no
+ *  visible pause. Tuned for dlhd's ~24 s window. */
+private const val DRIFT_DANGER_MS: Long = 3_500L
+private const val DRIFT_SAFE_OFFSET_MS: Long = 5_000L
+
 /** Compute the next (season, episode) tuple based on current UiState, or
  *  null if there is no next episode (last episode of last season, or
  *  seasons data hasn't loaded yet). */
@@ -1281,6 +1290,31 @@ private fun VideoPlayer(
         var tick = 0
         while (true) {
             kotlinx.coroutines.delay(1_000)
+            // v0.1.45: PROACTIVE drift prevention. ExoPlayer's live
+            // coordinates: position=0 is the back edge (oldest segment
+            // in the manifest), position=duration is the live edge
+            // (newest). If our position drops within DRIFT_DANGER_MS
+            // of 0, the next manifest update would push us past the
+            // back edge → BLW error. Silently seek forward to a safe
+            // offset (near the live edge) BEFORE that happens. Silent
+            // seek = no prepare(), no codec re-init, no buffering
+            // pause — the user sees nothing. This eliminates the BLW
+            // error path entirely for routine drift.
+            if (liveState.value && exo.isPlaying) {
+                val dur = exo.duration
+                val pos = exo.currentPosition
+                if (dur > 0 && pos in 0L..DRIFT_DANGER_MS) {
+                    val target = (dur - DRIFT_SAFE_OFFSET_MS).coerceAtLeast(0L)
+                    if (target > pos + 1_000) {
+                        android.util.Log.i(
+                            "LiveDiag",
+                            "PLAYER proactive seek pos=$pos dur=$dur → " +
+                                "target=$target (avoid BLW)",
+                        )
+                        runCatching { exo.seekTo(target) }
+                    }
+                }
+            }
             RemoteController.updatePlayback(
                 title, exo.currentPosition, exo.duration.coerceAtLeast(0),
                 exo.isPlaying,
