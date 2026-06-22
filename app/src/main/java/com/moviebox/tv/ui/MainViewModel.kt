@@ -243,6 +243,25 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     init {
+        // One-shot reset of bounce counters on this version. v0.1.42
+        // added the ffmpeg audio decoder — channels that were stuck
+        // web-only because of TCL's 24 kHz audio rejection (FOX USA,
+        // FOXNY USA) can now play natively. Without this wipe, the
+        // cached webOnlyHint=true from yesterday's failures sends them
+        // straight to the WebView fallback and the ffmpeg path never
+        // gets exercised. Gated on a SharedPref flag so it only runs
+        // once per install — subsequent boots use the normal learned
+        // health.
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val prefs = app.getSharedPreferences("migrations", android.content.Context.MODE_PRIVATE)
+            if (!prefs.getBoolean("reset_health_ffmpeg_v1", false)) {
+                runCatching { channelHealthDao.resetAllBounces() }
+                prefs.edit().putBoolean("reset_health_ffmpeg_v1", true).apply()
+                android.util.Log.i("LiveDiag",
+                    "VM one-shot: reset channel-health bounce counts " +
+                        "(ffmpeg renderer now available)")
+            }
+        }
         // Start the LiveStreamProxy eagerly so its 127.0.0.1 socket is
         // bound by the time the user picks their first channel. The lazy
         // start-on-first-playChannel path was prone to a race: if the
@@ -698,15 +717,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun shouldFallbackToWebPlayer(): Boolean =
         liveResolveFailures >= MAX_RESOLVE_FAILURES_BEFORE_WEBVIEW
 
-    /** Per-channel job that records playback success after 2 min of
+    /** Per-channel job that records playback success after 30 s of
      *  uninterrupted "this channel is still selected" time. Cancelled
-     *  if the user navigates away before that window elapses. */
+     *  if the user navigates away before that window elapses. v0.1.43:
+     *  dropped from 120 s → 30 s. The old threshold meant a channel
+     *  could hit BehindLiveWindow at 60 s, recover, hit it again at
+     *  120 s, recover, hit it again at 180 s — never recording a
+     *  success because the 120 s job kept getting reset by the
+     *  recovery seek. With the success flag never set, prior bounce
+     *  counts from earlier sessions accumulate. 30 s is enough
+     *  evidence the channel is live + the proxy is healthy. */
     private var healthSuccessJob: kotlinx.coroutines.Job? = null
 
     private fun scheduleHealthSuccess(channelId: String) {
         healthSuccessJob?.cancel()
         healthSuccessJob = viewModelScope.launch {
-            kotlinx.coroutines.delay(120_000)
+            kotlinx.coroutines.delay(30_000)
             val stillOn = _state.value.currentLiveChannel?.id == channelId
             if (stillOn) {
                 // BUG FIX: previously this recorded success to the DAO but did

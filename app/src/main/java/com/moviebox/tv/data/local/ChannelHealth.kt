@@ -68,4 +68,12 @@ interface ChannelHealthDao {
         """
     )
     suspend fun recordSuccess(id: String, now: Long)
+
+    /** Wipe every channel's bounce count. Used as a one-shot migration
+     *  when the player's codec capabilities change (e.g. v0.1.42 added
+     *  the ffmpeg AAC decoder, which makes previously-web-only channels
+     *  playable natively again). Without this, channels stay flagged
+     *  webOnly forever from yesterday's failures. */
+    @Query("UPDATE channel_health SET bounceCount = 0, lastBounceAt = 0")
+    suspend fun resetAllBounces()
 }

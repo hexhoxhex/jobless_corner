@@ -25,8 +25,8 @@ android {
         // ExoPlayer codec support; covers virtually all Android TV devices.
         minSdk = 26
         targetSdk = 35
-        versionCode = 42
-        versionName = "0.1.41"
+        versionCode = 44
+        versionName = "0.1.43"
 
         buildConfigField(
             "String", "TMDB_TOKEN",
@@ -101,6 +101,11 @@ dependencies {
     implementation(libs.media3.exoplayer.hls)
     implementation(libs.media3.ui)
     implementation(libs.media3.datasource.okhttp)
+    // ffmpeg-based audio renderer extension. Substitutes the platform AAC
+    // decoder for an ffmpeg one that outputs at a sample rate the device
+    // can actually open — fixes the FOX USA / FOXNY USA 24 kHz audio
+    // crash that previously forced WebView fallback.
+    implementation(libs.nextlib.media3ext)
 
     implementation(libs.retrofit)
     implementation(libs.retrofit.moshi)

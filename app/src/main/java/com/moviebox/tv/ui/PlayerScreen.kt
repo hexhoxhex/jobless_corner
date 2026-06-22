@@ -1122,7 +1122,25 @@ private fun VideoPlayer(
         // HEVC, etc.) — no extra .so files needed. They're slower than
         // hardware but tolerate segment-boundary format hints without
         // tearing the codec down, which was the Realtek failure mode.
-        val renderersFactory = androidx.media3.exoplayer.DefaultRenderersFactory(context)
+        // Use NextRenderersFactory — drop-in replacement for the Media3
+        // DefaultRenderersFactory that ships an ffmpeg AAC audio decoder.
+        // The platform AAC decoder on this TCL refuses to open AudioTrack
+        // for 24 kHz stereo (FOX USA / FOXNY USA's audio); ffmpeg decodes
+        // the same stream and outputs 48 kHz, which the AudioTrack
+        // accepts. EXTENSION_RENDERER_MODE_PREFER means ffmpeg gets
+        // chosen ahead of the platform decoder when both can handle the
+        // mime type — costs ~5 MB APK but lets every channel play
+        // natively without the WebView fallback.
+        val renderersFactory = if (isLive) {
+            io.github.anilbeesetti.nextlib.media3ext.ffdecoder
+                .NextRenderersFactory(context)
+                .setExtensionRendererMode(
+                    androidx.media3.exoplayer.DefaultRenderersFactory
+                        .EXTENSION_RENDERER_MODE_PREFER,
+                )
+        } else {
+            androidx.media3.exoplayer.DefaultRenderersFactory(context)
+        }
         // Audio path tweaks (both safe defaults regardless of channel):
         //  - Float output uses 32-bit float PCM, which lets the resampler
         //    handle odd source sample rates (FOXNY USA's 24 kHz audio
@@ -1206,12 +1224,21 @@ private fun VideoPlayer(
                     // back. Also bump maxPlaybackSpeed to 1.10 so the
                     // player can speed up to catch up to live edge after
                     // a hiccup before falling out of the window.
+                    // v0.1.43: tightened again. The 10/4/24 numbers still
+                    // landed us against the back edge on slow CDNs (vomos
+                    // for FOX USA, zalis for BBC One UK) — manifest
+                    // window is ~24 s, maxOffset of 24 s left ZERO
+                    // safety margin. Pull everything closer to the live
+                    // edge and bump maxPlaybackSpeed to 1.15 so the
+                    // player aggressively catches up before drifting
+                    // off the back. 8 s safety margin (24 – 16) instead
+                    // of 0.
                     MediaItem.LiveConfiguration.Builder()
-                        .setTargetOffsetMs(10_000)
-                        .setMinOffsetMs(4_000)
-                        .setMaxOffsetMs(24_000)
+                        .setTargetOffsetMs(6_000)
+                        .setMinOffsetMs(2_000)
+                        .setMaxOffsetMs(16_000)
                         .setMinPlaybackSpeed(0.95f)
-                        .setMaxPlaybackSpeed(1.10f)
+                        .setMaxPlaybackSpeed(1.15f)
                         .build()
                 )
                 .build()
@@ -1386,21 +1413,34 @@ private fun VideoPlayer(
                         android.util.Log.w(
                             "LiveDiag",
                             "PLAYER BEHIND_LIVE_WINDOW (${recentBehind.size}" +
-                                "/$BEHIND_THRESHOLD) — snap to live edge",
+                                "/$BEHIND_THRESHOLD) — snap closer to live edge",
                         )
                         runCatching {
-                            exo.seekToDefaultPosition()
+                            // v0.1.43: seekToDefaultPosition lands at
+                            // TARGET_OFFSET (6 s back) — same place we
+                            // just drifted off from. Instead, jump to
+                            // the live window's tail so we get max
+                            // margin before the next drift can hit the
+                            // back edge. duration() on a live source is
+                            // the manifest's current length; window
+                            // = [0..duration()].
+                            val win = exo.duration
+                            if (win > 0) exo.seekTo(maxOf(0L, win - 2_000))
+                            else exo.seekToDefaultPosition()
                             exo.prepare()
                         }
                         return
                     }
-                    // Audio-init failure is permanent for this stream's
-                    // format (e.g. FOXNY USA advertises 24 kHz stereo PCM
-                    // and the TCL audio system rejects that config). The
-                    // native HLS path can never recover — re-preparing
-                    // gets the same error. Fast-path to the WebView
-                    // fallback, which uses the system browser's audio
-                    // path and is far more permissive about formats.
+                    // Audio-init failure used to fast-path to WebView for
+                    // streams with sample rates the platform AudioTrack
+                    // refuses (FOX USA / FOXNY USA at 24 kHz). With the
+                    // ffmpeg audio renderer (v0.1.42) the ffmpeg AAC
+                    // decoder outputs 48 kHz regardless of source rate,
+                    // so this error code shouldn't appear for normal
+                    // streams. Keep the WebView fast-path as a safety
+                    // net for any case ffmpeg also fails — but it now
+                    // means a real codec problem, not "TCL just doesn't
+                    // like this sample rate."
                     if (error.errorCode == androidx.media3.common.PlaybackException
                             .ERROR_CODE_AUDIO_TRACK_INIT_FAILED
                     ) {
