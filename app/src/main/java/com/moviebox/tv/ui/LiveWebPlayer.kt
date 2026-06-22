@@ -75,29 +75,40 @@ fun LiveWebPlayer(
     // capping at 3 means we never reach the later backends (plus /
     // casting / player) that route to DIFFERENT hosts entirely
     // (junkieembeds.pages.dev, wikisport.club, ksohls.ru) and can rescue
-    // the channel. Repro: FOX USA on this TCL — donis-served iframes
-    // sit in an Adscore challenge that never resolves; junkieembeds-
-    // served iframe loads in ~5 s. Old code never reached it.
+    // the channel.
     val paths = remember(channel.id) {
         channel.playerPaths.ifEmpty {
             listOf("stream", "cast", "watch", "plus", "casting", "player")
         }.take(6)
     }
+    // The "canonical" dlhd entry is /watch.php?id=X — the URL the user
+    // hits when they tap a channel in a browser on dlhd.pk. The scraper
+    // records the six /{path}/stream-X.php ALTERNATES (which are
+    // separate inner iframes), not this entry. User confirmed
+    // /watch.php?id=54 (FOX USA) plays in browser while /stream/stream-
+    // 54.php doesn't — they're independent pages with different inner
+    // players + session setup. Try the canonical entry FIRST, then fall
+    // through the alternates as before.
+    val canonical = remember(channel.id) {
+        "https://dlhd.pk/watch.php?id=${channel.id}"
+    }
+    val totalSlots = paths.size + 1  // canonical + alternates
     var pathIndex by remember(channel.id) { mutableIntStateOf(0) }
     val failedRef = rememberUpdatedState(onAllPathsFailed)
     val backRef = rememberUpdatedState(onBack)
 
-    val currentPath = paths.getOrNull(pathIndex)
-    val url = currentPath?.let {
-        "https://dlhd.pk/${it}/stream-${channel.id}.php"
-    }
+    // Slot 0 = canonical entry; slots 1..N = the alternate iframe pages.
+    val url = if (pathIndex == 0) canonical
+        else paths.getOrNull(pathIndex - 1)?.let {
+            "https://dlhd.pk/${it}/stream-${channel.id}.php"
+        }
 
     Box(modifier.fillMaxSize().background(Color.Black)) {
         if (url != null) {
             WebViewBox(
                 url = url,
                 onMainFrameError = {
-                    if (pathIndex < paths.size - 1) pathIndex += 1
+                    if (pathIndex < totalSlots - 1) pathIndex += 1
                     else failedRef.value(
                         "Couldn't reach \"${channel.displayName}\".",
                     )
@@ -122,7 +133,7 @@ fun LiveWebPlayer(
             val budget = if (pathIndex == 0) FIRST_BACKEND_TIMEOUT_MS
                 else NEXT_BACKEND_TIMEOUT_MS
             kotlinx.coroutines.delay(budget)
-            if (pathIndex < paths.size - 1) pathIndex += 1
+            if (pathIndex < totalSlots - 1) pathIndex += 1
             else failedRef.value(
                 "\"${channel.displayName}\" isn't streaming right now.",
             )
@@ -174,7 +185,7 @@ fun LiveWebPlayer(
                     }
                     if (!channel.group.isNullOrBlank()) {
                         Text(
-                            "${channel.group} · source ${pathIndex + 1}/${paths.size}",
+                            "${channel.group} · source ${pathIndex + 1}/$totalSlots",
                             color = Color.White.copy(alpha = 0.55f),
                             fontSize = 11.sp,
                         )
@@ -198,7 +209,7 @@ fun LiveWebPlayer(
             // "cast backend" used to read like Chromecast to users — switched
             // to neutral "alternate source N/6" copy that doesn't surface
             // dlhd.pk's internal player-path naming.
-            val total = paths.size
+            val total = totalSlots
             val current = pathIndex + 1
             Text(
                 "Trying alternate source $current/$total…",
