@@ -733,14 +733,20 @@ private const val AUTO_ADVANCE_SECONDS: Int = 10
 private const val BEHIND_THRESHOLD: Int = 4
 private const val BEHIND_LIVE_WINDOW_MS: Long = 3 * 60 * 1000L
 
-/** Proactive drift prevention thresholds (v0.1.45). When the player's
- *  position drops to within [DRIFT_DANGER_MS] of the back edge of the
- *  live manifest window, silently seek forward to (duration −
- *  [DRIFT_SAFE_OFFSET_MS]) before ExoPlayer errors out with
- *  BEHIND_LIVE_WINDOW. The silent seek doesn't re-prepare, so no
+/** Where we want to sit relative to the live edge of the manifest
+ *  window. Drives BOTH [MediaItem.LiveConfiguration.setTargetOffsetMs]
+ *  AND the post-seek landing position for the proactive drift
+ *  prevention below — they MUST agree, or the player will speed-
+ *  adjust against the seek and you'll see slow-motion or jitter. */
+private const val LIVE_TARGET_OFFSET_MS: Long = 10_000L
+
+/** Proactive drift prevention. When the player's position drops to
+ *  within [DRIFT_DANGER_MS] of the back edge of the live manifest
+ *  window (position 0 in ExoPlayer live coordinates), silently seek
+ *  forward to land at exactly [LIVE_TARGET_OFFSET_MS] from the live
+ *  edge. Silent seek doesn't re-prepare → no codec re-init → no
  *  visible pause. Tuned for dlhd's ~24 s window. */
-private const val DRIFT_DANGER_MS: Long = 3_500L
-private const val DRIFT_SAFE_OFFSET_MS: Long = 5_000L
+private const val DRIFT_DANGER_MS: Long = 4_500L
 
 /** Compute the next (season, episode) tuple based on current UiState, or
  *  null if there is no next episode (last episode of last season, or
@@ -1238,21 +1244,43 @@ private fun VideoPlayer(
                     // back. Also bump maxPlaybackSpeed to 1.10 so the
                     // player can speed up to catch up to live edge after
                     // a hiccup before falling out of the window.
-                    // v0.1.43: tightened again. The 10/4/24 numbers still
-                    // landed us against the back edge on slow CDNs (vomos
-                    // for FOX USA, zalis for BBC One UK) — manifest
-                    // window is ~24 s, maxOffset of 24 s left ZERO
-                    // safety margin. Pull everything closer to the live
-                    // edge and bump maxPlaybackSpeed to 1.15 so the
-                    // player aggressively catches up before drifting
-                    // off the back. 8 s safety margin (24 – 16) instead
-                    // of 0.
+                    // === Live playback strategy (v0.1.46, comprehensive) ===
+                    //
+                    // The dlhd manifest window is ~24 s of content. To
+                    // play smoothly we need to sit at a stable offset
+                    // from the live edge, never drift to either edge,
+                    // and never slow down (slow motion is what you SEE;
+                    // hitting the back edge is what you HEAR as a pause).
+                    //
+                    // Configuration:
+                    //   targetOffset = LIVE_TARGET_OFFSET_MS = 10 s.
+                    //     A comfortable middle of the 24 s window —
+                    //     plenty of room for jitter on both sides.
+                    //   minOffset = 6 s. Stops the player from speeding
+                    //     up to a point where the next network hiccup
+                    //     would push us into "too close to live edge"
+                    //     territory.
+                    //   maxOffset = 18 s. Stops the player from drifting
+                    //     so far back that the manifest rolls past us.
+                    //   minPlaybackSpeed = 1.0 (DON'T slow down).
+                    //     Slow-motion playback is more user-visible
+                    //     than a small offset drift. We'd rather be
+                    //     0.5 s ahead of target than show 0.95× speed.
+                    //   maxPlaybackSpeed = 1.10 (gentle catch-up).
+                    //     If we DO drift back, speed up just enough to
+                    //     return to target without audible pitch shift.
+                    //
+                    // The proactive 1 Hz seek in the per-second tick
+                    // catches catastrophic drift before the player
+                    // hits BLW (see DRIFT_DANGER_MS below). Seeks land
+                    // at exactly target offset so the player resumes
+                    // at 1.0× — no slow-motion penalty.
                     MediaItem.LiveConfiguration.Builder()
-                        .setTargetOffsetMs(6_000)
-                        .setMinOffsetMs(2_000)
-                        .setMaxOffsetMs(16_000)
-                        .setMinPlaybackSpeed(0.95f)
-                        .setMaxPlaybackSpeed(1.15f)
+                        .setTargetOffsetMs(LIVE_TARGET_OFFSET_MS)
+                        .setMinOffsetMs(6_000)
+                        .setMaxOffsetMs(18_000)
+                        .setMinPlaybackSpeed(1.0f)
+                        .setMaxPlaybackSpeed(1.10f)
                         .build()
                 )
                 .build()
@@ -1304,12 +1332,16 @@ private fun VideoPlayer(
                 val dur = exo.duration
                 val pos = exo.currentPosition
                 if (dur > 0 && pos in 0L..DRIFT_DANGER_MS) {
-                    val target = (dur - DRIFT_SAFE_OFFSET_MS).coerceAtLeast(0L)
+                    // Land at exactly the target offset so the player
+                    // resumes at 1.0× — NOT at a position closer to
+                    // live, which would trigger speed-down to "catch
+                    // back" and cause visible slow-motion playback.
+                    val target = (dur - LIVE_TARGET_OFFSET_MS).coerceAtLeast(0L)
                     if (target > pos + 1_000) {
                         android.util.Log.i(
                             "LiveDiag",
                             "PLAYER proactive seek pos=$pos dur=$dur → " +
-                                "target=$target (avoid BLW)",
+                                "target=$target (back-edge drift)",
                         )
                         runCatching { exo.seekTo(target) }
                     }
@@ -1455,17 +1487,15 @@ private fun VideoPlayer(
                                 "/$BEHIND_THRESHOLD) — snap closer to live edge",
                         )
                         runCatching {
-                            // v0.1.43: seekToDefaultPosition lands at
-                            // TARGET_OFFSET (6 s back) — same place we
-                            // just drifted off from. Instead, jump to
-                            // the live window's tail so we get max
-                            // margin before the next drift can hit the
-                            // back edge. duration() on a live source is
-                            // the manifest's current length; window
-                            // = [0..duration()].
+                            // Land at exactly the target offset so the
+                            // player resumes at 1.0×. Landing closer
+                            // to live (e.g. dur - 2 s) was making the
+                            // player slow down to 0.95× to "catch back"
+                            // to target — visible slow-motion.
                             val win = exo.duration
-                            if (win > 0) exo.seekTo(maxOf(0L, win - 2_000))
-                            else exo.seekToDefaultPosition()
+                            if (win > 0) {
+                                exo.seekTo(maxOf(0L, win - LIVE_TARGET_OFFSET_MS))
+                            } else exo.seekToDefaultPosition()
                             exo.prepare()
                         }
                         return
