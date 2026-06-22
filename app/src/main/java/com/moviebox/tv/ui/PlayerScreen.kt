@@ -1510,6 +1510,29 @@ private fun VideoPlayer(
                     // net for any case ffmpeg also fails — but it now
                     // means a real codec problem, not "TCL just doesn't
                     // like this sample rate."
+                    // PlaylistStuckException: the HLS playlist parser timed
+                    // out waiting for new segments. Usually triggered when
+                    // the proxy rotated to a CDN sibling that's serving a
+                    // stale playlist (mediaSeq went backwards or stopped
+                    // advancing). Triggering full refreshLiveStream here
+                    // forces a re-resolve through donis — slow (~5 s) and
+                    // visible. Better: silent prepare() of the existing
+                    // proxy URL; by the time the player retries, the
+                    // proxy has usually fetched a fresh playlist from a
+                    // recovering sibling and the segments are advancing
+                    // again. Falls through to the generic recovery if
+                    // still stuck after the silent retry.
+                    if (cause is androidx.media3.exoplayer.hls.playlist
+                            .HlsPlaylistTracker.PlaylistStuckException
+                    ) {
+                        android.util.Log.w(
+                            "LiveDiag",
+                            "PLAYER PlaylistStuckException — silent prepare " +
+                                "(proxy will serve fresh segments)",
+                        )
+                        runCatching { exo.prepare() }
+                        return
+                    }
                     if (error.errorCode == androidx.media3.common.PlaybackException
                             .ERROR_CODE_AUDIO_TRACK_INIT_FAILED
                     ) {

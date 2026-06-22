@@ -90,6 +90,13 @@ class LiveStreamProxy(
          *  the "replay last 20 seconds at rotation" symptom users
          *  reported. */
         var recentSegments: ArrayDeque<String> = ArrayDeque(),
+        /** Highest EXT-X-MEDIA-SEQUENCE we've served to ExoPlayer. When
+         *  we rotate to a sibling whose mediaSeq is LOWER, the player
+         *  sees the playlist go backwards in time → PlaylistStuckException
+         *  ~12 s later (player waits for "new" segments that are
+         *  actually older than what it already has). Reject such
+         *  rotations and force a re-rotation to a different sibling. */
+        var lastServedMediaSeq: Long = -1L,
     )
     private val innerState = ConcurrentHashMap<String, InnerState>()
 
@@ -265,16 +272,43 @@ class LiveStreamProxy(
                     )
                 } else resp.second to false
 
+                // mediaSeq-regression guard: if a sibling rotation
+                // gave us a playlist whose mediaSeq is lower than the
+                // last one we served, the player would see time go
+                // backwards and stall ~12 s later with
+                // PlaylistStuckException. Reject this body, mark the
+                // rotation as still pending, and re-fall through to
+                // the retry/rotate loop — next attempt will get a
+                // different sibling. We hand back lastGoodBody so
+                // ExoPlayer keeps consuming what it has.
+                val newMediaSeq = extractMediaSeq(servedBody) ?: -1L
+                if (crossingBoundary &&
+                    state.lastServedMediaSeq >= 0 &&
+                    newMediaSeq in 0 until state.lastServedMediaSeq) {
+                    Log.w(DIAG, "PROXY ch=$channelId REJECT regressed " +
+                        "rotation: was=${state.lastServedMediaSeq} " +
+                        "got=$newMediaSeq host=${hostOf(entry.innerUrl)} — " +
+                        "serving lastGoodBody, will retry rotation")
+                    state.rotationPending = true
+                    val body = state.lastGoodBody ?: servedBody
+                    return NanoHTTPD.newFixedLengthResponse(
+                        NanoHTTPD.Response.Status.OK,
+                        "application/vnd.apple.mpegurl",
+                        body,
+                    )
+                }
+
                 state.rotationPending = false
                 state.lastServedFrom = entry.innerUrl
                 state.lastGoodBody = servedBody
                 state.lastGoodAtMs = System.currentTimeMillis()
+                if (newMediaSeq >= 0) state.lastServedMediaSeq = newMediaSeq
                 rememberRecentSegments(state, servedBody)
 
                 val dt = System.currentTimeMillis() - tStart
                 Log.i(DIAG, "PROXY ch=$channelId inner OK attempt=$attempt " +
                     "dt=${dt}ms disc=$discInserted host=${hostOf(entry.innerUrl)} " +
-                    "mediaSeq=${extractMediaSeq(servedBody)} " +
+                    "mediaSeq=$newMediaSeq " +
                     "crossedBoundary=$crossingBoundary")
                 return NanoHTTPD.newFixedLengthResponse(
                     NanoHTTPD.Response.Status.OK,
@@ -386,14 +420,14 @@ class LiveStreamProxy(
         runCatching { url.substringAfter("//").substringBefore('/') }
             .getOrDefault("?")
 
-    private fun extractMediaSeq(body: String): String {
+    private fun extractMediaSeq(body: String): Long? {
         for (line in body.lineSequence()) {
             val l = line.trim()
             if (l.startsWith("#EXT-X-MEDIA-SEQUENCE:")) {
-                return l.substringAfter(':')
+                return l.substringAfter(':').trim().toLongOrNull()
             }
         }
-        return "?"
+        return null
     }
 
     /**
