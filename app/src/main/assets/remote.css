@@ -275,6 +275,12 @@ button.icon-btn { flex: 0 0 auto; padding: 8px 10px; }
   font-weight: 700; font-size: 1rem;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.np-card .np-ep {
+  margin-top: 2px;
+  font-size: 0.8rem; color: var(--text-2);
+  letter-spacing: 0.02em;
+}
+.np-card .np-ep[hidden] { display: none; }
 .bar {
   height: 5px; background: var(--surface-3); border-radius: 3px;
   overflow: hidden; margin-top: 10px;

@@ -60,6 +60,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.focusable
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
@@ -714,7 +715,13 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
 /** How early (before content end) the Up Next overlay starts showing.
  *  Sized for the typical end-credit length so the user sees the card during
  *  credits instead of catching it in the last 30 seconds. */
-private const val UP_NEXT_WINDOW_MS: Long = 120_000
+/** How early before the end of an episode to surface the Up Next card.
+ *  v0.1.48: 120 s → 180 s. Many series (Family Guy, animated half-hours)
+ *  have credits that run 60–90 s; with 120 s, the overlay appeared
+ *  AFTER credits finished, which defeats the purpose. 180 s catches
+ *  credit-start on most US TV shows. Movies tend to have longer credits
+ *  but they don't need Up Next anyway (no next episode). */
+private const val UP_NEXT_WINDOW_MS: Long = 180_000
 
 /** Independent countdown that fires the next episode. Replaces the old
  *  "remaining wall-clock until duration end" timer, which left users with
@@ -765,11 +772,34 @@ private fun nextEpisodeFor(state: UiState): Pair<Int, Int>? {
     val seasons = state.details?.seasons ?: return null
     val se = state.currentSe ?: return null
     val ep = state.currentEp ?: return null
-    val cur = seasons.firstOrNull { it.season == se } ?: return null
-    return if (ep < cur.episodes) se to (ep + 1)
-    else seasons.getOrNull(seasons.indexOfFirst { it.season == se } + 1)
-        ?.let { it.season to 1 }
+    val subjectId = state.details.subjectId
+    // Walk forward through (season, episode) tuples, skipping any
+    // recorded in MissingEpisodeCatalog. Stops on the first available
+    // one, or returns null after walking off the end of the series.
+    var s = se
+    var e = ep
+    repeat(NEXT_EPISODE_SKIP_LIMIT) {
+        val cur = seasons.firstOrNull { it.season == s } ?: return null
+        val next: Pair<Int, Int> = if (e < cur.episodes) {
+            s to (e + 1)
+        } else {
+            val nextSeason = seasons.getOrNull(
+                seasons.indexOfFirst { it.season == s } + 1)
+                ?: return null
+            nextSeason.season to 1
+        }
+        if (!com.moviebox.tv.data.MissingEpisodeCatalog
+                .isMissing(subjectId, next.first, next.second)
+        ) return next
+        s = next.first; e = next.second
+    }
+    return null
 }
+
+/** Cap on how many missing episodes the auto-advance walk-forward will
+ *  skip before giving up. Stops a series with a completely broken season
+ *  from looping forever. */
+private const val NEXT_EPISODE_SKIP_LIMIT: Int = 50
 
 @Composable
 private fun UpNextCard(
@@ -779,6 +809,14 @@ private fun UpNextCard(
     onPlayNow: () -> Unit,
     onDismiss: () -> Unit,
 ) {
+    // Auto-focus the Play now button the moment the card mounts. Without
+    // this the TV-remote D-pad can't reach the card — focus is held by
+    // the player surface and clickable {} alone isn't enough for Compose
+    // to consider these buttons as focus targets.
+    val playFocus = remember { androidx.compose.ui.focus.FocusRequester() }
+    LaunchedEffect(Unit) {
+        runCatching { playFocus.requestFocus() }
+    }
     Box(
         Modifier.clip(RoundedCornerShape(14.dp))
             .background(Color(0xEE0A0C12))
@@ -795,9 +833,13 @@ private fun UpNextCard(
                 fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
             Spacer(Modifier.height(10.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                var playFocused by remember { mutableStateOf(false) }
                 Box(
                     Modifier.clip(RoundedCornerShape(18.dp))
-                        .background(Color.White)
+                        .background(if (playFocused) Color(0xFFE8B341) else Color.White)
+                        .focusRequester(playFocus)
+                        .onFocusChanged { playFocused = it.isFocused }
+                        .focusable()
                         .clickable(onClick = onPlayNow)
                         .padding(horizontal = 14.dp, vertical = 7.dp),
                 ) {
@@ -805,9 +847,13 @@ private fun UpNextCard(
                         color = Color.Black,
                         fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
                 }
+                var cancelFocused by remember { mutableStateOf(false) }
                 Box(
                     Modifier.clip(RoundedCornerShape(18.dp))
-                        .background(Color(0x33FFFFFF))
+                        .background(
+                            if (cancelFocused) Color(0x77FFFFFF) else Color(0x33FFFFFF))
+                        .onFocusChanged { cancelFocused = it.isFocused }
+                        .focusable()
                         .clickable(onClick = onDismiss)
                         .padding(horizontal = 14.dp, vertical = 7.dp),
                 ) {

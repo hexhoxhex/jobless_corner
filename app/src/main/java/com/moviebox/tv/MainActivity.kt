@@ -27,6 +27,7 @@ class MainActivity : ComponentActivity() {
         // the moment AppRoot composes) reads it.
         TastePrefs.init(applicationContext)
         UnavailableCatalog.init(applicationContext)
+        com.moviebox.tv.data.MissingEpisodeCatalog.init(applicationContext)
         // Spin the mobile-remote server up eagerly. It used to wait until
         // the user navigated to the Remote QR screen, which means anyone
         // diagnosing reconnect issues over adb couldn't drive playback

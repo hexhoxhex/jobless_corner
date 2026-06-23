@@ -159,6 +159,9 @@ class Repository(
         val deny = TastePrefs.denyLanguages()
         return data.items.map { it.toItem() }
             .filter { keepByLanguage(it.title, deny) }
+            // Skip items previously marked unavailable so the user
+            // doesn't keep tapping on dead-on-arrival results.
+            .filter { !UnavailableCatalog.isUnavailable(it.subjectId) }
     }
 
     /**
@@ -388,12 +391,18 @@ class Repository(
                 // anyway. That's how the user got S1E5 when they meant
                 // S3E1. Validate the positional pick instead.
                 val positional = data.list.getOrNull(offsetInPage)
-                    ?: throw ApiException("Episode $episode of season $season missing.")
+                if (positional == null) {
+                    MissingEpisodeCatalog.mark(subjectId, season, episode)
+                    throw ApiException(
+                        "Episode $episode of season $season missing.",
+                    )
+                }
                 val posSe = positional.se
                 val posEp = positional.ep
                 if (posSe != null && posEp != null &&
                     (posSe != season || posEp != episode)
                 ) {
+                    MissingEpisodeCatalog.mark(subjectId, season, episode)
                     throw ApiException(
                         "Episode $episode of season $season missing " +
                             "(positional fallback picked S${posSe}E${posEp}, " +

@@ -702,6 +702,26 @@ async function refresh() {
   try {
     const s = await get("/api/state");
     $("#npTitle").textContent = s.title || "Nothing playing";
+    // Episode badge under the title — kept in sync with TV state so the
+    // remote shows the same episode the user is actually watching, even
+    // after an auto-advance to the next episode.
+    const epBadge = $("#npEp");
+    if (epBadge) {
+      if (s.season != null && s.episode != null) {
+        epBadge.textContent = `S${s.season} · E${s.episode}`;
+        epBadge.hidden = false;
+      } else {
+        epBadge.hidden = true;
+      }
+    }
+    // If the Details page selectors are open for the same series the TV
+    // is auto-advancing through, mirror the live episode into the picker
+    // so the user doesn't see a stale S1E1 while the TV plays S1E4.
+    if (lastDetails?.item?.isSeries && s.season != null && s.episode != null) {
+      const dSe = $("#dSeason"); const dEp = $("#dEpisode");
+      if (dSe && Number(dSe.value) !== s.season) dSe.value = String(s.season);
+      if (dEp && Number(dEp.value) !== s.episode) dEp.value = String(s.episode);
+    }
     // Position display — skip while the user is dragging; their drag is
     // already updating the time text via the slider's `input` handler.
     if (!posSliding) {
