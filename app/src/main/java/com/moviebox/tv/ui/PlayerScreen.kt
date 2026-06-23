@@ -822,7 +822,14 @@ private const val LIVE_TARGET_OFFSET_MS: Long = 15_000L
  *  forward to land at exactly [LIVE_TARGET_OFFSET_MS] from the live
  *  edge. Silent seek doesn't re-prepare → no codec re-init → no
  *  visible pause. Tuned for dlhd's ~24 s window. */
-private const val DRIFT_DANGER_MS: Long = 4_500L
+// v0.1.57: 4.5s → 2.5s. The proactive seek is a video-flushing last
+// resort, not the primary drift handler — ExoPlayer's native offset
+// control (min/max offset + maxPlaybackSpeed 1.12) smoothly catches
+// most drift via tempo with NO decoder flush. Only seek when the
+// playhead gets genuinely close to the back edge (within 2.5s) and
+// BLW is actually imminent. Fewer seeks = fewer "video buffers, audio
+// clean" micro-freezes on channels that drift often (BBC/zalis, TSN).
+private const val DRIFT_DANGER_MS: Long = 2_500L
 
 /** Silent-freeze recovery thresholds (v0.1.48). [STALL_MS] is how long
  *  currentPosition can stay frozen while isPlaying=true before we
@@ -1479,7 +1486,17 @@ private fun VideoPlayer(
                         .setMinOffsetMs(10_000)
                         .setMaxOffsetMs(22_000)
                         .setMinPlaybackSpeed(1.0f)
-                        .setMaxPlaybackSpeed(1.08f)
+                        // v0.1.57: 1.08 → 1.12. Let ExoPlayer's NATIVE
+                        // live-offset control catch drift back to target
+                        // via a smooth tempo nudge (pitch-preserved by
+                        // Sonic) instead of leaning on the proactive
+                        // seek, which flushes the video decoder and
+                        // causes a brief video freeze while audio plays
+                        // on — itself a "video buffers, audio clean"
+                        // symptom on channels that drift often. 1.12×
+                        // commentary is barely noticeable; a video
+                        // freeze is very noticeable.
+                        .setMaxPlaybackSpeed(1.12f)
                         .build()
                 )
                 .build()
