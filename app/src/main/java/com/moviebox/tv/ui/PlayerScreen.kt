@@ -748,6 +748,16 @@ private const val LIVE_TARGET_OFFSET_MS: Long = 10_000L
  *  visible pause. Tuned for dlhd's ~24 s window. */
 private const val DRIFT_DANGER_MS: Long = 4_500L
 
+/** Silent-freeze recovery thresholds (v0.1.48). [STALL_MS] is how long
+ *  currentPosition can stay frozen while isPlaying=true before we
+ *  conclude the codec is stuck and re-prepare. [STALE_FATAL_MS] is
+ *  how deeply negative currentPosition can go before we conclude the
+ *  player is anchored to a stale manifest window and re-prepare.
+ *  Both detected independently of any ExoPlayer error event — the
+ *  freezes that triggered this fix never fired onPlayerError. */
+private const val STALL_MS: Long = 8_000L
+private const val STALE_FATAL_MS: Long = 30_000L
+
 /** Compute the next (season, episode) tuple based on current UiState, or
  *  null if there is no next episode (last episode of last season, or
  *  seasons data hasn't loaded yet). */
@@ -988,6 +998,11 @@ private fun VideoPlayer(
     // channels, so a previous channel's rotting manifest doesn't
     // count against a freshly-played one.
     val behindLiveWindow = remember(mediaUrl) { mutableListOf<Long>() }
+    // Stall-detection state for the per-second tick. stallLastPos is
+    // the last observed currentPosition; stallSameSince is when it
+    // first stopped advancing. Both reset per channel session.
+    var stallLastPos by remember(mediaUrl) { mutableStateOf(Long.MIN_VALUE) }
+    var stallSameSince by remember(mediaUrl) { mutableStateOf(0L) }
     var lastKey by remember { mutableStateOf<String?>(null) }
     val liveState = rememberUpdatedState(isLive)
 
@@ -1318,32 +1333,81 @@ private fun VideoPlayer(
         var tick = 0
         while (true) {
             kotlinx.coroutines.delay(1_000)
-            // v0.1.45: PROACTIVE drift prevention. ExoPlayer's live
-            // coordinates: position=0 is the back edge (oldest segment
-            // in the manifest), position=duration is the live edge
-            // (newest). If our position drops within DRIFT_DANGER_MS
-            // of 0, the next manifest update would push us past the
-            // back edge → BLW error. Silently seek forward to a safe
-            // offset (near the live edge) BEFORE that happens. Silent
-            // seek = no prepare(), no codec re-init, no buffering
-            // pause — the user sees nothing. This eliminates the BLW
-            // error path entirely for routine drift.
-            if (liveState.value && exo.isPlaying) {
+            // Live position-health checks. ExoPlayer's live coordinates:
+            // position=0 is the back edge of the manifest window (oldest
+            // segment), position=duration is the live edge (newest).
+            // Three failure modes, three responses:
+            //
+            //   (a) BACK-EDGE DRIFT — playing but position drifted into
+            //       [0, DRIFT_DANGER_MS]. Silent seek to target offset.
+            //       No prepare → no codec re-init → invisible. Gated
+            //       on isPlaying because if we're already stalled
+            //       a silent seek won't help — see (c).
+            //
+            //   (b) STALL WHILE PLAYING — isPlaying=true and position
+            //       hasn't advanced for STALL_MS. ExoPlayer didn't
+            //       emit an error but the codec isn't progressing.
+            //       Re-prepare to recover.
+            //
+            //   (c) ANCHORED TO STALE WINDOW — position has gone
+            //       deeply negative (< -STALE_FATAL_MS) because the
+            //       manifest rolled past us while we were paused/
+            //       buffering/whatever. Observed on the TV after long
+            //       runs: position=-5,872,501 ms = -98 min. No error
+            //       ever fires, just a silently frozen frame on
+            //       screen. Hard re-prepare. Runs regardless of
+            //       isPlaying — this case is DEFINED by being not
+            //       playing.
+            if (liveState.value) {
                 val dur = exo.duration
                 val pos = exo.currentPosition
-                if (dur > 0 && pos in 0L..DRIFT_DANGER_MS) {
-                    // Land at exactly the target offset so the player
-                    // resumes at 1.0× — NOT at a position closer to
-                    // live, which would trigger speed-down to "catch
-                    // back" and cause visible slow-motion playback.
-                    val target = (dur - LIVE_TARGET_OFFSET_MS).coerceAtLeast(0L)
-                    if (target > pos + 1_000) {
-                        android.util.Log.i(
-                            "LiveDiag",
-                            "PLAYER proactive seek pos=$pos dur=$dur → " +
-                                "target=$target (back-edge drift)",
-                        )
-                        runCatching { exo.seekTo(target) }
+                // (c) — anchored to stale window. Most severe; check first.
+                if (dur > 0 && pos < -STALE_FATAL_MS) {
+                    android.util.Log.w(
+                        "LiveDiag",
+                        "PLAYER STALL_RECOVERY pos=$pos dur=$dur " +
+                            "(anchored ${-pos / 1000}s behind window) — re-prepare",
+                    )
+                    runCatching {
+                        exo.seekToDefaultPosition()
+                        exo.prepare()
+                    }
+                    stallLastPos = Long.MIN_VALUE
+                    stallSameSince = 0L
+                } else if (exo.isPlaying && dur > 0) {
+                    // (b) — stall while playing. Track position across
+                    // ticks; if it hasn't advanced for STALL_MS, recover.
+                    val now = SystemClock.elapsedRealtime()
+                    if (pos == stallLastPos) {
+                        if (stallSameSince == 0L) stallSameSince = now
+                        else if (now - stallSameSince > STALL_MS) {
+                            android.util.Log.w(
+                                "LiveDiag",
+                                "PLAYER STALL_WHILE_PLAYING pos frozen at $pos " +
+                                    "for ${(now - stallSameSince) / 1000}s — re-prepare",
+                            )
+                            runCatching {
+                                exo.seekToDefaultPosition()
+                                exo.prepare()
+                            }
+                            stallLastPos = Long.MIN_VALUE
+                            stallSameSince = 0L
+                        }
+                    } else {
+                        stallLastPos = pos
+                        stallSameSince = 0L
+                    }
+                    // (a) — back-edge drift. Silent seek.
+                    if (pos in 0L..DRIFT_DANGER_MS) {
+                        val target = (dur - LIVE_TARGET_OFFSET_MS).coerceAtLeast(0L)
+                        if (target > pos + 1_000) {
+                            android.util.Log.i(
+                                "LiveDiag",
+                                "PLAYER proactive seek pos=$pos dur=$dur → " +
+                                    "target=$target (back-edge drift)",
+                            )
+                            runCatching { exo.seekTo(target) }
+                        }
                     }
                 }
             }
