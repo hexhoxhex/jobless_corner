@@ -118,7 +118,25 @@ class LiveTvRepository {
         val map = runCatching {
             val body = fetch(HEALTH_URL)
             val snap = healthAdapter.fromJson(body) ?: return@runCatching emptyMap()
-            snap.results.associateBy { it.id }
+            // Sanity check: if EVERY swept channel is marked down, the
+            // sweep run is broken (e.g. donis endpoint changed, runner
+            // blocked) — not actually every CDN failing at once. Ignore
+            // the snapshot entirely rather than dim every card in the
+            // UI with a bogus "OFTEN OFFLINE" badge. Threshold is
+            // "literally 100%" since even one or two ok channels is
+            // evidence the sweep itself is working.
+            val swept = snap.results.size
+            val downCount = snap.results.count { it.status == "down" }
+            if (swept > 0 && downCount == swept) {
+                android.util.Log.w(
+                    "LiveDiag",
+                    "HEALTH ignoring snapshot — $downCount/$swept channels " +
+                        "marked down. Sweep run is broken, not every CDN.",
+                )
+                emptyMap()
+            } else {
+                snap.results.associateBy { it.id }
+            }
         }.getOrElse { emptyMap() }
         cachedHealth = map
         cachedHealthAt = now
