@@ -2,6 +2,8 @@ package com.moviebox.tv.data
 
 import android.content.Context
 import android.content.SharedPreferences
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -22,11 +24,23 @@ object MissingEpisodeCatalog {
     private lateinit var prefs: SharedPreferences
     private val cached = ConcurrentHashMap.newKeySet<String>()
 
+    /** Reactive view of the marked-missing set. Compose surfaces
+     *  (the episode picker) collectAsState() this so they re-render the
+     *  instant an episode is marked missing after a failed play — the
+     *  user navigates back to details and the phantom episode is gone,
+     *  no app restart needed. Emits a fresh immutable snapshot on every
+     *  change. */
+    private val _flow = MutableStateFlow<Set<String>>(emptySet())
+    val flow: StateFlow<Set<String>> = _flow
+
     fun init(context: Context) {
         if (::prefs.isInitialized) return
         prefs = context.applicationContext
             .getSharedPreferences("missing_episodes", Context.MODE_PRIVATE)
-        prefs.getStringSet(KEY, emptySet())?.let { cached.addAll(it) }
+        prefs.getStringSet(KEY, emptySet())?.let {
+            cached.addAll(it)
+            _flow.value = cached.toSet()
+        }
     }
 
     private fun key(subjectId: String, season: Int, episode: Int): String =
@@ -34,13 +48,25 @@ object MissingEpisodeCatalog {
 
     fun mark(subjectId: String, season: Int, episode: Int) {
         if (subjectId.isBlank()) return
-        if (cached.add(key(subjectId, season, episode))) save()
+        if (cached.add(key(subjectId, season, episode))) {
+            _flow.value = cached.toSet()
+            save()
+        }
     }
 
     fun isMissing(subjectId: String, season: Int, episode: Int): Boolean =
         key(subjectId, season, episode) in cached
 
-    fun clear() { cached.clear(); save() }
+    /** True if [subjectId] season [season] episode [episode] is NOT marked
+     *  missing — convenience for filtering episode lists. */
+    fun isPresent(subjectId: String, season: Int, episode: Int): Boolean =
+        !isMissing(subjectId, season, episode)
+
+    fun clear() {
+        cached.clear()
+        _flow.value = emptySet()
+        save()
+    }
 
     private fun save() {
         if (::prefs.isInitialized) {

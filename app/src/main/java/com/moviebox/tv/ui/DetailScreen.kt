@@ -26,6 +26,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
@@ -54,6 +55,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.runtime.collectAsState
 import coil.compose.AsyncImage
+import com.moviebox.tv.data.local.WatchHistoryEntity
 import com.moviebox.tv.ui.theme.Accent
 import com.moviebox.tv.ui.theme.Danger
 import com.moviebox.tv.ui.theme.Gold
@@ -207,9 +209,33 @@ fun DetailScreen(state: UiState, vm: MainViewModel) {
 private fun SeriesEpisodes(state: UiState, vm: MainViewModel) {
     val seasons = state.details?.seasons ?: return
     if (seasons.isEmpty()) return
+    val subjectId = state.details.subjectId
     var season by remember { mutableIntStateOf(seasons.first().season) }
     val current = seasons.firstOrNull { it.season == season }
     var open by remember { mutableStateOf(false) }
+
+    // Reactive: phantom episodes (marked missing after a failed play) and
+    // watched episodes both update the grid live.
+    val missing by com.moviebox.tv.data.MissingEpisodeCatalog.flow.collectAsState()
+    val watched by vm.watchedKeys.collectAsState()
+
+    val rawCount = current?.episodes ?: 0
+    // Episodes aoneroom CLAIMS exist (1..maxEp) minus the ones we've
+    // already discovered are phantom. This is what hides Family Guy
+    // S1E8/E9 once they've each failed to resolve once.
+    val episodes = remember(season, rawCount, missing) {
+        (1..rawCount).filter {
+            com.moviebox.tv.data.MissingEpisodeCatalog.isPresent(subjectId, season, it)
+        }
+    }
+    val count = episodes.size
+
+    // Season is "complete" when every present episode is finished.
+    val seasonComplete = remember(season, episodes, watched) {
+        episodes.isNotEmpty() && episodes.all { ep ->
+            WatchHistoryEntity.keyOf(subjectId, season, ep) in watched
+        }
+    }
 
     Row(verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -223,16 +249,23 @@ private fun SeriesEpisodes(state: UiState, vm: MainViewModel) {
                 }
             }
         }
-        Text("${current?.episodes ?: 0} episodes", color = TextMuted, fontSize = 12.sp)
+        Text("$count episodes", color = TextMuted, fontSize = 12.sp)
+        if (seasonComplete) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Filled.CheckCircle, null, Modifier.size(14.dp),
+                    tint = Color(0xFF36C26B))
+                Text(" Watched", color = Color(0xFF36C26B), fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold)
+            }
+        }
     }
 
-    val count = current?.episodes ?: 0
     state.detailItem?.let { dItem ->
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            OutlinedButton(onClick = { vm.downloadSeason(dItem, season, count) }) {
+            OutlinedButton(onClick = { vm.downloadSeason(dItem, season, rawCount) }) {
                 Icon(Icons.Filled.Download, null, Modifier.size(18.dp))
                 Text(" Download season", fontSize = 12.sp)
             }
@@ -246,12 +279,13 @@ private fun SeriesEpisodes(state: UiState, vm: MainViewModel) {
         verticalArrangement = Arrangement.spacedBy(8.dp),
         modifier = Modifier.height(((count / 5 + 1) * 52).dp.coerceAtMost(360.dp)),
     ) {
-        items((1..count).toList()) { ep ->
+        items(episodes) { ep ->
             val dItem = state.detailItem
+            val isWatched = WatchHistoryEntity.keyOf(subjectId, season, ep) in watched
             Box(
                 Modifier
                     .clip(RoundedCornerShape(8.dp))
-                    .background(SurfaceElevated)
+                    .background(if (isWatched) Color(0xFF1B3326) else SurfaceElevated)
                     .combinedClickable(
                         // restoreResume=true — from the episode list inside
                         // details, tapping an episode means "continue where
@@ -264,7 +298,17 @@ private fun SeriesEpisodes(state: UiState, vm: MainViewModel) {
                     )
                     .padding(vertical = 12.dp),
                 contentAlignment = Alignment.Center,
-            ) { Text("$ep", fontWeight = FontWeight.SemiBold) }
+            ) {
+                Text("$ep", fontWeight = FontWeight.SemiBold,
+                    color = if (isWatched) Color(0xFF8FE3B0) else Color.Unspecified)
+                if (isWatched) {
+                    Icon(
+                        Icons.Filled.CheckCircle, "watched",
+                        Modifier.size(13.dp).align(Alignment.TopEnd),
+                        tint = Color(0xFF36C26B),
+                    )
+                }
+            }
         }
     }
 }

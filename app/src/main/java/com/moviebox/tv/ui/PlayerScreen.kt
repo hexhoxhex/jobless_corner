@@ -29,6 +29,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -48,6 +49,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -104,6 +106,7 @@ import com.moviebox.tv.ui.theme.TextMuted
 @Composable
 fun PlayerScreen(state: UiState, vm: MainViewModel) {
     val play = state.play
+    val recommendations by vm.recommendations.collectAsState()
     val context = LocalContext.current
     val view = LocalView.current
     val activity = context as? Activity
@@ -693,16 +696,52 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                 )
             }
         }
-        // End-of-content fallback when there's no next episode (movie OR
-        // last episode of the series). Drop the user back to the details
-        // page where "More like this" already lives — better than leaving
-        // them on a static last frame for the rest of the credits.
+        // End-of-content for a movie OR the last episode of a series:
+        // there's no "next episode", so offer the top recommendation as
+        // the next thing to watch. Same countdown UX as the episode Up
+        // Next card — appears at credit-start (UP_NEXT_WINDOW_MS before
+        // the end), 10 s timer, Cancel, or Play now. The user asked NOT
+        // to sit through credits before this shows up, and to be able to
+        // jump straight to the next pick.
         val endOfContent = nearEnd && state.currentSe == null && play?.isLive == false
         val endOfSeries = nearEnd && state.currentSe != null && upNext == null
-        if (endOfContent || endOfSeries) {
+        val nextPick = recommendations.firstOrNull {
+            it.subjectId != state.detailItem?.subjectId
+        }
+        AnimatedVisibility(
+            visible = (endOfContent || endOfSeries) && nextPick != null,
+            modifier = Modifier.align(Alignment.BottomEnd)
+                .padding(end = 22.dp, bottom = 82.dp),
+            enter = androidx.compose.animation.fadeIn() +
+                androidx.compose.animation.slideInVertically { it / 4 },
+            exit = androidx.compose.animation.fadeOut(),
+        ) {
+            if (nextPick != null) {
+                var counter by remember(nextPick) {
+                    mutableStateOf(AUTO_ADVANCE_SECONDS)
+                }
+                LaunchedEffect(nextPick, state.autoplayNext) {
+                    counter = AUTO_ADVANCE_SECONDS
+                    while (counter > 0 && state.autoplayNext) {
+                        kotlinx.coroutines.delay(1_000)
+                        counter -= 1
+                    }
+                    if (state.autoplayNext) vm.openItem(nextPick)
+                }
+                UpNextItemCard(
+                    title = nextPick.title,
+                    coverUrl = nextPick.coverUrl,
+                    secondsRemaining = counter,
+                    onPlayNow = { vm.openItem(nextPick) },
+                    onDismiss = { vm.setAutoplay(false) },
+                )
+            }
+        }
+        // If there's no recommendation to offer (rare — empty catalog),
+        // fall back to the old behaviour: bounce to details at the very
+        // end rather than freeze on the last frame.
+        if ((endOfContent || endOfSeries) && nextPick == null) {
             LaunchedEffect(state.currentSe, play?.mediaUrl) {
-                // Wait for the actual end before bouncing — don't yank the
-                // user out mid-credits if they're enjoying them.
                 while (durationMs > 0 && positionMs < durationMs - 1_500) {
                     kotlinx.coroutines.delay(500)
                 }
@@ -844,6 +883,70 @@ private fun UpNextCard(
                         .padding(horizontal = 14.dp, vertical = 7.dp),
                 ) {
                     Text("Play now",
+                        color = Color.Black,
+                        fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
+                }
+                var cancelFocused by remember { mutableStateOf(false) }
+                Box(
+                    Modifier.clip(RoundedCornerShape(18.dp))
+                        .background(
+                            if (cancelFocused) Color(0x77FFFFFF) else Color(0x33FFFFFF))
+                        .onFocusChanged { cancelFocused = it.isFocused }
+                        .focusable()
+                        .clickable(onClick = onDismiss)
+                        .padding(horizontal = 14.dp, vertical = 7.dp),
+                ) {
+                    Text("Cancel",
+                        color = Color.White,
+                        fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
+                }
+            }
+        }
+    }
+}
+
+/** Variant of [UpNextCard] for the end of a movie or the last episode of
+ *  a series: there's no next episode, so it offers the top recommendation
+ *  by title. Same 10-second countdown + Cancel + Play now + D-pad focus
+ *  semantics. */
+@Composable
+private fun UpNextItemCard(
+    title: String,
+    coverUrl: String?,
+    secondsRemaining: Int,
+    onPlayNow: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val playFocus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { runCatching { playFocus.requestFocus() } }
+    Box(
+        Modifier.clip(RoundedCornerShape(14.dp))
+            .background(Color(0xEE0A0C12))
+            .border(1.dp, Color(0x55FFFFFF), RoundedCornerShape(14.dp))
+            .padding(14.dp)
+            .widthIn(max = 320.dp),
+    ) {
+        Column(horizontalAlignment = Alignment.Start) {
+            Text("Up next in ${secondsRemaining}s",
+                color = Color(0xFFE8B341),
+                fontWeight = FontWeight.Bold, fontSize = 12.sp)
+            Spacer(Modifier.height(4.dp))
+            Text(title, color = Color.White,
+                fontWeight = FontWeight.SemiBold, fontSize = 16.sp,
+                maxLines = 2)
+            Spacer(Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                var playFocused by remember { mutableStateOf(false) }
+                Box(
+                    Modifier.clip(RoundedCornerShape(18.dp))
+                        .background(if (playFocused) Color(0xFFE8B341) else Color.White)
+                        .focusRequester(playFocus)
+                        .onFocusChanged { playFocused = it.isFocused }
+                        .focusable()
+                        .clickable(onClick = onPlayNow)
+                        .padding(horizontal = 14.dp, vertical = 7.dp),
+                ) {
+                    Text("Watch next",
                         color = Color.Black,
                         fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
                 }

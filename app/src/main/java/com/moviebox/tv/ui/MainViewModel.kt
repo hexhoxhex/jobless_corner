@@ -242,6 +242,26 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         downloadDao.all()
             .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
+    /** Set of "subjectId|se|ep" keys the user has FINISHED (watched to
+     *  within 20 s of the end). The episode picker reads this to draw a
+     *  watched check on completed episodes and a "Season complete" mark
+     *  when every present episode in a season is finished. */
+    val watchedKeys: StateFlow<Set<String>> =
+        watchDao.all()
+            .map { history ->
+                history.asSequence()
+                    .filter { it.finished }
+                    .map {
+                        WatchHistoryEntity.keyOf(
+                            it.subjectId,
+                            it.season.takeIf { s -> s > 0 },
+                            it.episode.takeIf { e -> e > 0 },
+                        )
+                    }
+                    .toSet()
+            }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
+
     init {
         // One-shot reset of bounce counters on this version. v0.1.42
         // added the ffmpeg audio decoder — channels that were stuck
