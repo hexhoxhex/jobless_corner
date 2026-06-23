@@ -806,39 +806,41 @@ private const val STALE_FATAL_MS: Long = 30_000L
 
 /** Compute the next (season, episode) tuple based on current UiState, or
  *  null if there is no next episode (last episode of last season, or
- *  seasons data hasn't loaded yet). */
+ *  seasons data hasn't loaded yet).
+ *
+ *  Builds one flat, ordered list of every real (season, episode) across
+ *  the series — using each season's authoritative [SeasonInfo.realEpisodes]
+ *  when the background enumeration has populated it, else the 1..maxEp
+ *  fallback — minus anything in MissingEpisodeCatalog. Then returns the
+ *  tuple immediately after the currently-playing one. This makes the
+ *  cross-season jump (e.g. Family Guy S2 last episode → S3E1) fall out
+ *  naturally and never lands on a phantom episode. */
 private fun nextEpisodeFor(state: UiState): Pair<Int, Int>? {
     val seasons = state.details?.seasons ?: return null
     val se = state.currentSe ?: return null
     val ep = state.currentEp ?: return null
     val subjectId = state.details.subjectId
-    // Walk forward through (season, episode) tuples, skipping any
-    // recorded in MissingEpisodeCatalog. Stops on the first available
-    // one, or returns null after walking off the end of the series.
-    var s = se
-    var e = ep
-    repeat(NEXT_EPISODE_SKIP_LIMIT) {
-        val cur = seasons.firstOrNull { it.season == s } ?: return null
-        val next: Pair<Int, Int> = if (e < cur.episodes) {
-            s to (e + 1)
-        } else {
-            val nextSeason = seasons.getOrNull(
-                seasons.indexOfFirst { it.season == s } + 1)
-                ?: return null
-            nextSeason.season to 1
-        }
-        if (!com.moviebox.tv.data.MissingEpisodeCatalog
-                .isMissing(subjectId, next.first, next.second)
-        ) return next
-        s = next.first; e = next.second
-    }
-    return null
-}
 
-/** Cap on how many missing episodes the auto-advance walk-forward will
- *  skip before giving up. Stops a series with a completely broken season
- *  from looping forever. */
-private const val NEXT_EPISODE_SKIP_LIMIT: Int = 50
+    val flat = buildList {
+        for (s in seasons.sortedBy { it.season }) {
+            val eps = s.realEpisodes ?: (1..s.episodes).toList()
+            for (e in eps) {
+                if (com.moviebox.tv.data.MissingEpisodeCatalog
+                        .isPresent(subjectId, s.season, e)
+                ) add(s.season to e)
+            }
+        }
+    }
+    val idx = flat.indexOf(se to ep)
+    return if (idx >= 0) {
+        flat.getOrNull(idx + 1)
+    } else {
+        // Current episode isn't in the list (it may itself have been
+        // filtered, or details are mid-refresh). Best effort: the first
+        // tuple that sorts after it.
+        flat.firstOrNull { (s, e) -> s > se || (s == se && e > ep) }
+    }
+}
 
 @Composable
 private fun UpNextCard(

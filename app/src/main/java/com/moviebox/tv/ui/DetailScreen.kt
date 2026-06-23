@@ -207,10 +207,20 @@ fun DetailScreen(state: UiState, vm: MainViewModel) {
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SeriesEpisodes(state: UiState, vm: MainViewModel) {
-    val seasons = state.details?.seasons ?: return
-    if (seasons.isEmpty()) return
+    val allSeasons = state.details?.seasons ?: return
+    if (allSeasons.isEmpty()) return
     val subjectId = state.details.subjectId
+    // Once the background enumeration has run, a season with a non-null
+    // but EMPTY realEpisodes is entirely phantom (Family Guy S11/S20/S21
+    // — maxEp lied, aoneroom has no files). Drop those from the picker.
+    // While enumeration is still in flight (realEpisodes == null) we keep
+    // every season so the user isn't staring at a shrinking list.
+    val seasons = allSeasons.filter { it.realEpisodes == null || it.realEpisodes.isNotEmpty() }
+    if (seasons.isEmpty()) return
     var season by remember { mutableIntStateOf(seasons.first().season) }
+    // If the currently-selected season just got dropped as phantom, snap
+    // back to the first surviving season.
+    if (seasons.none { it.season == season }) season = seasons.first().season
     val current = seasons.firstOrNull { it.season == season }
     var open by remember { mutableStateOf(false) }
 
@@ -220,11 +230,18 @@ private fun SeriesEpisodes(state: UiState, vm: MainViewModel) {
     val watched by vm.watchedKeys.collectAsState()
 
     val rawCount = current?.episodes ?: 0
-    // Episodes aoneroom CLAIMS exist (1..maxEp) minus the ones we've
-    // already discovered are phantom. This is what hides Family Guy
-    // S1E8/E9 once they've each failed to resolve once.
-    val episodes = remember(season, rawCount, missing) {
-        (1..rawCount).filter {
+    // Episode list, most-authoritative source first:
+    //   1. current.realEpisodes — the actual file listing aoneroom
+    //      returned (populated by the background enumeration walk).
+    //      Phantom trailing episodes are already absent here.
+    //   2. fallback 1..maxEp while the walk is still running or if it
+    //      couldn't complete.
+    // Either way we ALSO subtract anything in MissingEpisodeCatalog
+    // (episodes that passed enumeration but failed at play time) — belt
+    // and suspenders.
+    val episodes = remember(season, rawCount, current?.realEpisodes, missing) {
+        val base = current?.realEpisodes ?: (1..rawCount).toList()
+        base.filter {
             com.moviebox.tv.data.MissingEpisodeCatalog.isPresent(subjectId, season, it)
         }
     }

@@ -23,6 +23,13 @@ class Repository(
     private val tmdb: TmdbRepository = TmdbRepository(),
 ) {
 
+    /** Per-process cache of completed episode enumerations, keyed by
+     *  aoneroom subjectId. The walk is ~19 network round-trips for a long
+     *  series; caching means re-opening the same series is instant. Only
+     *  successful (complete) walks are cached — see enumerateEpisodes. */
+    private val episodeMapCache =
+        java.util.concurrent.ConcurrentHashMap<String, Map<Int, List<Int>>>()
+
     private fun <T> ApiResponse<T>.unwrap(): T {
         if (code == 0 && message == "ok" && data != null) return data
         // "ok" without data means aoneroom acknowledged the request but has
@@ -243,6 +250,58 @@ class Repository(
             .replace(Regex("\\s+"), " ")
             .trim()
 
+    /**
+     * Walk aoneroom's full resource (file) listing for [subjectId] and
+     * return the REAL episode numbers present per season, keyed by
+     * season number. This is the authoritative answer to "which
+     * episodes actually exist" — seasonInfo.maxEp lies (it's frequently
+     * 1-2 higher than the real count, which is what surfaces as phantom
+     * trailing episodes that fail to play).
+     *
+     * Dedupes across resolutions (the same episode appears once per
+     * available resolution in the listing). Returns null if the walk
+     * couldn't complete — a network error mid-walk, or a listing longer
+     * than [MAX_ENUM_PAGES] pages — so callers fall back to maxEp rather
+     * than risk hiding real episodes on incomplete data.
+     */
+    suspend fun enumerateEpisodes(subjectId: String): Map<Int, List<Int>>? =
+        coroutineScope {
+            episodeMapCache[subjectId]?.let { return@coroutineScope it }
+            val bucket = sortedMapOf<Int, MutableSet<Int>>()
+            var page = 1
+            var walked = 0
+            while (true) {
+                val data = runCatching {
+                    api.resource(
+                        subjectId,
+                        resolution = ENUM_RESOLUTION_HINT,
+                        page = page,
+                        perPage = ENUM_PER_PAGE,
+                    ).unwrap()
+                }.onFailure {
+                    android.util.Log.w("EpisodeEnum",
+                        "page=$page resource() threw: ${it.message}")
+                }.getOrNull() ?: return@coroutineScope null  // network fail
+                for (f in data.list) {
+                    if (f.se > 0 && f.ep > 0) {
+                        bucket.getOrPut(f.se) { sortedSetOf() }.add(f.ep)
+                    }
+                }
+                walked++
+                val pager = data.pager
+                if (pager == null || !pager.hasMore) break
+                if (walked >= MAX_ENUM_PAGES) return@coroutineScope null  // truncated
+                page = pager.nextPage.takeIf { it > 0 } ?: (page + 1)
+            }
+            if (bucket.isEmpty()) {
+                null
+            } else {
+                val result = bucket.mapValues { (_, eps) -> eps.sorted() }
+                episodeMapCache[subjectId] = result
+                result
+            }
+        }
+
     suspend fun details(subjectId: String): Details {
         val d = api.itemDetails(subjectId).unwrap()
         val type = SubjectType.fromCode(d.subjectType)
@@ -416,6 +475,22 @@ class Repository(
 
     companion object {
         private const val PER_PAGE = 20
+
+        // --- Episode enumeration (enumerateEpisodes) ---
+        /** Resolution arg for the listing walk. aoneroom returns files
+         *  across ALL resolutions regardless of this value (it's a max/
+         *  hint, not a filter — see resolveMovie), so 1080 just means
+         *  "give me everything". We dedupe by (se, ep) anyway. */
+        private const val ENUM_RESOLUTION_HINT = 1080
+        /** Page size for the walk. The aoneroom resource endpoint 400s on
+         *  anything above its default of 20, so 20 it is. */
+        private const val ENUM_PER_PAGE = 20
+        /** Safety cap. A long-running animated series (Family Guy: ~400
+         *  episodes, and the listing returns one row per episode×
+         *  resolution) can be large, so allow a generous walk — it's a
+         *  one-time background task, cached after. 120 × 20 = 2400 rows.
+         *  Beyond that we bail to maxEp rather than walk forever. */
+        private const val MAX_ENUM_PAGES = 120
 
         // Full-name → ISO code so deny rules can be either form.
         private val LANG_ALIAS = mapOf(

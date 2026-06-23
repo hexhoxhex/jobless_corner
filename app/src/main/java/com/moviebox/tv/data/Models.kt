@@ -45,8 +45,17 @@ data class HomeContent(val heroes: List<Hero>, val rows: List<HomeRow>)
 
 data class SeasonInfo(
     val season: Int,
+    /** aoneroom's claimed episode count (seasonInfo.maxEp). Unreliable —
+     *  often 1-2 higher than the real number of playable files. Used as
+     *  the immediate fallback before [realEpisodes] is enumerated. */
     val episodes: Int,
     val resolutions: List<Int>,
+    /** The AUTHORITATIVE episode numbers present in aoneroom's actual
+     *  file listing for this season, populated by a background walk of
+     *  the resource pages (see Repository.enumerateEpisodes). Null until
+     *  that walk completes; when non-null it replaces the 1..[episodes]
+     *  range in the UI, so phantom trailing episodes never show. */
+    val realEpisodes: List<Int>? = null,
 )
 
 data class Dub(val name: String, val code: String, val original: Boolean)

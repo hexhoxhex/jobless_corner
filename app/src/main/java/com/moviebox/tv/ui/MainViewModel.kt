@@ -913,12 +913,57 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     // Verify in the background — the Play button reflects the
                     // result before the user even reaches for it.
                     precheckPlayback(resolvedId, d)
+                    // Enumerate the REAL episode list in the background so
+                    // phantom trailing episodes are hidden before the user
+                    // ever taps one.
+                    enumerateEpisodesInBackground(resolvedId, d)
                 }
                 .onFailure { e ->
                     _state.update {
                         it.copy(detailLoading = false, error = e.message)
                     }
                 }
+        }
+    }
+
+    /** Background walk of aoneroom's file listing to replace each
+     *  season's maxEp-based episode count with the authoritative real
+     *  set. Non-blocking: details render immediately with maxEp, then
+     *  the grid refines (phantom episodes drop out) when this finishes.
+     *  Best-effort — on any failure the maxEp fallback stands. */
+    private fun enumerateEpisodesInBackground(resolvedId: String, d: Details) {
+        if (!d.isSeries || d.seasons.isEmpty()) return
+        viewModelScope.launch {
+            val realMap = runCatching { repo.enumerateEpisodes(resolvedId) }
+                .getOrNull() ?: return@launch  // walk failed/truncated → keep maxEp
+            // Guard against the user having navigated away mid-walk.
+            val cur = _state.value
+            if (cur.details?.subjectId != d.subjectId ||
+                cur.detailItem?.subjectId != resolvedId
+            ) return@launch
+            // The walk completed (enumerateEpisodes only returns non-null
+            // on a full walk), so absence of a season from realMap is
+            // AUTHORITATIVE: that season is entirely phantom (Family Guy
+            // S11/S20/S21 — maxEp claims they exist, aoneroom has zero
+            // files). Set realEpisodes for EVERY season: the real list,
+            // or an empty list for phantom seasons. The UI then drops
+            // empty seasons from the picker.
+            val refined = d.seasons.map { s ->
+                s.copy(realEpisodes = realMap[s.season] ?: emptyList())
+            }
+            val dropped = d.seasons.count { realMap[it.season].isNullOrEmpty() }
+            android.util.Log.i(
+                "EpisodeEnum",
+                "${d.title}: refined ${d.seasons.size} seasons " +
+                    "($dropped phantom seasons dropped)",
+            )
+            _state.update { st ->
+                // Only apply if the details in state are still THIS series
+                // (re-check after the suspend point).
+                if (st.details?.subjectId == d.subjectId) {
+                    st.copy(details = st.details.copy(seasons = refined))
+                } else st
+            }
         }
     }
 
@@ -1194,7 +1239,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
             if (season != null) {
                 runCatching { repo.details(effectiveId) }
-                    .onSuccess { d -> _state.update { it.copy(details = d) } }
+                    .onSuccess { d ->
+                        _state.update { it.copy(details = d) }
+                        enumerateEpisodesInBackground(effectiveId, d)
+                    }
             }
             resolve()
         }
@@ -1336,7 +1384,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (h.season > 0) {
             viewModelScope.launch {
                 runCatching { repo.details(h.subjectId) }
-                    .onSuccess { d -> _state.update { it.copy(details = d) } }
+                    .onSuccess { d ->
+                        _state.update { it.copy(details = d) }
+                        enumerateEpisodesInBackground(h.subjectId, d)
+                    }
             }
         }
         resolve()
