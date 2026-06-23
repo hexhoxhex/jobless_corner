@@ -841,6 +841,16 @@ private const val DRIFT_DANGER_MS: Long = 2_500L
 private const val STALL_MS: Long = 8_000L
 private const val STALE_FATAL_MS: Long = 30_000L
 
+/** Bandwidth-bound detection. A channel that produces this many deep
+ *  hard-stalls (STALL_RECOVERY, playhead tens of seconds behind the
+ *  window because segments couldn't download) within [BANDWIDTH_WINDOW_MS]
+ *  is exceeding the connection's sustained throughput — NOT a manifest or
+ *  stream problem. We show a "low bandwidth" hint and keep recovering
+ *  natively rather than bouncing to the WebView fallback, which needs the
+ *  same bandwidth and carries ads. */
+private const val BANDWIDTH_STALL_THRESHOLD: Int = 2
+private const val BANDWIDTH_WINDOW_MS: Long = 3 * 60 * 1000L
+
 /** Compute the next (season, episode) tuple based on current UiState, or
  *  null if there is no next episode (last episode of last season, or
  *  seasons data hasn't loaded yet).
@@ -1186,6 +1196,14 @@ private fun VideoPlayer(
     // channels, so a previous channel's rotting manifest doesn't
     // count against a freshly-played one.
     val behindLiveWindow = remember(mediaUrl) { mutableListOf<Long>() }
+    // Track deep "hard stall" recoveries (the player fell tens of seconds
+    // behind the window because segments couldn't download). Repeated
+    // hard stalls = the channel's bitrate exceeds the connection. When the
+    // BLW cascade then escalates, we use this to tell a BANDWIDTH problem
+    // apart from a manifest-window problem: bandwidth → show a hint and
+    // keep recovering natively (WebView needs the SAME bandwidth + has ads
+    // — bouncing there is pointless); manifest-window → WebView as before.
+    val bandwidthStalls = remember(mediaUrl) { mutableListOf<Long>() }
     // Stall-detection state for the per-second tick. stallLastPos is
     // the last observed currentPosition; stallSameSince is when it
     // first stopped advancing. Both reset per channel session.
@@ -1569,6 +1587,11 @@ private fun VideoPlayer(
                         "PLAYER STALL_RECOVERY pos=$pos dur=$dur " +
                             "(anchored ${-pos / 1000}s behind window) — re-prepare",
                     )
+                    // Record this hard stall — a cluster of these means
+                    // the connection can't sustain the channel's bitrate.
+                    val nowMs = SystemClock.elapsedRealtime()
+                    bandwidthStalls.removeAll { nowMs - it > BANDWIDTH_WINDOW_MS }
+                    bandwidthStalls.add(nowMs)
                     runCatching {
                         exo.seekToDefaultPosition()
                         exo.prepare()
@@ -1735,6 +1758,37 @@ private fun VideoPlayer(
                             .apply { add(now) }
                         behindLiveWindow.clear(); behindLiveWindow.addAll(recentBehind)
                         if (recentBehind.size >= BEHIND_THRESHOLD) {
+                            // Bandwidth vs manifest-window: if we've also seen
+                            // a cluster of deep hard-stalls, the channel's
+                            // bitrate exceeds the connection — bouncing to
+                            // WebView is pointless (same bandwidth, plus ads).
+                            // Show a hint and keep recovering natively instead.
+                            val nowMs = SystemClock.elapsedRealtime()
+                            bandwidthStalls.removeAll { nowMs - it > BANDWIDTH_WINDOW_MS }
+                            val bandwidthBound = bandwidthStalls.size >= BANDWIDTH_STALL_THRESHOLD
+                            if (bandwidthBound) {
+                                android.util.Log.w(
+                                    "LiveDiag",
+                                    "PLAYER BEHIND_LIVE_WINDOW × ${recentBehind.size}" +
+                                        " WITH ${bandwidthStalls.size} hard-stalls — " +
+                                        "BANDWIDTH-bound, NOT manifest. Hint + keep " +
+                                        "native (WebView won't help).",
+                                )
+                                stabilisingState.value(
+                                    "Low bandwidth — this channel needs a faster " +
+                                        "connection and may keep buffering",
+                                )
+                                behindLiveWindow.clear()
+                                // Recover in place; don't escalate to WebView.
+                                runCatching {
+                                    val win = exo.duration
+                                    if (win > 0) {
+                                        exo.seekTo(maxOf(0L, win - LIVE_TARGET_OFFSET_MS))
+                                    } else exo.seekToDefaultPosition()
+                                    exo.prepare()
+                                }
+                                return
+                            }
                             android.util.Log.w(
                                 "LiveDiag",
                                 "PLAYER BEHIND_LIVE_WINDOW × ${recentBehind.size}" +
