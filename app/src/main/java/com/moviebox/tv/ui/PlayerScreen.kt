@@ -813,8 +813,15 @@ private const val BEHIND_LIVE_WINDOW_MS: Long = 3 * 60 * 1000L
  *  kept playing — the user's "video buffers, audio clean" report. 15s
  *  in a 24s manifest window gives ~50% more cushion while still
  *  leaving ~9s of back-edge margin (handled by the proactive drift
- *  seek). Costs ~5s more latency-behind-live, imperceptible for sport. */
-private const val LIVE_TARGET_OFFSET_MS: Long = 15_000L
+ *  seek). Costs ~5s more latency-behind-live, imperceptible for sport.
+ *
+ *  v0.1.59: 15s → 18s for marginal-bandwidth channels (BBC One UK,
+ *  1080p50 @ 9.7 Mbps on a connection right at the edge). A deeper
+ *  cushion absorbs more of the video-queue micro-drains that show as
+ *  "video hitches, audio fine". 18s in the 24s window still leaves 6s
+ *  of back-edge margin. Paired with a gentle 1.06 max speed so the
+ *  player doesn't burn the cushion racing back to the live edge. */
+private const val LIVE_TARGET_OFFSET_MS: Long = 18_000L
 
 /** Proactive drift prevention. When the player's position drops to
  *  within [DRIFT_DANGER_MS] of the back edge of the live manifest
@@ -1318,8 +1325,13 @@ private fun VideoPlayer(
             // The deeper cushion is what rides out the network dips that
             // were starving the video sample queue while audio kept
             // playing. Recovery-after-BLW prepare() still resumes fast.
+            // v0.1.59: minBuffer 12→15, start/rebuffer 2→3s. Marginal-
+            // bandwidth channels do better starting with a bigger cushion
+            // and waiting a touch longer after a stall before resuming, so
+            // they don't immediately re-starve. minBuffer is capped in
+            // practice by the 18s live offset.
             DefaultLoadControl.Builder()
-                .setBufferDurationsMs(12_000, 24_000, 2_000, 2_000)
+                .setBufferDurationsMs(15_000, 24_000, 3_000, 3_000)
                 .setBackBuffer(0, false)
                 .build()
         } else {
@@ -1501,7 +1513,7 @@ private fun VideoPlayer(
                     // the player resumes at 1.0× — no slow-motion penalty.
                     MediaItem.LiveConfiguration.Builder()
                         .setTargetOffsetMs(LIVE_TARGET_OFFSET_MS)
-                        .setMinOffsetMs(10_000)
+                        .setMinOffsetMs(14_000)
                         .setMaxOffsetMs(22_000)
                         .setMinPlaybackSpeed(1.0f)
                         // v0.1.57: 1.08 → 1.12. Let ExoPlayer's NATIVE
@@ -1514,7 +1526,12 @@ private fun VideoPlayer(
                         // symptom on channels that drift often. 1.12×
                         // commentary is barely noticeable; a video
                         // freeze is very noticeable.
-                        .setMaxPlaybackSpeed(1.12f)
+                        // v0.1.59: 1.12 → 1.06. With the deeper 18s
+                        // cushion, gentle catch-up preserves the buffer
+                        // (aggressive catch-up races to live and drains
+                        // it). For marginal bandwidth, stable-and-deep
+                        // beats current-but-starving.
+                        .setMaxPlaybackSpeed(1.06f)
                         .build()
                 )
                 .build()
