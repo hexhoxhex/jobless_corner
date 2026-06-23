@@ -801,8 +801,20 @@ private const val BEHIND_LIVE_WINDOW_MS: Long = 3 * 60 * 1000L
  *  window. Drives BOTH [MediaItem.LiveConfiguration.setTargetOffsetMs]
  *  AND the post-seek landing position for the proactive drift
  *  prevention below — they MUST agree, or the player will speed-
- *  adjust against the seek and you'll see slow-motion or jitter. */
-private const val LIVE_TARGET_OFFSET_MS: Long = 10_000L
+ *  adjust against the seek and you'll see slow-motion or jitter.
+ *
+ *  v0.1.56: raised 10s → 15s. The offset is the HARD CAP on how much
+ *  video we can buffer ahead — ExoPlayer speeds up (maxPlaybackSpeed)
+ *  to hold the playhead at this offset, so a 10s offset meant at most
+ *  ~10s of cushion regardless of LoadControl.maxBuffer. For a high-
+ *  bitrate single-variant live stream (FOX USA: 720p60, 3.23 Mbps, no
+ *  lower rendition to drop to) a 10s cushion drained on every network
+ *  dip and the VIDEO sample queue starved while the deeper AUDIO queue
+ *  kept playing — the user's "video buffers, audio clean" report. 15s
+ *  in a 24s manifest window gives ~50% more cushion while still
+ *  leaving ~9s of back-edge margin (handled by the proactive drift
+ *  seek). Costs ~5s more latency-behind-live, imperceptible for sport. */
+private const val LIVE_TARGET_OFFSET_MS: Long = 15_000L
 
 /** Proactive drift prevention. When the player's position drops to
  *  within [DRIFT_DANGER_MS] of the back edge of the live manifest
@@ -1265,19 +1277,24 @@ private fun VideoPlayer(
             // wallclock seconds even after the codec already had a
             // frame ready.
             //
-            // New profile fits inside the manifest:
-            //   minBuffer 8 s            — keep this much ahead
-            //   maxBuffer 18 s           — cap below the 24 s window so
-            //                              we never run out the back edge
-            //   bufferForPlayback 1.5 s  — start playing the moment we
-            //                              have ~1.5 s of content
-            //   bufferAfterRebuffer 1 s  — resume in ~1 s (was 3 s)
+            // v0.1.56 — tuned for high-bitrate single-variant streams
+            // (FOX USA 720p60 @ 3.23 Mbps) on a marginal connection. The
+            // governing lever is LIVE_TARGET_OFFSET_MS (now 15s) which
+            // caps how much we can buffer ahead; these durations let
+            // ExoPlayer actually FILL that cushion:
+            //   minBuffer 12 s           — try to keep 12s of video ahead
+            //   maxBuffer 24 s           — = the full manifest window;
+            //                              the offset caps the real value
+            //   bufferForPlayback 2 s    — start with a small cushion
+            //   bufferAfterRebuffer 2 s  — after a starve, wait for 2s of
+            //                              video before resuming so we
+            //                              don't immediately re-starve
             //
-            // The recovery-after-BLW prepare() now resumes in ~1 s of
-            // wallclock instead of 10 s — invisible to the user in most
-            // cases, vs the current visible black-screen pause.
+            // The deeper cushion is what rides out the network dips that
+            // were starving the video sample queue while audio kept
+            // playing. Recovery-after-BLW prepare() still resumes fast.
             DefaultLoadControl.Builder()
-                .setBufferDurationsMs(8_000, 18_000, 1_500, 1_000)
+                .setBufferDurationsMs(12_000, 24_000, 2_000, 2_000)
                 .setBackBuffer(0, false)
                 .build()
         } else {
@@ -1436,35 +1453,33 @@ private fun VideoPlayer(
                     // and never slow down (slow motion is what you SEE;
                     // hitting the back edge is what you HEAR as a pause).
                     //
-                    // Configuration:
-                    //   targetOffset = LIVE_TARGET_OFFSET_MS = 10 s.
-                    //     A comfortable middle of the 24 s window —
-                    //     plenty of room for jitter on both sides.
-                    //   minOffset = 6 s. Stops the player from speeding
-                    //     up to a point where the next network hiccup
-                    //     would push us into "too close to live edge"
-                    //     territory.
-                    //   maxOffset = 18 s. Stops the player from drifting
-                    //     so far back that the manifest rolls past us.
-                    //   minPlaybackSpeed = 1.0 (DON'T slow down).
-                    //     Slow-motion playback is more user-visible
-                    //     than a small offset drift. We'd rather be
-                    //     0.5 s ahead of target than show 0.95× speed.
-                    //   maxPlaybackSpeed = 1.10 (gentle catch-up).
-                    //     If we DO drift back, speed up just enough to
-                    //     return to target without audible pitch shift.
+                    // Configuration (v0.1.56 — deeper for buffer cushion):
+                    //   targetOffset = LIVE_TARGET_OFFSET_MS = 15 s.
+                    //     Sits further behind the live edge so there's a
+                    //     bigger video buffer to ride out network dips on
+                    //     high-bitrate streams. The offset IS the cushion
+                    //     cap (see the constant's doc).
+                    //   minOffset = 10 s. Don't let the player speed up
+                    //     past a 10s cushion — that's the whole point.
+                    //   maxOffset = 22 s. Within the 24 s window, 2 s of
+                    //     hard back-edge margin (the proactive seek at
+                    //     DRIFT_DANGER_MS = 4.5 s from the back edge fires
+                    //     well before this).
+                    //   minPlaybackSpeed = 1.0 (DON'T slow down — slow
+                    //     motion is more visible than a small drift).
+                    //   maxPlaybackSpeed = 1.08 (gentle catch-up — lower
+                    //     than before so it doesn't aggressively burn the
+                    //     cushion racing back to the live edge).
                     //
-                    // The proactive 1 Hz seek in the per-second tick
-                    // catches catastrophic drift before the player
-                    // hits BLW (see DRIFT_DANGER_MS below). Seeks land
-                    // at exactly target offset so the player resumes
-                    // at 1.0× — no slow-motion penalty.
+                    // The proactive 1 Hz seek catches catastrophic drift
+                    // before BLW; seeks land at exactly target offset so
+                    // the player resumes at 1.0× — no slow-motion penalty.
                     MediaItem.LiveConfiguration.Builder()
                         .setTargetOffsetMs(LIVE_TARGET_OFFSET_MS)
-                        .setMinOffsetMs(6_000)
-                        .setMaxOffsetMs(18_000)
+                        .setMinOffsetMs(10_000)
+                        .setMaxOffsetMs(22_000)
                         .setMinPlaybackSpeed(1.0f)
-                        .setMaxPlaybackSpeed(1.10f)
+                        .setMaxPlaybackSpeed(1.08f)
                         .build()
                 )
                 .build()
