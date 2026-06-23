@@ -183,10 +183,16 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
             controlsVisible = false
         }
     }
-    // Tick the scrubber while controls are visible. No work otherwise — we
-    // don't want a 500ms timer firing forever when the user can't see it.
+    // Tick position/duration every 500ms. For VOD this must run even with
+    // controls hidden, because the Up Next auto-advance detector reads
+    // positionMs/durationMs to decide when an episode is near its end —
+    // gating it on controls-visible (the old behaviour) meant the values
+    // could be stale, which let the countdown linger into (and even skip
+    // past) the freshly-started next episode. For LIVE we only need it for
+    // the visible scrubber, so keep the controls-visible gate there.
     LaunchedEffect(controlsVisible, play) {
-        if (!controlsVisible) return@LaunchedEffect
+        val isLiveContent = play?.isLive == true
+        if (!controlsVisible && isLiveContent) return@LaunchedEffect
         while (true) {
             exoRef?.let {
                 if (!scrubbing) positionMs = it.currentPosition
@@ -194,6 +200,18 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
             }
             kotlinx.coroutines.delay(500)
         }
+    }
+    // Reset the locally-tracked position/duration the instant the playing
+    // episode changes, so the Up Next card's nearEnd check cannot linger
+    // on the previous episode's end-of-file values. Without this, after an
+    // auto-advance the card kept counting into the new episode and could
+    // fire again before the new episode's real position arrived — skipping
+    // an episode. Keyed on the episode identity AND the media URL so both
+    // the immediate intent (playEpisode bumps currentEp) and the actual
+    // media swap reset it.
+    LaunchedEffect(state.currentSe, state.currentEp, play?.mediaUrl) {
+        positionMs = 0L
+        durationMs = 0L
     }
 
     // Auto-dismiss the status pill ~1.5s after it appears.
