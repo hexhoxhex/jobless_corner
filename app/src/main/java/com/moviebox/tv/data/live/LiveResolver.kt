@@ -46,20 +46,72 @@ class LiveResolver(
      * holds, but it's still the right next step before giving up).
      */
     suspend fun resolveStream(channelId: String): String? = withContext(Dispatchers.IO) {
-        for (suffix in DADDY_ENDPOINTS) {
-            runCatching { tryEndpoint(channelId, suffix) }
-                .getOrNull()
-                ?.let {
-                    com.moviebox.tv.debug.ProviderHealth.success("donis")
-                    return@withContext it
-                }
+        // Try every known resolver host × every daddyN suffix. Hosts are
+        // ordered cheap-first: the current cached/discovered host, then
+        // known-good hardcodes, then last-resort discovery from dlhd.
+        for (host in resolverHosts(channelId)) {
+            for (suffix in DADDY_ENDPOINTS) {
+                runCatching { tryEndpoint(host, channelId, suffix) }
+                    .getOrNull()
+                    ?.let {
+                        com.moviebox.tv.debug.ProviderHealth.success("donis@$host")
+                        rememberWorkingHost(host)
+                        return@withContext it
+                    }
+            }
         }
-        com.moviebox.tv.debug.ProviderHealth.failure("donis", "resolve failed (all daddy endpoints)")
+        com.moviebox.tv.debug.ProviderHealth.failure(
+            "donis", "resolve failed (all hosts × all daddy endpoints)")
         null
     }
 
-    private fun tryEndpoint(channelId: String, daddySuffix: String): String? {
-        val url = "https://donis.jimpenopisonline.online/premiumtv/daddy$daddySuffix.php?id=$channelId"
+    /** Ordered list of resolver hosts to try for [channelId]. Cached host
+     *  first (free), known-good hardcodes next, then a one-shot dynamic
+     *  discovery scrape of dlhd.pk as the safety net. Dynamic discovery
+     *  is what makes this resolver self-healing across infrastructure
+     *  changes — when dlhd rotates from donis → hamis → next, the app
+     *  finds the new host on its own without a code change. */
+    private fun resolverHosts(channelId: String): List<String> {
+        val out = LinkedHashSet<String>()
+        cachedHost?.let { out.add(it) }
+        out.addAll(KNOWN_HOSTS)
+        // Only scrape if neither cache nor known hosts have given us a
+        // result yet. Limited to one scrape attempt per resolveStream
+        // call to keep cold-start latency bounded.
+        if (out.isNotEmpty()) {
+            runCatching { discoverHostFromDlhd(channelId) }
+                .getOrNull()?.let { out.add(it) }
+        }
+        return out.toList()
+    }
+
+    /** Fetch `https://dlhd.pk/stream/stream-{id}.php` and pull the
+     *  current resolver host out of the embedded
+     *  `…/premiumtv/daddyN.php?id=…` URL that always appears in the
+     *  page's HTML. dlhd writes this in plaintext (it's just the link
+     *  to the page's own backend), so no JS decoding required.
+     *  Returns null if scrape failed or no URL matched. */
+    private fun discoverHostFromDlhd(channelId: String): String? {
+        val req = Request.Builder()
+            .url("https://dlhd.pk/stream/stream-$channelId.php")
+            .header("User-Agent", CHROME_ANDROID_UA)
+            .header("Referer", "https://dlhd.pk/watch.php?id=$channelId")
+            .build()
+        return runCatching {
+            client.newCall(req).execute().use { r ->
+                if (!r.isSuccessful) return@use null
+                val body = r.body?.string() ?: return@use null
+                HOST_DISCOVERY_RE.find(body)?.groupValues?.get(1)
+            }
+        }.getOrNull()
+    }
+
+    private fun rememberWorkingHost(host: String) { cachedHost = host }
+
+    private fun tryEndpoint(
+        host: String, channelId: String, daddySuffix: String,
+    ): String? {
+        val url = "https://$host/premiumtv/daddy$daddySuffix.php?id=$channelId"
         val referer = "https://dlhd.pk/stream/stream-$channelId.php"
         val req = Request.Builder()
             .url(url)
@@ -96,9 +148,37 @@ class LiveResolver(
         }.getOrNull()
     }
 
+    /** Discovered-good resolver host across the resolveStream() call.
+     *  Promoted to the head of [resolverHosts] for subsequent calls so
+     *  we don't pay the discovery cost more than once per
+     *  infrastructure rotation. Process-local; lost on app restart and
+     *  re-discovered cheaply on first play. */
+    @Volatile private var cachedHost: String? = null
+
     companion object {
         /** Daddy CDN endpoint suffixes, canonical first. Empty = `daddy.php`. */
         private val DADDY_ENDPOINTS = listOf("", "2", "3", "4", "5")
+
+        /** Hardcoded fallback list, most-recently-confirmed first. dlhd
+         *  rotates this domain periodically (each entry was the
+         *  authoritative resolver until it was replaced):
+         *    - hamis.romponalis.st            (current, captured 2026-06-23)
+         *    - donis.jimpenopisonline.online  (NXDOMAIN since 2026-06)
+         *  Older entries kept as last-ditch fallbacks. The dynamic
+         *  scrape in discoverHostFromDlhd() is what handles future
+         *  rotations without a code change. */
+        private val KNOWN_HOSTS = listOf(
+            "hamis.romponalis.st",
+            "donis.jimpenopisonline.online",
+        )
+
+        /** Captures the resolver host from the daddyN URL dlhd writes
+         *  into stream-X.php's HTML. Expects a hostname (letters,
+         *  digits, dots, hyphens) followed by /premiumtv/daddyN.php. */
+        private val HOST_DISCOVERY_RE = Regex(
+            """https?://([a-z0-9.-]+)/premiumtv/daddy\d*\.php""",
+            RegexOption.IGNORE_CASE,
+        )
 
         /** First `window.atob('...')` in the donis player HTML. Multiple
          *  atob() calls exist (ad-related); always take the first one. */
