@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  PlayerView backed by a TextureView instead of the default SurfaceView.
+  Used for sub-60fps live channels: this TCL panel is locked to 60Hz and
+  its SurfaceView/BLAST compositor throttles non-tunneled 50fps content to
+  ~7fps (a slideshow). Tunneling fixes the rate but slow-motions 50fps on
+  the 60Hz panel. A TextureView composites through the GPU, bypassing that
+  BLAST throttle, so it can present the full frame rate at correct speed
+  (with the unavoidable 50->60 judder). TextureView can't tunnel and costs
+  a little more GPU, so it's ONLY used where SurfaceView fails (low fps);
+  60fps channels keep the SurfaceView + tunneling path.
+-->
+<androidx.media3.ui.PlayerView
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    app:surface_type="texture_view"
+    app:use_controller="false"
+    app:show_buffering="never"
+    app:resize_mode="fit" />

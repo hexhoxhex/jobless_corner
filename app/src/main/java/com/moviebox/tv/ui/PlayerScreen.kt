@@ -93,6 +93,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.MediaSource
+import com.moviebox.tv.R
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.moviebox.tv.data.CaptionTrack
@@ -1229,6 +1230,12 @@ private fun VideoPlayer(
     // per-second tick. Resets per channel so each stream is evaluated on
     // its own frame rate.
     var tunnelingDecided by remember(mediaUrl) { mutableStateOf(false) }
+    // Set true when a sub-60fps live stream is detected: switch the video
+    // surface from SurfaceView to TextureView. On this 60Hz-locked TCL,
+    // SurfaceView throttles non-tunneled 50fps to ~7fps and tunneled
+    // 50fps slow-motions; the TextureView (GPU compositor) presents the
+    // full frame rate at correct speed. Resets per channel.
+    var useTextureView by remember(mediaUrl) { mutableStateOf(false) }
     var lastKey by remember { mutableStateOf<String?>(null) }
     val liveState = rememberUpdatedState(isLive)
 
@@ -1393,22 +1400,62 @@ private fun VideoPlayer(
         // HEVC, etc.) — no extra .so files needed. They're slower than
         // hardware but tolerate segment-boundary format hints without
         // tearing the codec down, which was the Realtek failure mode.
-        // Use NextRenderersFactory — drop-in replacement for the Media3
-        // DefaultRenderersFactory that ships an ffmpeg AAC audio decoder.
-        // The platform AAC decoder on this TCL refuses to open AudioTrack
-        // for 24 kHz stereo (FOX USA / FOXNY USA's audio); ffmpeg decodes
-        // the same stream and outputs 48 kHz, which the AudioTrack
-        // accepts. EXTENSION_RENDERER_MODE_PREFER means ffmpeg gets
-        // chosen ahead of the platform decoder when both can handle the
-        // mime type — costs ~5 MB APK but lets every channel play
-        // natively without the WebView fallback.
+        // ffmpeg renderers for live, but AUDIO ONLY.
+        //
+        // We use nextlib's NextRenderersFactory for its ffmpeg AAC audio
+        // decoder: the platform AAC decoder on this TCL refuses to open
+        // AudioTrack for 24 kHz stereo (FOX USA / FOXNY USA), while ffmpeg
+        // decodes + resamples to 48 kHz which AudioTrack accepts.
+        //
+        // REGRESSION FIX (v0.1.62): the factory ALSO ships an ffmpeg
+        // *video* renderer, and EXTENSION_RENDERER_MODE_PREFER made
+        // ExoPlayer prefer it over the hardware decoder for EVERY live
+        // stream. Software-decoding a 1080p50 channel (BBC One UK) caps
+        // at ~8 fps — which is exactly the "slow motion / sluggish" the
+        // user saw, and a regression from when v0.1.42 added the audio
+        // fix. (The stream is fine — it plays perfectly in a browser.)
+        // So we keep PREFER (ffmpeg audio wins, fixing FOX) but strip the
+        // ffmpeg *video* renderer out of the list, so video always uses
+        // the platform hardware decoder. Best of both: hardware video +
+        // ffmpeg-fallback audio.
         val renderersFactory = if (isLive) {
-            io.github.anilbeesetti.nextlib.media3ext.ffdecoder
-                .NextRenderersFactory(context)
-                .setExtensionRendererMode(
-                    androidx.media3.exoplayer.DefaultRenderersFactory
-                        .EXTENSION_RENDERER_MODE_PREFER,
-                )
+            object : io.github.anilbeesetti.nextlib.media3ext.ffdecoder
+                .NextRenderersFactory(context) {
+                override fun buildVideoRenderers(
+                    context: android.content.Context,
+                    extensionRendererMode: Int,
+                    mediaCodecSelector: androidx.media3.exoplayer.mediacodec
+                        .MediaCodecSelector,
+                    enableDecoderFallback: Boolean,
+                    eventHandler: android.os.Handler,
+                    eventListener: androidx.media3.exoplayer.video
+                        .VideoRendererEventListener,
+                    allowedVideoJoiningTimeMs: Long,
+                    out: ArrayList<androidx.media3.exoplayer.Renderer>,
+                ) {
+                    super.buildVideoRenderers(
+                        context, extensionRendererMode, mediaCodecSelector,
+                        enableDecoderFallback, eventHandler, eventListener,
+                        allowedVideoJoiningTimeMs, out,
+                    )
+                    // Drop the ffmpeg software video renderer — hardware
+                    // MediaCodecVideoRenderer only.
+                    val before = out.size
+                    out.removeAll {
+                        it is io.github.anilbeesetti.nextlib.media3ext
+                            .ffdecoder.FfmpegVideoRenderer
+                    }
+                    android.util.Log.i(
+                        "LiveDiag",
+                        "RENDERERS removed ${before - out.size} ffmpeg video " +
+                            "renderer(s); ${out.size} video renderer(s) left " +
+                            "(hardware)",
+                    )
+                }
+            }.setExtensionRendererMode(
+                androidx.media3.exoplayer.DefaultRenderersFactory
+                    .EXTENSION_RENDERER_MODE_PREFER,
+            )
         } else {
             androidx.media3.exoplayer.DefaultRenderersFactory(context)
         }
@@ -1604,19 +1651,25 @@ private fun VideoPlayer(
                 if (fps > 0f) {
                     tunnelingDecided = true
                     val tunnelingOn = trackSelector.parameters.tunnelingEnabled
-                    if (fps < TUNNEL_MIN_FPS && tunnelingOn) {
+                    if (fps < TUNNEL_MIN_FPS) {
                         android.util.Log.w(
                             "LiveDiag",
                             "PLAYER ${fps}fps < $TUNNEL_MIN_FPS on 60Hz-locked " +
-                                "panel — disabling tunneling to fix slow-motion",
+                                "panel — TextureView + no tunneling (fixes " +
+                                "slow-motion AND the SurfaceView ~7fps throttle)",
                         )
                         runCatching {
-                            trackSelector.parameters = trackSelector
-                                .buildUponParameters()
-                                .setTunnelingEnabled(false)
-                                .build()
-                            exo.prepare()
+                            if (tunnelingOn) {
+                                trackSelector.parameters = trackSelector
+                                    .buildUponParameters()
+                                    .setTunnelingEnabled(false)
+                                    .build()
+                            }
                         }
+                        // Switch the surface to TextureView. The AndroidView
+                        // below recreates on this flag; exo re-attaches to
+                        // the new surface, which presents at full fps.
+                        useTextureView = true
                     } else {
                         android.util.Log.i(
                             "LiveDiag",
@@ -2125,30 +2178,48 @@ private fun VideoPlayer(
         vodDrops.reset()
     }
 
-    AndroidView(
-        modifier = modifier,
-        factory = { ctx ->
-            PlayerView(ctx).apply {
-                player = exo
-                useController = false   // we own the chrome — see PlayerScreen
-                setShowSubtitleButton(false)
-                setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER)
-                layoutParams = ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                )
-            }
-        },
-        update = { it.resizeMode = resizeMode },
+    // Surface choice keyed on useTextureView. When it flips (a sub-60fps
+    // live stream was detected), Compose disposes the SurfaceView-backed
+    // PlayerView and inflates the TextureView one; exo re-attaches to the
+    // new surface. SurfaceView is the default everywhere else (lower
+    // power, supports tunneling for 60fps live + clean VOD).
+    val playerOnRelease: (PlayerView) -> Unit = { playerView ->
         // SURFACE LEAK FIX: PlayerView holds a SurfaceView whose GPU
         // render-target only gets freed if we explicitly detach the player
         // before the view leaves composition. On TCL Android TVs the GPU
         // has 8 RTS IDs total; after 8 reconnect cycles without this
         // cleanup the GPU panics with "HWPerfSetSurfaceInfo: Max RTS IDs
-        // (8) reached" and subsequent ExoPlayer surfaces refuse to render
-        // — visible to the user as "reconnecting" with a black screen.
-        onRelease = { playerView ->
-            runCatching { playerView.player = null }
-        },
-    )
+        // (8) reached" and subsequent ExoPlayer surfaces refuse to render.
+        runCatching { playerView.player = null }
+    }
+    if (useTextureView) {
+        AndroidView(
+            modifier = modifier,
+            factory = { ctx ->
+                (android.view.LayoutInflater.from(ctx)
+                    .inflate(R.layout.player_texture, null) as PlayerView)
+                    .apply { player = exo }
+            },
+            update = { it.resizeMode = resizeMode },
+            onRelease = playerOnRelease,
+        )
+    } else {
+        AndroidView(
+            modifier = modifier,
+            factory = { ctx ->
+                PlayerView(ctx).apply {
+                    player = exo
+                    useController = false   // we own the chrome
+                    setShowSubtitleButton(false)
+                    setShowBuffering(PlayerView.SHOW_BUFFERING_NEVER)
+                    layoutParams = ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                    )
+                }
+            },
+            update = { it.resizeMode = resizeMode },
+            onRelease = playerOnRelease,
+        )
+    }
 }
