@@ -858,6 +858,14 @@ private const val STALE_FATAL_MS: Long = 30_000L
 private const val BANDWIDTH_STALL_THRESHOLD: Int = 2
 private const val BANDWIDTH_WINDOW_MS: Long = 3 * 60 * 1000L
 
+/** Frame-rate threshold for keeping tunneled video. This TV's panel is
+ *  locked to 60Hz (no 50Hz mode, not changeable). Tunneling presents
+ *  content at or above this rate cleanly (60fps → 60Hz, 1:1) but slow-
+ *  motions anything below (50fps, 25fps). So tunnel only at/above this;
+ *  below it, fall back to SurfaceFlinger which does correct-speed frame
+ *  conversion. 55 sits between 50 and 59.94 so both classes land right. */
+private const val TUNNEL_MIN_FPS: Float = 55f
+
 /** Compute the next (season, episode) tuple based on current UiState, or
  *  null if there is no next episode (last episode of last season, or
  *  seasons data hasn't loaded yet).
@@ -1216,6 +1224,11 @@ private fun VideoPlayer(
     // first stopped advancing. Both reset per channel session.
     var stallLastPos by remember(mediaUrl) { mutableStateOf(Long.MIN_VALUE) }
     var stallSameSince by remember(mediaUrl) { mutableStateOf(0L) }
+    // One-shot per channel: have we made the tunneling decision once the
+    // real video frame rate is known? See the frame-rate check in the
+    // per-second tick. Resets per channel so each stream is evaluated on
+    // its own frame rate.
+    var tunnelingDecided by remember(mediaUrl) { mutableStateOf(false) }
     var lastKey by remember { mutableStateOf<String?>(null) }
     val liveState = rememberUpdatedState(isLive)
 
@@ -1569,6 +1582,49 @@ private fun VideoPlayer(
         var tick = 0
         while (true) {
             kotlinx.coroutines.delay(1_000)
+            // ---- Frame-rate-aware tunneling correction (app-wide) ----
+            // This TV's panel is locked to 60Hz/30Hz — it has NO 50Hz mode
+            // and the refresh rate isn't changeable (confirmed via dumpsys
+            // display). Tunneled video hands A/V sync to the TCL hardware,
+            // which presents sub-60fps content (50fps UK/EU channels like
+            // BBC One UK, 25fps feeds) in SLOW MOTION on the 60Hz panel.
+            // 60fps content (most US channels) maps 1:1 and is smooth.
+            //
+            // So tunneling must be CONDITIONAL on the stream's real frame
+            // rate, which we only know once the first video Format loads:
+            //   ≥55fps  → keep tunneling (it needs it — without it
+            //             SurfaceFlinger composites 60fps at ~31fps, the
+            //             original choppy-live bug tunneling was added for)
+            //   <55fps  → drop tunneling so SurfaceFlinger does the
+            //             correct-SPEED 50→60 (or 25→60) frame conversion.
+            // One-time per channel; the re-prepare is a ~1s blip then
+            // correct-speed playback. Applies to EVERY channel, not BBC.
+            if (liveState.value && !tunnelingDecided) {
+                val fps = exo.videoFormat?.frameRate ?: 0f
+                if (fps > 0f) {
+                    tunnelingDecided = true
+                    val tunnelingOn = trackSelector.parameters.tunnelingEnabled
+                    if (fps < TUNNEL_MIN_FPS && tunnelingOn) {
+                        android.util.Log.w(
+                            "LiveDiag",
+                            "PLAYER ${fps}fps < $TUNNEL_MIN_FPS on 60Hz-locked " +
+                                "panel — disabling tunneling to fix slow-motion",
+                        )
+                        runCatching {
+                            trackSelector.parameters = trackSelector
+                                .buildUponParameters()
+                                .setTunnelingEnabled(false)
+                                .build()
+                            exo.prepare()
+                        }
+                    } else {
+                        android.util.Log.i(
+                            "LiveDiag",
+                            "PLAYER ${fps}fps — tunneling=${tunnelingOn} kept",
+                        )
+                    }
+                }
+            }
             // Live position-health checks. ExoPlayer's live coordinates:
             // position=0 is the back edge of the manifest window (oldest
             // segment), position=duration is the live edge (newest).
