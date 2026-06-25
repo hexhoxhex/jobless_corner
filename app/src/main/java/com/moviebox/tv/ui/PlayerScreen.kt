@@ -1452,6 +1452,37 @@ private fun VideoPlayer(
                             "(hardware)",
                     )
                 }
+
+                // Universal audio-rate fix. Some live channels carry odd
+                // sample rates (FOX USA = 24 kHz) that this TCL's AudioTrack
+                // refuses to open — the failure cascaded to the WebView
+                // fallback (ads). Instead, force a SonicAudioProcessor that
+                // RESAMPLES everything to 48 kHz, which AudioTrack always
+                // accepts. No per-channel logic, no WebView for audio:
+                // every channel's audio is normalised to 48 kHz before it
+                // reaches the device. Applies to BOTH the ffmpeg and the
+                // platform audio renderer (they share this sink).
+                override fun buildAudioSink(
+                    context: android.content.Context,
+                    enableFloatOutput: Boolean,
+                    enableAudioTrackPlaybackParams: Boolean,
+                ): androidx.media3.exoplayer.audio.AudioSink {
+                    val resampleTo48k = androidx.media3.common.audio
+                        .SonicAudioProcessor().apply {
+                            setOutputSampleRateHz(48_000)
+                        }
+                    return androidx.media3.exoplayer.audio.DefaultAudioSink
+                        .Builder(context)
+                        // Float output OFF: SonicAudioProcessor resamples
+                        // 16-bit PCM; float output would bypass it. The
+                        // resample-to-48k is what actually fixes the odd-
+                        // rate AudioTrack failures, not float.
+                        .setEnableFloatOutput(false)
+                        .setEnableAudioTrackPlaybackParams(
+                            enableAudioTrackPlaybackParams)
+                        .setAudioProcessors(arrayOf(resampleTo48k))
+                        .build()
+                }
             }.setExtensionRendererMode(
                 androidx.media3.exoplayer.DefaultRenderersFactory
                     .EXTENSION_RENDERER_MODE_PREFER,
@@ -1459,21 +1490,10 @@ private fun VideoPlayer(
         } else {
             androidx.media3.exoplayer.DefaultRenderersFactory(context)
         }
-        // Audio path tweaks (both safe defaults regardless of channel):
-        //  - Float output uses 32-bit float PCM, which lets the resampler
-        //    handle odd source sample rates (FOXNY USA's 24 kHz audio
-        //    failed AudioTrack init with the int16 default — the user's
-        //    "FOXNY shows reconnecting" was actually an audio-init crash
-        //    cascading through onPlayerError).
-        //  - Capabilities-receiver lets ExoPlayer detect the device's
-        //    supported HDMI passthrough formats and avoid asking
-        //    AudioTrack for configs the TV can't accept.
-        if (isLive) {
-            runCatching {
-                @Suppress("UnstableApiUsage")
-                renderersFactory.setEnableAudioFloatOutput(true)
-            }
-        }
+        // (Live audio is now handled by the custom buildAudioSink above,
+        // which resamples everything to 48 kHz — the float-output tweak
+        // that used to live here is superseded by that and removed, since
+        // SonicAudioProcessor needs 16-bit PCM, not float.)
         if (preferSoftwareDecoder) {
             renderersFactory.setMediaCodecSelector { mimeType, requiresSecure, requiresTunneling ->
                 androidx.media3.exoplayer.mediacodec.MediaCodecUtil
