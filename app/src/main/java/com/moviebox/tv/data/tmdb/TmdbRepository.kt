@@ -87,6 +87,15 @@ class TmdbRepository(token: String = BuildConfig.TMDB_TOKEN) {
 }
 
 /** Convert a TMDB list item to the app's [Item] model. */
+/** True if [date] ("YYYY-MM-DD" or "YYYY...") parses to a day after today.
+ *  Unparseable dates return false (don't drop on bad data). */
+private fun isFutureRelease(date: String): Boolean = try {
+    java.time.LocalDate.parse(date.take(10))
+        .isAfter(java.time.LocalDate.now())
+} catch (e: Exception) {
+    false
+}
+
 fun TmdbItemDto.toItem(forceMovie: Boolean = false, forceTv: Boolean = false): Item? {
     val title = title ?: name ?: return null
     val isSeries = when {
@@ -95,6 +104,13 @@ fun TmdbItemDto.toItem(forceMovie: Boolean = false, forceTv: Boolean = false): I
         else -> mediaType == "tv" || (name != null && title == name)
     }
     val date = if (isSeries) firstAirDate else releaseDate
+    // Drop titles that aren't out yet. TMDB trending/popular feeds include
+    // UPCOMING movies and shows (hype before release) — those have no
+    // aoneroom stream, so playing or auto-advancing into one fails with
+    // "not available". A release/air date in the future means "not
+    // streamable", so never surface it in rows, heroes, or recommendations.
+    // Null/unparseable dates are kept (we can't judge them).
+    if (date != null && isFutureRelease(date)) return null
     val year = date?.take(4)?.toIntOrNull()
     val type = if (isSeries) SubjectType.TV_SERIES else SubjectType.MOVIE
     return Item(

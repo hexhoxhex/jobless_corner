@@ -328,6 +328,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val deny = TastePrefs.denyLanguages()
             Recommendations.recommend(pool, history)
                 .filter { Repository.keepByLanguage(it.title, deny) }
+                // Drop titles we've already learned don't bridge to a real
+                // aoneroom stream (released but not on the source yet) — so
+                // the auto-advance never lands on a dead pick. The future-
+                // release filter in TmdbRepository.toItem handles the
+                // "not yet out" case; this handles "out but not available".
+                .filter { !UnavailableCatalog.isUnavailable(it.subjectId) }
         }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     private var subjectId: String = ""
