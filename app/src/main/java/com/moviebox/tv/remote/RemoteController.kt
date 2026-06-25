@@ -233,12 +233,20 @@ object RemoteController {
     /** True after the first successful fetch — lets the SPA stop polling. */
     fun liveLoaded(): Boolean = (vm?.state?.value?.liveChannels?.isNotEmpty()) == true
 
-    /** Kick off a load on the VM if we don't have channels yet. Cheap to call
-     *  repeatedly — the VM guards against concurrent loads. */
+    /** Kick off a load on the VM if we don't have channels yet OR the catalog
+     *  has gone stale. Cheap to call repeatedly — the VM guards against
+     *  concurrent loads and no-ops while the catalog is still fresh. The
+     *  staleness reload is what lets the app recover from a transient bad
+     *  publish without being killed and relaunched. */
     fun ensureLiveLoaded() = main.post {
-        val s = vm?.state?.value ?: return@post
-        if (!s.liveLoading && s.liveChannels.isEmpty()) vm?.loadLive()
+        vm?.loadLiveIfStale()
     }
+
+    /** Force an immediate catalog re-pull, bypassing the cache. Recovery
+     *  hatch wired to /api/live/channels?force=1 — lets the phone refresh a
+     *  stuck/stale channel list without restarting the TV app. The reload is
+     *  async; the SPA picks up the new list on its next poll. */
+    fun forceLiveReload() = main.post { vm?.loadLive(force = true) }
 
     /** Advance to the next episode in the currently-playing series.
      *  No-op for live or for movies. Triggered by the phone remote SPA

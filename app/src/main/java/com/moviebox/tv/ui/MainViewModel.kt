@@ -71,6 +71,13 @@ private const val FAILURE_WINDOW_MS: Long = 5 * 60 * 1000L  // 5 minutes
  *  swap; the new item's real saves start flowing ~5s in, well after. */
 private const val CONTENT_SWITCH_SUPPRESS_MS: Long = 3_000L
 
+/** How long the live catalog may sit before [MainViewModel.loadLiveIfStale]
+ *  re-pulls channels.json. The app used to fetch the catalog exactly once per
+ *  launch and keep it forever, so a single bad publish (a throttled scrape
+ *  that marked most channels "down") blanked the grid until the app was
+ *  killed. Reloading a stale catalog lets the app recover on its own. */
+private const val LIVE_RELOAD_INTERVAL_MS: Long = 10 * 60 * 1000L  // 10 minutes
+
 data class UiState(
     val tab: Tab = Tab.HOME,
     val screen: Screen = Screen.TABS,
@@ -456,10 +463,27 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun selectTab(tab: Tab) {
         _state.update { it.copy(tab = tab) }
-        if (tab == Tab.LIVE && _state.value.liveChannels.isEmpty()) loadLive()
+        if (tab == Tab.LIVE) loadLiveIfStale()
     }
 
     // ---- Live TV ----
+
+    /** elapsedRealtime of the last successful catalog load. Drives
+     *  [loadLiveIfStale]. */
+    @Volatile private var liveLoadedAt = 0L
+
+    /** Reload the catalog if we've never loaded it or the last good load is
+     *  older than [LIVE_RELOAD_INTERVAL_MS]. Cheap to call on every LIVE-tab
+     *  open / SPA poll — it no-ops while fresh. The first load uses the normal
+     *  TTL path; a stale reload forces past the repo cache so a genuinely
+     *  newer channels.json always wins. */
+    fun loadLiveIfStale() {
+        val s = _state.value
+        if (s.liveLoading) return
+        val stale = s.liveChannels.isEmpty() ||
+            android.os.SystemClock.elapsedRealtime() - liveLoadedAt > LIVE_RELOAD_INTERVAL_MS
+        if (stale) loadLive(force = liveLoadedAt != 0L)
+    }
 
     fun loadLive(force: Boolean = false) {
         if (_state.value.liveLoading) return
@@ -470,6 +494,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val schedule = liveRepo.schedule(force = force)
                 channels to schedule
             }.onSuccess { (c, s) ->
+                liveLoadedAt = android.os.SystemClock.elapsedRealtime()
                 _state.update {
                     it.copy(
                         liveChannels = c, liveSchedule = s, liveLoading = false,

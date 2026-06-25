@@ -260,6 +260,9 @@ class RemoteServer(
                 // First open also kicks off the VM fetch so the SPA doesn't
                 // have to wait for the user to open the LIVE tab on the TV.
                 RemoteController.ensureLiveLoaded()
+                // Recovery hatch: ?force=1 re-pulls channels.json past the
+                // cache (async — fresh list lands on the next poll).
+                if (p("force") == "1") RemoteController.forceLiveReload()
                 val q = p("q").orEmpty().lowercase().trim()
                 val group = p("group").orEmpty()
                 val channels = RemoteController.liveChannels()
