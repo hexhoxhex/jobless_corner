@@ -685,14 +685,26 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
         // means the user sees the Up Next card during credits and can
         // either tap Play Now or wait for the 10-s auto-advance counter.
         val upNext = nextEpisodeFor(state)
-        // Auto-advance to the next episode ONLY when the current one has
-        // genuinely ended (STATE_ENDED → contentEnded), NOT a duration
-        // estimate. aoneroom under-reports episode durations too, so the
-        // old "durationMs - 3min" trigger fired minutes before the episode
-        // ended — the user's "skips to the next episode before this one
-        // finishes" bug. The next episode then starts fresh at 0:00 (the
-        // card's playEpisode uses restoreResume=false).
-        val showUpNext = contentEnded && state.currentSe != null && upNext != null
+        // Two end-of-content phases:
+        //   nearEnd     — within SKIP_BUTTON_WINDOW_MS of the FILE end.
+        //                 Show a MANUAL "Next" button so the user can skip
+        //                 the credits the instant they start, on their own
+        //                 timing. No auto-action — the button just sits
+        //                 there, unobtrusive, until pressed.
+        //   contentEnded — STATE_ENDED, the real end of the file (after
+        //                 credits). ONLY here does the 10s auto-advance
+        //                 countdown run, as a fallback for when the user
+        //                 didn't press the button.
+        // This is the Netflix model: a button you control, plus a safety-
+        // net auto-advance. We never auto-skip off a duration ESTIMATE
+        // (the old bug), so nothing is ever cut off early; and the user
+        // never has to sit through credits because the button is right
+        // there. The advance always starts the next item fresh at 0:00
+        // (playEpisode restoreResume=false).
+        val nearEnd = play != null && !play.isLive && durationMs > 0 &&
+            positionMs >= (durationMs - SKIP_BUTTON_WINDOW_MS)
+        val endish = nearEnd || contentEnded
+        val showUpNext = endish && state.currentSe != null && upNext != null
         AnimatedVisibility(
             visible = showUpNext,
             modifier = Modifier.align(Alignment.BottomEnd)
@@ -702,16 +714,13 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
             exit = androidx.compose.animation.fadeOut(),
         ) {
             if (upNext != null) {
-                // Independent 10-second auto-advance timer. Starts the moment
-                // the overlay first appears, NOT tied to wall-clock remaining
-                // duration — earlier versions kept the counter equal to "ms
-                // until duration end" which meant a 2-min credits window
-                // showed the counter at "120s, 119s, …" and only auto-fired
-                // at the very end of credits. The user's "10-second next
-                // button" complaint maps to a fixed 10-s window from when
-                // detection fires.
-                var counter by remember(upNext) { mutableStateOf(AUTO_ADVANCE_SECONDS) }
-                LaunchedEffect(upNext, state.autoplayNext) {
+                var counter by remember(upNext, contentEnded) {
+                    mutableStateOf(AUTO_ADVANCE_SECONDS)
+                }
+                // Auto-advance countdown ONLY once the file has genuinely
+                // ended. Before that the card is a manual Next button.
+                LaunchedEffect(contentEnded, upNext, state.autoplayNext) {
+                    if (!contentEnded) return@LaunchedEffect
                     counter = AUTO_ADVANCE_SECONDS
                     while (counter > 0 && state.autoplayNext) {
                         kotlinx.coroutines.delay(1_000)
@@ -724,21 +733,19 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                 UpNextCard(
                     nextSeason = upNext.first,
                     nextEpisode = upNext.second,
-                    secondsRemaining = counter,
+                    // null = manual mode (just a Next button, no timer);
+                    // a number = the auto-advance countdown after the end.
+                    secondsRemaining = if (contentEnded) counter else null,
                     onPlayNow = { vm.playEpisode(upNext.first, upNext.second) },
                     onDismiss = { vm.setAutoplay(false) },
                 )
             }
         }
-        // End-of-content for a movie OR the last episode of a series:
-        // there's no "next episode", so offer the top recommendation as
-        // the next thing to watch. Triggered by the REAL end of playback
-        // (contentEnded = STATE_ENDED), NOT a duration estimate — that
-        // heuristic skipped movies 5-10 min early because aoneroom under-
-        // reports durations. The movie now plays fully; the card + 10 s
-        // countdown appear only once it has genuinely ended.
-        val endOfContent = contentEnded && state.currentSe == null && play?.isLive == false
-        val endOfSeries = contentEnded && state.currentSe != null && upNext == null
+        // Movie OR last episode of a series: no next episode, so offer the
+        // top recommendation. Same two-phase model — manual "Watch next"
+        // button from nearEnd, 10s auto-advance only at the real end.
+        val endOfContent = endish && state.currentSe == null && play?.isLive == false
+        val endOfSeries = endish && state.currentSe != null && upNext == null
         val nextPick = recommendations.firstOrNull {
             it.subjectId != state.detailItem?.subjectId
         }
@@ -751,10 +758,11 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
             exit = androidx.compose.animation.fadeOut(),
         ) {
             if (nextPick != null) {
-                var counter by remember(nextPick) {
+                var counter by remember(nextPick, contentEnded) {
                     mutableStateOf(AUTO_ADVANCE_SECONDS)
                 }
-                LaunchedEffect(nextPick, state.autoplayNext) {
+                LaunchedEffect(contentEnded, nextPick, state.autoplayNext) {
+                    if (!contentEnded) return@LaunchedEffect
                     counter = AUTO_ADVANCE_SECONDS
                     while (counter > 0 && state.autoplayNext) {
                         kotlinx.coroutines.delay(1_000)
@@ -765,18 +773,17 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                 UpNextItemCard(
                     title = nextPick.title,
                     coverUrl = nextPick.coverUrl,
-                    secondsRemaining = counter,
+                    secondsRemaining = if (contentEnded) counter else null,
                     onPlayNow = { vm.openItem(nextPick) },
                     onDismiss = { vm.setAutoplay(false) },
                 )
             }
         }
-        // If there's no recommendation to offer (rare — empty catalog),
-        // bounce to details. contentEnded already means the movie has
-        // genuinely finished, so no need to poll the position — just go.
+        // No recommendation to offer (rare) — bounce to details only at the
+        // genuine end, never off the duration estimate.
         if ((endOfContent || endOfSeries) && nextPick == null) {
             LaunchedEffect(contentEnded) {
-                if (state.autoplayNext) vm.back()
+                if (contentEnded && state.autoplayNext) vm.back()
             }
         }
     }
@@ -879,6 +886,13 @@ private const val BANDWIDTH_WINDOW_MS: Long = 3 * 60 * 1000L
  *  conversion. 55 sits between 50 and 59.94 so both classes land right. */
 private const val TUNNEL_MIN_FPS: Float = 55f
 
+/** How long before the FILE end to start showing the manual "Next"
+ *  button. Generous (covers most credit lengths) because it's only a
+ *  button — it never auto-acts, so showing it a bit early is harmless,
+ *  unlike the old auto-advance that cut content off. The user presses
+ *  it when they see the credits start. */
+private const val SKIP_BUTTON_WINDOW_MS: Long = 5 * 60 * 1000L
+
 /** Compute the next (season, episode) tuple based on current UiState, or
  *  null if there is no next episode (last episode of last season, or
  *  seasons data hasn't loaded yet).
@@ -921,7 +935,7 @@ private fun nextEpisodeFor(state: UiState): Pair<Int, Int>? {
 private fun UpNextCard(
     nextSeason: Int,
     nextEpisode: Int,
-    secondsRemaining: Int,
+    secondsRemaining: Int?,
     onPlayNow: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -940,9 +954,14 @@ private fun UpNextCard(
             .padding(14.dp),
     ) {
         Column(horizontalAlignment = Alignment.Start) {
-            Text("Up next in ${secondsRemaining}s",
+            // secondsRemaining null = manual mode (button only, no timer);
+            // non-null = auto-advance countdown after the file end.
+            Text(
+                if (secondsRemaining != null) "Up next in ${secondsRemaining}s"
+                else "Up next",
                 color = Color(0xFFE8B341),
-                fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                fontWeight = FontWeight.Bold, fontSize = 12.sp,
+            )
             Spacer(Modifier.height(4.dp))
             Text("S${nextSeason}·E${nextEpisode}",
                 color = Color.White,
@@ -990,7 +1009,7 @@ private fun UpNextCard(
 private fun UpNextItemCard(
     title: String,
     coverUrl: String?,
-    secondsRemaining: Int,
+    secondsRemaining: Int?,
     onPlayNow: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -1004,9 +1023,12 @@ private fun UpNextItemCard(
             .widthIn(max = 320.dp),
     ) {
         Column(horizontalAlignment = Alignment.Start) {
-            Text("Up next in ${secondsRemaining}s",
+            Text(
+                if (secondsRemaining != null) "Up next in ${secondsRemaining}s"
+                else "Up next",
                 color = Color(0xFFE8B341),
-                fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                fontWeight = FontWeight.Bold, fontSize = 12.sp,
+            )
             Spacer(Modifier.height(4.dp))
             Text(title, color = Color.White,
                 fontWeight = FontWeight.SemiBold, fontSize = 16.sp,

@@ -65,6 +65,12 @@ private const val MAX_RESOLVE_FAILURES_BEFORE_WEBVIEW: Int = 10
  *  ancient history. */
 private const val FAILURE_WINDOW_MS: Long = 5 * 60 * 1000L  // 5 minutes
 
+/** Window after a content switch during which progress saves are dropped,
+ *  to keep the previous item's stale tail position from corrupting the new
+ *  item's resume point. Covers the resolve (~1-2s) + the player's media
+ *  swap; the new item's real saves start flowing ~5s in, well after. */
+private const val CONTENT_SWITCH_SUPPRESS_MS: Long = 3_000L
+
 data class UiState(
     val tab: Tab = Tab.HOME,
     val screen: Screen = Screen.TABS,
@@ -1279,7 +1285,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** When the playing content last switched (episode/movie change). Used
+     *  to suppress the stale "tail" progress save: during a switch the OLD
+     *  player can fire one last onProgress with its near-end position AFTER
+     *  state.play has already flipped to the NEW item, which would write the
+     *  old position under the new item's key and make it resume mid-way.
+     *  Saves within [CONTENT_SWITCH_SUPPRESS_MS] of a switch are dropped. */
+    @Volatile private var contentSwitchAtMs = 0L
+
     private fun resolve() {
+        contentSwitchAtMs = android.os.SystemClock.elapsedRealtime()
         _state.update { it.copy(playLoading = true, error = null, screen = Screen.PLAYER) }
         viewModelScope.launch {
             runCatching {
@@ -1339,6 +1354,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** Called periodically by the player to persist resume position. */
     fun saveProgress(positionMs: Long, durationMs: Long) {
         if (durationMs <= 0 || positionMs <= 0) return
+        // Drop saves that land right after a content switch — these are the
+        // OLD player's final onProgress firing its near-end position while
+        // state.play has already moved to the NEW item, which would corrupt
+        // the new item's resume position (the "next episode starts from the
+        // middle / skips minutes in" bug). The new item's own saves resume
+        // a few seconds later once its real position is flowing.
+        if (android.os.SystemClock.elapsedRealtime() - contentSwitchAtMs
+            < CONTENT_SWITCH_SUPPRESS_MS
+        ) return
         val s = _state.value
         val play = s.play ?: return
         val item = s.detailItem
