@@ -114,13 +114,8 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
     val isLandscape =
         LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
     var controlsVisible by remember { mutableStateOf(true) }
-    // Mirror overlay visibility to the singleton MainActivity's
-    // dispatchKeyEvent reads. Without this gate, DPAD_LEFT/RIGHT seeks
-    // 10s even while the user is trying to navigate the overlay's own
-    // buttons — the "remote becomes useless when watching" complaint.
-    LaunchedEffect(controlsVisible) {
-        com.moviebox.tv.remote.RemoteController.playerOverlayVisible = controlsVisible
-    }
+    // (playerOverlayVisible mirroring moved below, after upNextCardVisible
+    // is computed — it depends on the Up Next card being on screen.)
     // When the WebView fallback (LiveWebPlayer) is active, ExoPlayer's
     // periodic updatePlayback never fires, so RemoteController.title and
     // friends sit at whatever the last ExoPlayer call left them — the
@@ -179,6 +174,33 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
     // "durationMs - 3min" heuristic skipped movies 5-10 min early. Resets
     // per content.
     var contentEnded by remember(play?.mediaUrl) { mutableStateOf(false) }
+    // Up Next card visibility, computed HERE (before the key handler) so
+    // the D-pad gate can tell whether the card is on screen. When it is,
+    // the TV remote's D-pad must move focus to the card's Next/Cancel
+    // buttons instead of seeking the movie — otherwise the buttons are
+    // unreachable (the user's "remote only fast-forwards/rewinds, can't
+    // pick Next or Cancel" complaint). Reused by the rendering below.
+    val upNext = nextEpisodeFor(state)
+    val nearEnd = play != null && !play.isLive && durationMs > 0 &&
+        positionMs >= (durationMs - SKIP_BUTTON_WINDOW_MS)
+    val endish = nearEnd || contentEnded
+    val nextPick = recommendations.firstOrNull {
+        it.subjectId != state.detailItem?.subjectId
+    }
+    val showUpNext = endish && state.currentSe != null && upNext != null
+    val endOfContent = endish && state.currentSe == null && play?.isLive == false
+    val endOfSeries = endish && state.currentSe != null && upNext == null
+    val upNextCardVisible = showUpNext ||
+        ((endOfContent || endOfSeries) && nextPick != null)
+    // Mirror overlay visibility to the singleton MainActivity's
+    // dispatchKeyEvent seek-vs-navigate gate. Without this, DPAD_LEFT/RIGHT
+    // seeks 10s even while the user is trying to reach the overlay's or
+    // the Up Next card's buttons — the "remote only fast-forwards, can't
+    // pick Next/Cancel" complaint.
+    LaunchedEffect(controlsVisible, upNextCardVisible) {
+        com.moviebox.tv.remote.RemoteController.playerOverlayVisible =
+            controlsVisible || upNextCardVisible
+    }
     // Live stream health — VideoPlayer reports stall recovery actions so
     // PlayerScreen can surface a small "Stabilising…" indicator instead of
     // staying silent while the buffer rebuilds.
@@ -293,6 +315,20 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                 // press doesn't double-fire.
                 if (evt.type != KeyEventType.KeyDown) return@onKeyEvent false
                 val exo = exoRef ?: return@onKeyEvent false
+                // When the Up Next card is on screen, let the D-pad arrows
+                // and OK fall through to Compose focus navigation so they
+                // reach the card's Next / Cancel buttons instead of seeking.
+                // Dedicated media transport keys still seek unconditionally.
+                if (upNextCardVisible && (
+                        evt.key == Key.DirectionLeft ||
+                        evt.key == Key.DirectionRight ||
+                        evt.key == Key.DirectionUp ||
+                        evt.key == Key.DirectionDown ||
+                        evt.key == Key.DirectionCenter ||
+                        evt.key == Key.Enter || evt.key == Key.NumPadEnter)
+                ) {
+                    return@onKeyEvent false
+                }
                 // Surface any key press by showing the controls, so the user
                 // sees the affordances they're navigating with.
                 controlsVisible = true
@@ -684,27 +720,16 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
         // run end credits over the final ~90-120 s. Triggering this early
         // means the user sees the Up Next card during credits and can
         // either tap Play Now or wait for the 10-s auto-advance counter.
-        val upNext = nextEpisodeFor(state)
-        // Two end-of-content phases:
-        //   nearEnd     — within SKIP_BUTTON_WINDOW_MS of the FILE end.
-        //                 Show a MANUAL "Next" button so the user can skip
-        //                 the credits the instant they start, on their own
-        //                 timing. No auto-action — the button just sits
-        //                 there, unobtrusive, until pressed.
-        //   contentEnded — STATE_ENDED, the real end of the file (after
-        //                 credits). ONLY here does the 10s auto-advance
-        //                 countdown run, as a fallback for when the user
-        //                 didn't press the button.
-        // This is the Netflix model: a button you control, plus a safety-
-        // net auto-advance. We never auto-skip off a duration ESTIMATE
-        // (the old bug), so nothing is ever cut off early; and the user
-        // never has to sit through credits because the button is right
-        // there. The advance always starts the next item fresh at 0:00
-        // (playEpisode restoreResume=false).
-        val nearEnd = play != null && !play.isLive && durationMs > 0 &&
-            positionMs >= (durationMs - SKIP_BUTTON_WINDOW_MS)
-        val endish = nearEnd || contentEnded
-        val showUpNext = endish && state.currentSe != null && upNext != null
+        // Up Next overlay — two phases:
+        //   nearEnd (within SKIP_BUTTON_WINDOW_MS of the FILE end): a MANUAL
+        //     "Next" button the user presses the instant credits start.
+        //   contentEnded (STATE_ENDED, real end after credits): the 10s
+        //     auto-advance countdown runs as a fallback.
+        // Netflix model: a button you control + safety-net auto-advance.
+        // Never auto-skips off a duration estimate, so nothing is cut off
+        // early; the next item always starts fresh at 0:00. (upNext,
+        // nearEnd, endish, showUpNext, endOfContent, endOfSeries, nextPick
+        // are computed once near the top so the key handler can see them.)
         AnimatedVisibility(
             visible = showUpNext,
             modifier = Modifier.align(Alignment.BottomEnd)
@@ -744,11 +769,7 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
         // Movie OR last episode of a series: no next episode, so offer the
         // top recommendation. Same two-phase model — manual "Watch next"
         // button from nearEnd, 10s auto-advance only at the real end.
-        val endOfContent = endish && state.currentSe == null && play?.isLive == false
-        val endOfSeries = endish && state.currentSe != null && upNext == null
-        val nextPick = recommendations.firstOrNull {
-            it.subjectId != state.detailItem?.subjectId
-        }
+        // (endOfContent/endOfSeries/nextPick computed near the top.)
         AnimatedVisibility(
             visible = (endOfContent || endOfSeries) && nextPick != null,
             modifier = Modifier.align(Alignment.BottomEnd)
@@ -887,11 +908,9 @@ private const val BANDWIDTH_WINDOW_MS: Long = 3 * 60 * 1000L
 private const val TUNNEL_MIN_FPS: Float = 55f
 
 /** How long before the FILE end to start showing the manual "Next"
- *  button. Generous (covers most credit lengths) because it's only a
- *  button — it never auto-acts, so showing it a bit early is harmless,
- *  unlike the old auto-advance that cut content off. The user presses
- *  it when they see the credits start. */
-private const val SKIP_BUTTON_WINDOW_MS: Long = 5 * 60 * 1000L
+ *  button. The user wants it unobtrusive — appearing only ~40s before
+ *  the end, not minutes early. */
+private const val SKIP_BUTTON_WINDOW_MS: Long = 40_000L
 
 /** Compute the next (season, episode) tuple based on current UiState, or
  *  null if there is no next episode (last episode of last season, or
