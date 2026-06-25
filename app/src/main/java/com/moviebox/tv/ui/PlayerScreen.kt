@@ -62,7 +62,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.focusable
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
@@ -114,6 +117,11 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
     val isLandscape =
         LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
     var controlsVisible by remember { mutableStateOf(true) }
+    // Bumped on every control interaction (key / focus move / click) so the
+    // auto-hide timer restarts instead of yanking the overlay away while the
+    // user is still navigating the buttons with the D-pad.
+    var controlsTick by remember { mutableStateOf(0) }
+    val bumpControls: () -> Unit = { controlsTick++ }
     // (playerOverlayVisible mirroring moved below, after upNextCardVisible
     // is computed — it depends on the Up Next card being on screen.)
     // When the WebView fallback (LiveWebPlayer) is active, ExoPlayer's
@@ -206,10 +214,12 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
     // staying silent while the buffer rebuilds.
     var stabilising by remember { mutableStateOf<String?>(null) }
 
-    // Auto-hide controls after 3.5s idle. Any tap resets the timer.
-    LaunchedEffect(controlsVisible, playing) {
+    // Auto-hide controls after idle. controlsTick is bumped by every D-pad
+    // interaction (key, focus move, click), so navigating the buttons keeps
+    // restarting this timer instead of having the overlay vanish under you.
+    LaunchedEffect(controlsVisible, playing, controlsTick) {
         if (controlsVisible && playing && !buffering) {
-            kotlinx.coroutines.delay(3500)
+            kotlinx.coroutines.delay(4000)
             controlsVisible = false
         }
     }
@@ -299,8 +309,38 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
     // player screen (which is why Netflix/Crackle work and we don't). We grab
     // focus on mount and intercept the standard set of D-pad + media keys.
     val playerFocus = remember { FocusRequester() }
+    // Focus targets for the control buttons. The whole point: when the overlay
+    // is up the D-pad should MOVE FOCUS between these (Netflix-style), not seek.
+    val playPauseFocus = remember { FocusRequester() }
+    val scrubFocus = remember { FocusRequester() }
+    var scrubFocused by remember { mutableStateOf(false) }
+    // Summoned by a directional press → land on the seek bar (LEFT/RIGHT keeps
+    // scrubbing); summoned by OK / vertical → land on Play/Pause.
+    var focusSeekBarOnShow by remember { mutableStateOf(false) }
     LaunchedEffect(play?.mediaUrl) {
         if (play?.mediaUrl?.isNotBlank() == true) {
+            runCatching { playerFocus.requestFocus() }
+        }
+    }
+    // Hand D-pad focus to the buttons when the overlay shows, and back to the
+    // player surface when it hides. This is what makes the remote able to
+    // "move around the buttons" instead of only seeking.
+    LaunchedEffect(controlsVisible) {
+        if (controlsVisible && play != null && !state.useLiveWebPlayer) {
+            val target = if (focusSeekBarOnShow && play?.isLive != true) scrubFocus
+                         else playPauseFocus
+            focusSeekBarOnShow = false
+            // The overlay is an AnimatedVisibility — its focus target isn't
+            // placed on the first frame, so requestFocus() throws until it is.
+            // Retry briefly until it lands; without this, focus stays on the
+            // player surface and OK toggles controls instead of pressing a button.
+            var tries = 0
+            while (tries < 15) {
+                kotlinx.coroutines.delay(25)
+                if (runCatching { target.requestFocus() }.isSuccess) break
+                tries++
+            }
+        } else if (!controlsVisible) {
             runCatching { playerFocus.requestFocus() }
         }
     }
@@ -329,50 +369,66 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                 ) {
                     return@onKeyEvent false
                 }
-                // Surface any key press by showing the controls, so the user
-                // sees the affordances they're navigating with.
-                controlsVisible = true
+                val isLiveNow = play?.isLive == true
+                // Dedicated transport keys always act, overlay state aside.
                 when (evt.key) {
-                    Key.DirectionLeft, Key.MediaRewind, Key.MediaSkipBackward -> {
-                        // Seek 10s back; clamp at 0 so we don't trigger
-                        // re-prepare on a -ve position.
-                        exo.seekTo((exo.currentPosition - seekStep).coerceAtLeast(0))
-                        true
-                    }
-                    Key.DirectionRight, Key.MediaFastForward, Key.MediaSkipForward -> {
-                        exo.seekTo(exo.currentPosition + seekStep)
-                        true
-                    }
                     Key.MediaPlayPause -> {
                         exo.playWhenReady = !exo.isPlaying
-                        true
+                        controlsVisible = true; bumpControls(); return@onKeyEvent true
                     }
-                    Key.MediaPlay -> { exo.playWhenReady = true; true }
-                    Key.MediaPause -> { exo.playWhenReady = false; true }
-                    Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> {
-                        // OK button: toggle play/pause if controls are
-                        // already up; otherwise just bring them up. Matches
-                        // Netflix's behaviour.
-                        if (controlsVisible) exo.playWhenReady = !exo.isPlaying
-                        true
+                    Key.MediaPlay -> { exo.playWhenReady = true; return@onKeyEvent true }
+                    Key.MediaPause -> { exo.playWhenReady = false; return@onKeyEvent true }
+                    Key.MediaRewind, Key.MediaSkipBackward -> {
+                        if (!isLiveNow) exo.seekTo((exo.currentPosition - seekStep).coerceAtLeast(0))
+                        controlsVisible = true; bumpControls(); return@onKeyEvent true
                     }
+                    Key.MediaFastForward, Key.MediaSkipForward -> {
+                        if (!isLiveNow) exo.seekTo(exo.currentPosition + seekStep)
+                        controlsVisible = true; bumpControls(); return@onKeyEvent true
+                    }
+                    else -> {}
+                }
+                // Overlay already up → the focused button owns the D-pad; let
+                // Compose move focus between buttons instead of seeking. (Focus
+                // is normally on a button here, so this branch is the safety net
+                // for the frame before focus lands.)
+                if (controlsVisible) return@onKeyEvent false
+                // Overlay hidden → summon it. A directional press also seeks and
+                // drops focus on the seek bar (keep scrubbing with LEFT/RIGHT);
+                // OK / vertical lands on Play/Pause so the user can fan out to
+                // the other buttons. Mirrors the Netflix player.
+                bumpControls()
+                when (evt.key) {
+                    Key.DirectionLeft -> {
+                        if (!isLiveNow) {
+                            exo.seekTo((exo.currentPosition - seekStep).coerceAtLeast(0))
+                            focusSeekBarOnShow = true
+                        }
+                        controlsVisible = true; true
+                    }
+                    Key.DirectionRight -> {
+                        if (!isLiveNow) {
+                            exo.seekTo(exo.currentPosition + seekStep)
+                            focusSeekBarOnShow = true
+                        }
+                        controlsVisible = true; true
+                    }
+                    Key.DirectionCenter, Key.Enter, Key.NumPadEnter,
                     Key.DirectionUp, Key.DirectionDown -> {
-                        // Just show the overlay — when the custom Compose
-                        // controls grow nav-target focusables, those will
-                        // own up/down for picker focus.
-                        true
+                        focusSeekBarOnShow = false
+                        controlsVisible = true; true
                     }
                     else -> false
                 }
             }
-            // Tap anywhere on the player surface toggles the controls. When
-            // controls are hidden we treat the next tap as "show", not as
-            // "interact" — feels much more like Netflix / Apple TV.
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = { controlsVisible = !controlsVisible },
-            ),
+            // Touch (phones): tap the surface to toggle controls. Deliberately
+            // a raw pointer handler, NOT .clickable — clickable would add a
+            // second key/focus target on the full-screen surface that competes
+            // with the D-pad handling above, so OK ended up toggling controls
+            // instead of activating the focused button.
+            .pointerInput(Unit) {
+                detectTapGestures { controlsVisible = !controlsVisible }
+            },
     ) {
         // ---- WebView fallback for live streams whose direct HLS 403's ----
         if (play != null && play.isLive && state.useLiveWebPlayer &&
@@ -549,7 +605,10 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    CircleBtn(Icons.AutoMirrored.Filled.ArrowBack) { vm.back() }
+                    CircleBtn(
+                        Icons.AutoMirrored.Filled.ArrowBack,
+                        onInteract = bumpControls,
+                    ) { vm.back() }
                     Column(Modifier.weight(1f)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             if (play?.isLive == true) {
@@ -584,14 +643,15 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                             Dropdown("Audio: ${play.selectedDub}",
                                 play.dubs.map { d ->
                                     (d.name + if (d.original) " (Original)" else "") to d.name
-                                }) { vm.changeDub(it) }
+                                }, onInteract = bumpControls) { vm.changeDub(it) }
                         }
                         Dropdown(play.selected,
-                            play.qualities.map { it.label to it.label }) {
+                            play.qualities.map { it.label to it.label },
+                            onInteract = bumpControls) {
                             vm.changeQuality(it)
                         }
                     }
-                    CircleBtn(Icons.Filled.AspectRatio) {
+                    CircleBtn(Icons.Filled.AspectRatio, onInteract = bumpControls) {
                         resizeMode = when (resizeMode) {
                             AspectRatioFrameLayout.RESIZE_MODE_FIT ->
                                 AspectRatioFrameLayout.RESIZE_MODE_ZOOM
@@ -603,6 +663,7 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                     CircleBtn(
                         if (isLandscape) Icons.Filled.FullscreenExit
                         else Icons.Filled.Fullscreen,
+                        onInteract = bumpControls,
                     ) {
                         activity?.requestedOrientation =
                             if (isLandscape) ActivityInfo.SCREEN_ORIENTATION_USER
@@ -625,19 +686,30 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
             ) {
                 // Live streams don't seek; show only the play/pause toggle.
                 if (play?.isLive != true) {
-                    SkipBtn(Icons.Filled.Replay10) {
+                    SkipBtn(
+                        Icons.Filled.Replay10,
+                        onInteract = bumpControls,
+                    ) {
                         exoRef?.seekTo((positionMs - 10_000).coerceAtLeast(0))
                     }
                 }
                 BigPlayPauseBtn(
                     playing = playing,
                     buffering = buffering,
+                    // Default spatial focus search handles DOWN→seek-bar and
+                    // UP→top-bar (explicit focusProperties to the bottom bar
+                    // didn't resolve while its fade-in was still placing it).
+                    modifier = Modifier.focusRequester(playPauseFocus),
+                    onInteract = bumpControls,
                     onClick = {
                         exoRef?.let { it.playWhenReady = !it.isPlaying }
                     },
                 )
                 if (play?.isLive != true) {
-                    SkipBtn(Icons.Filled.Forward10) {
+                    SkipBtn(
+                        Icons.Filled.Forward10,
+                        onInteract = bumpControls,
+                    ) {
                         exoRef?.seekTo(
                             (positionMs + 10_000)
                                 .coerceAtMost(durationMs.coerceAtLeast(0))
@@ -664,7 +736,36 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                 Column(
                     Modifier.fillMaxWidth().padding(
                         start = 18.dp, end = 18.dp, top = 12.dp, bottom = 18.dp,
-                    ),
+                    )
+                        // The seek bar is itself a focus target. When focused,
+                        // LEFT/RIGHT seek ±10s and UP returns to the buttons —
+                        // so the D-pad scrubs here and navigates there, like
+                        // Netflix. The Slider below is touch-only (canFocus=false)
+                        // so it never competes for D-pad focus.
+                        .focusRequester(scrubFocus)
+                        .onFocusChanged { scrubFocused = it.isFocused; if (it.isFocused) bumpControls() }
+                        .focusable()
+                        .onKeyEvent { evt ->
+                            if (evt.type != KeyEventType.KeyDown) return@onKeyEvent false
+                            when (evt.key) {
+                                Key.DirectionLeft -> {
+                                    exoRef?.seekTo((positionMs - seekStep).coerceAtLeast(0))
+                                    bumpControls(); true
+                                }
+                                Key.DirectionRight -> {
+                                    exoRef?.seekTo(
+                                        (positionMs + seekStep)
+                                            .coerceAtMost(durationMs.coerceAtLeast(0)),
+                                    )
+                                    bumpControls(); true
+                                }
+                                Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> {
+                                    exoRef?.let { it.playWhenReady = !it.isPlaying }
+                                    bumpControls(); true
+                                }
+                                else -> false   // UP handled by focusProperties
+                            }
+                        },
                 ) {
                     val dur = durationMs.coerceAtLeast(1)
                     val cur = (if (scrubbing) scrubTo else positionMs)
@@ -686,7 +787,15 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                             activeTrackColor = Accent,
                             inactiveTrackColor = Color(0x55FFFFFF),
                         ),
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.fillMaxWidth()
+                            .focusProperties { canFocus = false }
+                            .then(
+                                if (scrubFocused)
+                                    Modifier.border(
+                                        2.dp, Color.White, RoundedCornerShape(8.dp),
+                                    )
+                                else Modifier,
+                            ),
                     )
                     Row(
                         Modifier.fillMaxWidth(),
@@ -1091,12 +1200,18 @@ private fun UpNextItemCard(
 private fun BigPlayPauseBtn(
     playing: Boolean,
     buffering: Boolean,
+    modifier: Modifier = Modifier,
+    onInteract: () -> Unit = {},
     onClick: () -> Unit,
 ) {
+    var focused by remember { mutableStateOf(false) }
     Box(
-        Modifier.size(76.dp).clip(CircleShape)
+        modifier
+            .onFocusChanged { if (it.isFocused) onInteract(); focused = it.isFocused }
+            .size(76.dp).clip(CircleShape)
+            .then(if (focused) Modifier.border(3.dp, Color.White, CircleShape) else Modifier)
             .background(Color(0xCCFFFFFF))
-            .clickable(onClick = onClick),
+            .clickable { onInteract(); onClick() },
         contentAlignment = Alignment.Center,
     ) {
         if (buffering) {
@@ -1118,11 +1233,18 @@ private fun BigPlayPauseBtn(
 @Composable
 private fun SkipBtn(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
+    modifier: Modifier = Modifier,
+    onInteract: () -> Unit = {},
     onClick: () -> Unit,
 ) {
+    var focused by remember { mutableStateOf(false) }
     Box(
-        Modifier.size(56.dp).clip(CircleShape).background(Color(0x66000000))
-            .clickable(onClick = onClick),
+        modifier
+            .onFocusChanged { if (it.isFocused) onInteract(); focused = it.isFocused }
+            .size(56.dp).clip(CircleShape)
+            .then(if (focused) Modifier.border(3.dp, Color.White, CircleShape) else Modifier)
+            .background(if (focused) Color(0xBB000000) else Color(0x66000000))
+            .clickable { onInteract(); onClick() },
         contentAlignment = Alignment.Center,
     ) {
         Icon(icon, null, tint = Color.White, modifier = Modifier.size(30.dp))
@@ -1169,13 +1291,20 @@ private fun LoadingPulse() {
 private fun Dropdown(
     label: String,
     options: List<Pair<String, String>>,
+    modifier: Modifier = Modifier,
+    onInteract: () -> Unit = {},
     onPick: (String) -> Unit,
 ) {
     var open by remember { mutableStateOf(false) }
+    var focused by remember { mutableStateOf(false) }
     Box {
         Box(
-            Modifier.clip(RoundedCornerShape(16.dp)).background(Color(0x55000000))
-                .clickable { open = true }.padding(horizontal = 12.dp, vertical = 6.dp),
+            modifier
+                .onFocusChanged { if (it.isFocused) onInteract(); focused = it.isFocused }
+                .clip(RoundedCornerShape(16.dp))
+                .then(if (focused) Modifier.border(2.5.dp, Color.White, RoundedCornerShape(16.dp)) else Modifier)
+                .background(if (focused) Color(0xAA000000) else Color(0x55000000))
+                .clickable { onInteract(); open = true }.padding(horizontal = 12.dp, vertical = 6.dp),
         ) {
             Text(label, color = Color.White, fontSize = 12.sp,
                 fontWeight = FontWeight.SemiBold)
@@ -1193,11 +1322,18 @@ private fun Dropdown(
 @Composable
 private fun CircleBtn(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
+    modifier: Modifier = Modifier,
+    onInteract: () -> Unit = {},
     onClick: () -> Unit,
 ) {
+    var focused by remember { mutableStateOf(false) }
     Box(
-        Modifier.size(40.dp).clip(CircleShape).background(Color(0x55000000))
-            .clickable(onClick = onClick),
+        modifier
+            .onFocusChanged { if (it.isFocused) onInteract(); focused = it.isFocused }
+            .size(40.dp).clip(CircleShape)
+            .then(if (focused) Modifier.border(2.5.dp, Color.White, CircleShape) else Modifier)
+            .background(if (focused) Color(0xAA000000) else Color(0x55000000))
+            .clickable { onInteract(); onClick() },
         contentAlignment = Alignment.Center,
     ) { Icon(icon, null, tint = Color.White, modifier = Modifier.size(22.dp)) }
 }
