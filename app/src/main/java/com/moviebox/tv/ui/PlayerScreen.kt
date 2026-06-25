@@ -172,6 +172,13 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
     var scrubbing by remember { mutableStateOf(false) }
     var scrubTo by remember { mutableLongStateOf(0L) }
     var exoRef by remember { mutableStateOf<androidx.media3.common.Player?>(null) }
+    // True once the player fires STATE_ENDED for THIS movie/episode — the
+    // definitive "content actually finished" signal. The movie / end-of-
+    // series auto-advance keys off this instead of a duration estimate,
+    // because aoneroom under-reports durations and the old
+    // "durationMs - 3min" heuristic skipped movies 5-10 min early. Resets
+    // per content.
+    var contentEnded by remember(play?.mediaUrl) { mutableStateOf(false) }
     // Live stream health — VideoPlayer reports stall recovery actions so
     // PlayerScreen can surface a small "Stabilising…" indicator instead of
     // staying silent while the buffer rebuilds.
@@ -356,9 +363,18 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                 contentKey = vm.contentKey,
                 onEnded = {
                     // Live streams don't "end" in the normal sense, and there's
-                    // no next episode for them; only autoplay VOD series.
-                    if (!play.isLive && state.autoplayNext && state.currentSe != null)
-                        vm.nextEpisode()
+                    // no next episode for them; only autoplay VOD.
+                    if (!play.isLive) {
+                        // Definitive end-of-content signal. The movie /
+                        // end-of-series recommendation card keys off this
+                        // (never a duration estimate), so a movie always
+                        // plays to its real end before we advance.
+                        contentEnded = true
+                        // Mid-series binge: jump to the next episode the
+                        // moment the current one truly ends.
+                        if (state.autoplayNext && state.currentSe != null)
+                            vm.nextEpisode()
+                    }
                 },
                 onControlsVisible = { /* native controller is off; we own visibility */ },
                 onBuffering = { buffering = it },
@@ -717,13 +733,13 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
         }
         // End-of-content for a movie OR the last episode of a series:
         // there's no "next episode", so offer the top recommendation as
-        // the next thing to watch. Same countdown UX as the episode Up
-        // Next card — appears at credit-start (UP_NEXT_WINDOW_MS before
-        // the end), 10 s timer, Cancel, or Play now. The user asked NOT
-        // to sit through credits before this shows up, and to be able to
-        // jump straight to the next pick.
-        val endOfContent = nearEnd && state.currentSe == null && play?.isLive == false
-        val endOfSeries = nearEnd && state.currentSe != null && upNext == null
+        // the next thing to watch. Triggered by the REAL end of playback
+        // (contentEnded = STATE_ENDED), NOT a duration estimate — that
+        // heuristic skipped movies 5-10 min early because aoneroom under-
+        // reports durations. The movie now plays fully; the card + 10 s
+        // countdown appear only once it has genuinely ended.
+        val endOfContent = contentEnded && state.currentSe == null && play?.isLive == false
+        val endOfSeries = contentEnded && state.currentSe != null && upNext == null
         val nextPick = recommendations.firstOrNull {
             it.subjectId != state.detailItem?.subjectId
         }
@@ -757,13 +773,10 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
             }
         }
         // If there's no recommendation to offer (rare — empty catalog),
-        // fall back to the old behaviour: bounce to details at the very
-        // end rather than freeze on the last frame.
+        // bounce to details. contentEnded already means the movie has
+        // genuinely finished, so no need to poll the position — just go.
         if ((endOfContent || endOfSeries) && nextPick == null) {
-            LaunchedEffect(state.currentSe, play?.mediaUrl) {
-                while (durationMs > 0 && positionMs < durationMs - 1_500) {
-                    kotlinx.coroutines.delay(500)
-                }
+            LaunchedEffect(contentEnded) {
                 if (state.autoplayNext) vm.back()
             }
         }
