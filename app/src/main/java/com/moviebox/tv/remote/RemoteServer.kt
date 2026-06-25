@@ -171,6 +171,30 @@ class RemoteServer(
                 }
             }
 
+            uri == "/api/episodes" -> {
+                // Real season → episode list for the phone's picker (kills
+                // phantom Seasons 1-8 / arbitrary episode numbers).
+                val isSeries = (p("type")?.toIntOrNull() ?: 2) == 2 ||
+                    p("isSeries") == "1"
+                val map = runBlocking {
+                    RemoteController.episodes(
+                        subjectId = p("subjectId").orEmpty(),
+                        title = p("title"),
+                        year = p("year")?.toIntOrNull(),
+                        isSeries = isSeries,
+                    )
+                }
+                val seasons = JSONArray()
+                map.toSortedMap().forEach { (se, eps) ->
+                    seasons.put(
+                        JSONObject()
+                            .put("season", se)
+                            .put("episodes", JSONArray(eps.sorted()))
+                    )
+                }
+                json(JSONObject().put("seasons", seasons).toString())
+            }
+
             uri == "/api/play" && method == Method.POST -> {
                 RemoteController.playOnTv(
                     subjectId = p("subjectId").orEmpty(),
@@ -204,6 +228,10 @@ class RemoteServer(
 
             uri == "/api/history/delete" && method == Method.POST -> {
                 RemoteController.deleteHistory(p("key").orEmpty()); ok()
+            }
+
+            uri == "/api/history/clear" && method == Method.POST -> {
+                RemoteController.clearHistory(); ok()
             }
 
             uri == "/api/downloads" -> {
@@ -537,6 +565,11 @@ class RemoteServer(
         // movies + live (which don't have episode coordinates).
         .put("season", RemoteController.currentSeason ?: JSONObject.NULL)
         .put("episode", RemoteController.currentEpisode ?: JSONObject.NULL)
+        // Identify the playing item so the phone's episode picker can
+        // enumerate its real seasons/episodes and jump within them.
+        .put("subjectId", RemoteController.nowPlayingSubjectId ?: JSONObject.NULL)
+        .put("type", RemoteController.nowPlayingType)
+        .put("year", RemoteController.nowPlayingYear ?: JSONObject.NULL)
         .toString()
 
     private fun ok() = json("{\"ok\":true}")

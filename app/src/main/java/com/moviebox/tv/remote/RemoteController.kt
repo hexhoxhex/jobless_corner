@@ -31,7 +31,7 @@ object RemoteController {
      *  "netflix" | "hbo" | "disney" | "prime" | "apple" | "hulu" |
      *  "genre_movie:<csv ids>" | "genre_tv:<csv ids>". */
     suspend fun browse(slice: String): List<Item> = runCatching {
-        when {
+        val rows = when {
             slice == "trending"        -> tmdb.trending()
             slice == "popular_movies"  -> tmdb.popularMovies()
             slice == "popular_tv"      -> tmdb.popularTv()
@@ -51,6 +51,9 @@ object RemoteController {
             )
             else -> emptyList()
         }
+        // Drop titles already known not to resolve to a real aoneroom stream,
+        // so the phone's Browse rows stop showing things that "don't exist".
+        rows.filter { !com.moviebox.tv.data.UnavailableCatalog.isUnavailable(it.subjectId) }
     }.getOrDefault(emptyList())
 
     suspend fun movieGenres() = runCatching { tmdb.movieGenres() }
@@ -85,6 +88,14 @@ object RemoteController {
     @Volatile var availableQualities: List<String> = emptyList()
     @Volatile var selectedDub: String = ""
     @Volatile var availableDubs: List<String> = emptyList()
+
+    /** Effective (aoneroom) subjectId / type / year of whatever's on the
+     *  player, so the phone's episode picker can enumerate the real episodes
+     *  of the *currently playing* series. detailItem is re-stamped to the
+     *  bridged aoneroom id at play time, so this is already the right id. */
+    val nowPlayingSubjectId: String? get() = vm?.state?.value?.detailItem?.subjectId
+    val nowPlayingType: Int get() = vm?.state?.value?.detailItem?.type?.code ?: 0
+    val nowPlayingYear: Int? get() = vm?.state?.value?.detailItem?.year
 
     private val vm: MainViewModel? get() = vmRef?.get()
 
@@ -182,6 +193,28 @@ object RemoteController {
     suspend fun details(subjectId: String): com.moviebox.tv.data.Details? =
         runCatching { repo.details(subjectId) }.getOrNull()
 
+    /** Real season → episode-numbers map for the phone's episode picker.
+     *  Bridges a tmdb: id to its aoneroom record first (resolveByTitle), then
+     *  returns the ENUMERATED episodes that actually exist — no phantom
+     *  Seasons 1-8 / arbitrary episode numbers. Falls back to the catalog's
+     *  declared maxEp only if the enumeration walk hasn't completed yet. */
+    suspend fun episodes(
+        subjectId: String, title: String?, year: Int?, isSeries: Boolean,
+    ): Map<Int, List<Int>> = runCatching {
+        val realId = if (subjectId.startsWith("tmdb:")) {
+            repo.resolveByTitle(title.orEmpty(), year, isSeries)?.subjectId
+                ?: return@runCatching emptyMap()
+        } else subjectId
+        // Prefer the real enumerated list if the background walk has cached it
+        // (warm for the currently-playing series); never trigger a fresh ~19-
+        // call walk inside a request — fall back to the fast declared maxEp.
+        val cached = repo.cachedEpisodes(realId)
+        if (!cached.isNullOrEmpty()) return@runCatching cached
+        val d = repo.details(realId)
+        d.seasons.associate { it.season to (1..it.episodes).toList() }
+            .filterValues { it.isNotEmpty() }
+    }.getOrDefault(emptyMap())
+
     fun playOnTv(
         subjectId: String, title: String, coverUrl: String?, type: Int,
         season: Int?, episode: Int?, year: Int? = null,
@@ -194,6 +227,7 @@ object RemoteController {
     fun history(): List<WatchHistoryEntity> = vm?.continueWatching?.value ?: emptyList()
     fun downloads(): List<DownloadEntity> = vm?.downloads?.value ?: emptyList()
     fun deleteHistory(key: String) = main.post { vm?.removeHistory(key) }
+    fun clearHistory() = main.post { vm?.clearHistory() }
 
     fun startDownload(
         subjectId: String, title: String, coverUrl: String?, type: Int,

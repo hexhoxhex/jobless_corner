@@ -230,9 +230,12 @@
           <select id="dSeason"></select>
         </label>
         <label>Episode
-          <input id="dEpisode" type="number" min="1" value="1" />
+          <!-- Real episodes only (populated from /api/episodes) — no more
+               free-form numbers that resolve to nothing. -->
+          <select id="dEpisode"></select>
         </label>
       </div>
+      <div id="dEpStatus" class="muted small"></div>
     </div>
     <div class="dActions">
       <button id="dPlay" class="primary big">
@@ -242,6 +245,17 @@
         <svg class="icon"><use href="#i-download"/></svg> Download
       </button>
     </div>
+  </section>
+
+  <!-- EPISODE PICKER (real seasons/episodes; jump while playing) -->
+  <section id="pane-episodes" class="pane">
+    <button class="back" id="epBack">
+      <svg class="icon"><use href="#i-chevron-left"/></svg> Back
+    </button>
+    <h2 id="epPickTitle" class="ph">Episodes</h2>
+    <div id="epSeasonChips" class="chipbar"></div>
+    <div id="epPickStatus" class="livestatus muted small"></div>
+    <div id="epGrid" class="ep-grid"></div>
   </section>
 
   <!-- NOW PLAYING -->
@@ -272,6 +286,9 @@
       <!-- Episode + close controls. Only useful for series — hidden by
            default; JS toggles the row's `data-show-eps` attribute based
            on whether the TV is on an episode (state.playerEp != null). -->
+      <button id="epList" class="ghost np-eps np-eps-btn" data-show-eps="false">
+        ☰ All episodes
+      </button>
       <div class="row np-eps" data-show-eps="false">
         <button id="epPrev" class="ghost">⏮ Prev ep</button>
         <button id="epNext" class="ghost">Next ep ⏭</button>
@@ -310,7 +327,10 @@
       </div>
     </div>
     <div class="card">
-      <h3>Continue watching</h3>
+      <div class="row label-row">
+        <h3 style="margin:0">Continue watching</h3>
+        <button id="histClear" class="ghost small">Clear all</button>
+      </div>
       <div id="history" class="list"></div>
     </div>
   </section>

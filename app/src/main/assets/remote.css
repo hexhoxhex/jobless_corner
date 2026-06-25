@@ -295,6 +295,23 @@ button.icon-btn { flex: 0 0 auto; padding: 8px 10px; }
    series. The state poll flips data-show-eps based on whether the TV
    reports a non-null episode. */
 .np-eps[data-show-eps="false"] { display: none; }
+/* Full-width "All episodes" button above the prev/next/stop row. */
+.np-eps-btn { width: 100%; margin-top: 12px; justify-content: center; font-weight: 600; }
+
+/* Episode picker: season chips reuse .chipbar/.chip; the grid is a dense
+   tap-target matrix so jumping to e.g. S2E14 is one tap, not a long scroll. */
+.ep-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(54px, 1fr));
+  gap: 8px; padding: 12px 16px 28px;
+}
+.ep-cell {
+  aspect-ratio: 1 / 1; display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--border); border-radius: 12px; background: var(--surface-2);
+  color: var(--text); font-weight: 600; font-size: 1rem;
+}
+.ep-cell:active { transform: scale(.95); }
+.ep-cell.current { background: var(--accent); color: #fff; border-color: var(--accent); }
 .label-row { justify-content: space-between; align-items: center; margin: 0; }
 .list { display: flex; flex-direction: column; gap: 8px; }
 .list .row-item {

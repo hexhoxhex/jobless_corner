@@ -245,13 +245,27 @@ async function boot() {
   await afterPair();
 }
 
-/* ---------- tabs ---------- */
-function selectTab(name) {
+/* ---------- navigation stack ----------
+   The six bottom tabs are "roots": switching between them replaces the
+   single history entry so they never pile up. "details" and "episodes" are
+   pushed FRAMES (history.pushState) so the phone's hardware/gesture Back pops
+   them instead of reloading or exiting the whole SPA — that reload was what
+   made navigation "reset" and feel broken. popstate re-renders whatever view
+   the browser hands back, so Back/Forward Just Work. */
+const ROOT_TABS = ["browse", "live", "search", "np", "dl", "prefs", "debug", "devices"];
+let originTab = "browse";   // last root tab — pushed frames highlight it + Back falls back to it
+
+function showPane(name) {
   active = name;
   $$(".pane").forEach(p => p.classList.remove("active"));
   $$(".tab").forEach(b => b.classList.remove("active"));
   const pane = $("#pane-" + name); if (pane) pane.classList.add("active");
-  const btn = document.querySelector(`.tab[data-pane="${name}"]`);
+  // Keep a bottom tab lit even on a pushed frame so the user keeps their
+  // bearings: details highlights the tab it was opened from; the episode
+  // picker highlights Now-playing.
+  const tabFor = (name === "details") ? originTab
+               : (name === "episodes") ? "np" : name;
+  const btn = document.querySelector(`.tab[data-pane="${tabFor}"]`);
   if (btn) btn.classList.add("active");
   if (name === "np") refresh();
   if (name === "dl") loadDownloads();
@@ -262,6 +276,32 @@ function selectTab(name) {
   if (name === "live" && !liveLoaded) loadLive();
   if (name === "prefs") loadPrefs();
 }
+
+function renderView(view) {
+  showPane(view.pane);
+  if (view.pane === "details"  && view.ctx) renderDetailsContent(view.ctx);
+  if (view.pane === "episodes" && view.ctx) renderEpisodes(view.ctx);
+}
+
+/** Navigate to a root tab — collapses back to a single history entry. */
+function selectTab(name) {
+  if (ROOT_TABS.includes(name)) originTab = name;
+  history.replaceState({ pane: name, ctx: null }, "");
+  renderView({ pane: name, ctx: null });
+}
+
+/** Push a back-able frame (details / episode picker). */
+function pushView(pane, ctx) {
+  history.pushState({ pane, ctx }, "");
+  renderView({ pane, ctx });
+}
+
+window.addEventListener("popstate", (e) => {
+  const st = e.state;
+  if (st && st.pane) renderView({ pane: st.pane, ctx: st.ctx || null });
+  else renderView({ pane: originTab || "browse", ctx: null });
+});
+
 $$(".tab").forEach(b => b.onclick = () => selectTab(b.dataset.pane));
 
 // Topbar Devices + Debug shortcuts (superuser only — visibility from fetchMe()).
@@ -612,9 +652,11 @@ function escapeHtml(s) {
 }
 
 /* ---------- details ---------- */
-async function openDetails(it) {
+function openDetails(it) {
+  pushView("details", it);
+}
+async function renderDetailsContent(it) {
   lastDetails = { item: it, seasons: [] };
-  selectTab("details");
   $("#dCover").src = it.cover || "";
   $("#dTitle").textContent = it.title;
   const subParts = [];
@@ -622,41 +664,125 @@ async function openDetails(it) {
   if (it.year)   subParts.push(it.year);
   if (it.rating) subParts.push("★ " + it.rating.toFixed(1));
   $("#dSub").textContent = subParts.join(" · ");
-  $("#dDesc").textContent = "Loading…";
   $("#dEpisodes").classList.toggle("hidden", !it.isSeries);
 
-  // TMDB-browsed picks: no aoneroom details. Default S1E1 for series and
-  // skip the description fetch (we'd need a TMDB detail call to get one).
+  // Description: TMDB picks carry their own overview; aoneroom records need a
+  // details fetch.
   if (it.subjectId && it.subjectId.startsWith("tmdb:")) {
     $("#dDesc").textContent = it.overview || "";
-    if (it.isSeries) {
-      const sel = $("#dSeason"); sel.innerHTML = "";
-      [1,2,3,4,5,6,7,8].forEach(s => {
-        const o = document.createElement("option");
-        o.value = s; o.textContent = "Season " + s;
-        sel.appendChild(o);
-      });
-      $("#dEpisode").value = 1;
-    }
-    return;
+  } else {
+    $("#dDesc").textContent = "Loading…";
+    try {
+      const d = await get("/api/details?subjectId=" + encodeURIComponent(it.subjectId));
+      $("#dDesc").textContent = d.description || "";
+    } catch (e) { $("#dDesc").textContent = ""; }
   }
 
-  try {
-    const d = await get("/api/details?subjectId=" + encodeURIComponent(it.subjectId));
-    $("#dDesc").textContent = d.description || "";
-    if (it.isSeries && d.seasons && d.seasons.length) {
-      lastDetails.seasons = d.seasons;
-      const sel = $("#dSeason"); sel.innerHTML = "";
-      d.seasons.forEach(s => {
-        const o = document.createElement("option");
-        o.value = s.season; o.textContent = "Season " + s.season;
-        sel.appendChild(o);
-      });
-      $("#dEpisode").value = 1;
+  // Real seasons + episodes — /api/episodes bridges TMDB→aoneroom and returns
+  // only what actually exists, so no hardcoded Seasons 1-8 and no typing an
+  // episode number that resolves to nothing.
+  if (it.isSeries) {
+    $("#dEpStatus").textContent = "Loading episodes…";
+    $("#dSeason").innerHTML = ""; $("#dEpisode").innerHTML = "";
+    const seasons = await fetchEpisodeMap(it);
+    if (!seasons.length) {
+      $("#dEpStatus").textContent = "Episodes unavailable for this title.";
+      return;
     }
-  } catch (e) { $("#dDesc").textContent = ""; }
+    lastDetails.seasons = seasons;
+    const sel = $("#dSeason");
+    seasons.forEach(s => {
+      const o = document.createElement("option");
+      o.value = s.season; o.textContent = "Season " + s.season;
+      sel.appendChild(o);
+    });
+    fillDetailEpisodes(seasons[0].season);
+    sel.onchange = () => fillDetailEpisodes(Number(sel.value));
+    $("#dEpStatus").textContent = "";
+  }
 }
-$("#detailsBack").onclick = () => selectTab("search");
+// Back returns to wherever you came from (Browse / Search / History / …)
+// via the history stack, not a hardcoded tab.
+$("#detailsBack").onclick = () => history.back();
+
+/* ---------- real episode map (shared by details + the picker) ---------- */
+async function fetchEpisodeMap(it) {
+  const params = new URLSearchParams({ subjectId: it.subjectId || "" });
+  if (it.title) params.set("title", it.title);
+  if (it.year)  params.set("year", it.year);
+  params.set("type", it.type != null ? it.type : 2);
+  try {
+    const d = await get("/api/episodes?" + params.toString());
+    return (d && d.seasons) || [];
+  } catch (e) { return []; }
+}
+function fillDetailEpisodes(se) {
+  const season = (lastDetails.seasons || []).find(s => Number(s.season) === Number(se));
+  const sel = $("#dEpisode"); sel.innerHTML = "";
+  (season ? season.episodes : []).forEach(n => {
+    const o = document.createElement("option");
+    o.value = n; o.textContent = "Episode " + n;
+    sel.appendChild(o);
+  });
+}
+
+/* ---------- episode picker (jump to any season/episode, incl. while playing) ---------- */
+let epPick = null;   // { subjectId, title, year, type, cover, se, ep, seasons }
+
+function openEpisodePicker(ctx) { pushView("episodes", ctx); }
+$("#epBack").onclick = () => history.back();
+
+async function renderEpisodes(ctx) {
+  epPick = Object.assign({}, ctx);
+  $("#epPickTitle").textContent = ctx.title || "Episodes";
+  $("#epSeasonChips").innerHTML = "";
+  $("#epGrid").innerHTML = "";
+  $("#epPickStatus").textContent = "Loading episodes…";
+  const seasons = await fetchEpisodeMap(ctx);
+  if (!seasons.length) {
+    $("#epPickStatus").textContent = "No episodes found for this title.";
+    return;
+  }
+  epPick.seasons = seasons;
+  let activeSe = Number(ctx.se);
+  if (!seasons.some(s => Number(s.season) === activeSe)) activeSe = Number(seasons[0].season);
+  drawEpSeasons(activeSe);
+  drawEpGrid(activeSe);
+  $("#epPickStatus").textContent = "";
+}
+function drawEpSeasons(activeSe) {
+  const host = $("#epSeasonChips"); host.innerHTML = "";
+  epPick.seasons.forEach(s => {
+    const chip = document.createElement("button");
+    chip.className = "chip" + (Number(s.season) === Number(activeSe) ? " active" : "");
+    chip.textContent = "Season " + s.season;
+    chip.onclick = () => { drawEpSeasons(s.season); drawEpGrid(s.season); };
+    host.appendChild(chip);
+  });
+}
+function drawEpGrid(se) {
+  const host = $("#epGrid"); host.innerHTML = "";
+  const season = epPick.seasons.find(s => Number(s.season) === Number(se));
+  if (!season) return;
+  season.episodes.forEach(n => {
+    const cell = document.createElement("button");
+    const isCur = Number(epPick.se) === Number(se) && Number(epPick.ep) === Number(n);
+    cell.className = "ep-cell" + (isCur ? " current" : "");
+    cell.textContent = n;
+    cell.onclick = async () => {
+      const pp = new URLSearchParams({
+        subjectId: epPick.subjectId, title: epPick.title || "",
+        cover: epPick.cover || "", type: epPick.type != null ? epPick.type : 2,
+        se: se, ep: n,
+      });
+      if (epPick.year) pp.set("year", epPick.year);
+      await post("/api/play?" + pp.toString());
+      toast(`Playing S${se} · E${n}…`);
+      selectTab("np");
+    };
+    host.appendChild(cell);
+  });
+}
 
 $("#dPlay").onclick = async () => {
   if (!lastDetails) return;
@@ -698,9 +824,11 @@ let volSliding = false;
 let posSliding = false;
 let lastDurationMs = 0;
 
+let lastState = null;   // most recent /api/state — used by the "All episodes" button
 async function refresh() {
   try {
     const s = await get("/api/state");
+    lastState = s;
     $("#npTitle").textContent = s.title || "Nothing playing";
     // Episode badge under the title — kept in sync with TV state so the
     // remote shows the same episode the user is actually watching, even
@@ -750,10 +878,11 @@ async function refresh() {
     // Toggle the episode controls row visibility based on series state.
     // CSS hides the row when data-show-eps="false" — we flip the attr so
     // the user only sees Prev/Next/Stop while a series is playing.
-    const epsRow = document.querySelector(".np-eps");
-    if (epsRow) {
-      epsRow.dataset.showEps = (s.episode != null) ? "true" : "false";
-    }
+    // Show the episode controls (incl. the new "All episodes" button) only
+    // while a series is playing. There are several .np-eps elements now, so
+    // toggle them all — querySelector would miss the standalone button.
+    const showEps = (s.episode != null && s.subjectId) ? "true" : "false";
+    document.querySelectorAll(".np-eps").forEach(el => { el.dataset.showEps = showEps; });
     // Cache the title for the Live channel grid render so the
     // currently-playing tile shows a "NOW PLAYING" badge instead of
     // being clickable. Re-render the grid only when the title actually
@@ -826,6 +955,18 @@ $("#pp").onclick = () => {
 $("#epNext")?.addEventListener("click", () => post("/api/episode/next"));
 $("#epPrev")?.addEventListener("click", () => post("/api/episode/prev"));
 $("#npClose")?.addEventListener("click", () => post("/api/player/close"));
+// "All episodes" → open the real season/episode picker for the playing series.
+$("#epList")?.addEventListener("click", () => {
+  const s = lastState;
+  if (!s || !s.subjectId || s.season == null) {
+    toast("Episode list not available yet"); return;
+  }
+  openEpisodePicker({
+    subjectId: s.subjectId, title: s.title, year: s.year,
+    type: s.type != null ? s.type : 2, cover: "",
+    se: s.season, ep: s.episode,
+  });
+});
 $("#back10").onclick = () => {
   post("/api/seekby?ms=-10000");
   // Pull the displayed position back optimistically so the time text and
@@ -910,6 +1051,12 @@ $("#npScrub").addEventListener("change", async (e) => {
 });
 
 /* ---------- history ---------- */
+$("#histClear")?.addEventListener("click", async () => {
+  if (!confirm("Clear all continue-watching history?")) return;
+  try { await post("/api/history/clear"); } catch (e) {}
+  loadHistory();
+  toast("History cleared");
+});
 async function loadHistory() {
   let items = []; try { items = await get("/api/history"); } catch (e) {}
   const el = $("#history"); el.innerHTML = "";

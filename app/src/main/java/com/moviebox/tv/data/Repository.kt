@@ -264,6 +264,14 @@ class Repository(
      * than [MAX_ENUM_PAGES] pages — so callers fall back to maxEp rather
      * than risk hiding real episodes on incomplete data.
      */
+    /** Peek the enumerated-episode cache WITHOUT triggering the ~19-call walk.
+     *  The phone's episode picker uses this so a request never blocks on a
+     *  cold enumeration — it falls back to the declared maxEp instead. The
+     *  cache is warmed by enumerateEpisodesInBackground() at play time, so the
+     *  in-playback picker usually gets the real, phantom-free list. */
+    fun cachedEpisodes(subjectId: String): Map<Int, List<Int>>? =
+        episodeMapCache[subjectId]
+
     suspend fun enumerateEpisodes(subjectId: String): Map<Int, List<Int>>? =
         coroutineScope {
             episodeMapCache[subjectId]?.let { return@coroutineScope it }
