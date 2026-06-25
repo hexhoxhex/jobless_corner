@@ -362,19 +362,13 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                 captions = play.captions,
                 contentKey = vm.contentKey,
                 onEnded = {
-                    // Live streams don't "end" in the normal sense, and there's
-                    // no next episode for them; only autoplay VOD.
-                    if (!play.isLive) {
-                        // Definitive end-of-content signal. The movie /
-                        // end-of-series recommendation card keys off this
-                        // (never a duration estimate), so a movie always
-                        // plays to its real end before we advance.
-                        contentEnded = true
-                        // Mid-series binge: jump to the next episode the
-                        // moment the current one truly ends.
-                        if (state.autoplayNext && state.currentSe != null)
-                            vm.nextEpisode()
-                    }
+                    // Live streams don't "end" in the normal sense. For VOD
+                    // (movies AND episodes), this STATE_ENDED is the ONLY
+                    // definitive "content finished" signal. Both the episode
+                    // Up Next card and the movie/end-of-series card auto-
+                    // advance off this flag — never a duration estimate — so
+                    // nothing skips before the content has genuinely ended.
+                    if (!play.isLive) contentEnded = true
                 },
                 onControlsVisible = { /* native controller is off; we own visibility */ },
                 onBuffering = { buffering = it },
@@ -691,9 +685,14 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
         // means the user sees the Up Next card during credits and can
         // either tap Play Now or wait for the 10-s auto-advance counter.
         val upNext = nextEpisodeFor(state)
-        val nearEnd = play != null && !play.isLive && durationMs > 0 &&
-            positionMs >= (durationMs - UP_NEXT_WINDOW_MS)
-        val showUpNext = nearEnd && state.currentSe != null && upNext != null
+        // Auto-advance to the next episode ONLY when the current one has
+        // genuinely ended (STATE_ENDED → contentEnded), NOT a duration
+        // estimate. aoneroom under-reports episode durations too, so the
+        // old "durationMs - 3min" trigger fired minutes before the episode
+        // ended — the user's "skips to the next episode before this one
+        // finishes" bug. The next episode then starts fresh at 0:00 (the
+        // card's playEpisode uses restoreResume=false).
+        val showUpNext = contentEnded && state.currentSe != null && upNext != null
         AnimatedVisibility(
             visible = showUpNext,
             modifier = Modifier.align(Alignment.BottomEnd)
@@ -1842,6 +1841,8 @@ private fun VideoPlayer(
                             exo.prepare()
                         }
                     } else {
+                        android.util.Log.i("VodDiag",
+                            "STATE_ENDED (VOD) — content finished, will advance")
                         endedState.value()
                     }
                 }

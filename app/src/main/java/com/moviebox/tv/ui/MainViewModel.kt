@@ -1298,9 +1298,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 // playEpisode(restoreResume=false). Consumed here so the
                 // next ordinary resolve (quality/dub change) still gets
                 // the saved position.
-                val resume = if (skipResumeNext) 0L
+                val skipNow = skipResumeNext
+                val resume = if (skipNow) 0L
                 else watchDao.positionOf(key) ?: 0L
                 skipResumeNext = false
+                android.util.Log.i(
+                    "VodDiag",
+                    "resolve S${_state.value.currentSe}E${_state.value.currentEp} " +
+                        "skipResume=$skipNow resume=${resume}ms",
+                )
                 _state.update {
                     it.copy(play = p, playLoading = false, resumeMs = resume)
                 }
