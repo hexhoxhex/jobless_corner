@@ -25,8 +25,19 @@ android {
         // ExoPlayer codec support; covers virtually all Android TV devices.
         minSdk = 26
         targetSdk = 35
-        versionCode = 77
-        versionName = "0.1.76"
+        versionCode = 78
+        versionName = "0.1.77"
+
+        // Ship only the ABIs real devices use. The universal APK carried four
+        // (arm64-v8a, armeabi-v7a, x86, x86_64) = ~40 MB, and that size was
+        // truncating mid-download from GitHub's asset CDN → corrupt APK →
+        // "problem parsing the package". x86/x86_64 are emulator-only here; the
+        // TV is armeabi-v7a and phones are arm64-v8a. Dropping x86* trims ~13 MB
+        // (~40 MB → ~27 MB) so the download completes in one shot.
+        ndk {
+            abiFilters.clear()
+            abiFilters.addAll(listOf("arm64-v8a", "armeabi-v7a"))
+        }
 
         buildConfigField(
             "String", "TMDB_TOKEN",
