@@ -365,26 +365,65 @@ private fun UpdateBanner(
             )
         }
         Spacer(Modifier.width(12.dp))
-        Box(
-            Modifier
-                .clip(RoundedCornerShape(18.dp))
-                .background(Accent)
-                .clickable(onClick = onUpdate)
-                .padding(horizontal = 14.dp, vertical = 8.dp),
-        ) {
-            Text("Download",
-                color = androidx.compose.ui.graphics.Color.White,
-                fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
-        }
-        Spacer(Modifier.width(6.dp))
-        Box(
-            Modifier
-                .size(34.dp)
-                .clip(RoundedCornerShape(17.dp))
-                .clickable(onClick = onDismiss),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text("×", color = TextMuted, fontSize = 18.sp)
+        // While a download is in flight, replace the button with a live
+        // percent + MB readout and a fill bar so the user can see it working
+        // (the APK is ~40 MB — the old silent "Downloading…" toast looked
+        // frozen). UpdateInstaller.downloadProgress is null when idle.
+        val dl by com.moviebox.tv.debug.UpdateInstaller.downloadProgress.collectAsState()
+        val status = dl
+        if (status != null) {
+            Column(horizontalAlignment = Alignment.End) {
+                Text(
+                    if (status.pct >= 0) "Downloading ${status.pct}%"
+                    else "Downloading… ${"%.1f".format(status.mb)} MB",
+                    color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 12.sp,
+                )
+                if (status.totalMb > 0f) {
+                    Text(
+                        "${"%.1f".format(status.mb)} / ${"%.1f".format(status.totalMb)} MB",
+                        color = TextMuted, fontSize = 10.sp,
+                    )
+                }
+                Spacer(Modifier.height(5.dp))
+                Box(
+                    Modifier
+                        .width(130.dp).height(5.dp)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(Color.White.copy(alpha = 0.2f)),
+                ) {
+                    if (status.pct >= 0) {
+                        Box(
+                            Modifier
+                                .fillMaxHeight()
+                                .fillMaxWidth((status.pct / 100f).coerceIn(0f, 1f))
+                                .clip(RoundedCornerShape(3.dp))
+                                .background(Accent),
+                        )
+                    }
+                }
+            }
+        } else {
+            Box(
+                Modifier
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(Accent)
+                    .clickable(onClick = onUpdate)
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
+            ) {
+                Text("Download",
+                    color = Color.White,
+                    fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
+            }
+            Spacer(Modifier.width(6.dp))
+            Box(
+                Modifier
+                    .size(34.dp)
+                    .clip(RoundedCornerShape(17.dp))
+                    .clickable(onClick = onDismiss),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("×", color = TextMuted, fontSize = 18.sp)
+            }
         }
     }
 }

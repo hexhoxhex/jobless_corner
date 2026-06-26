@@ -10,6 +10,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -42,6 +43,13 @@ object UpdateInstaller {
 
     private const val TAG = "UpdateInstaller"
 
+    /** Live download state for the UI. null = idle / not downloading. While a
+     *  download is in flight the banner shows [pct] + MB so the user sees it's
+     *  working instead of staring at a frozen "Download" button. pct is -1 when
+     *  the server didn't send a Content-Length (indeterminate). */
+    data class DownloadStatus(val pct: Int, val mb: Float, val totalMb: Float)
+    val downloadProgress = MutableStateFlow<DownloadStatus?>(null)
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val client: OkHttpClient = OkHttpClient.Builder()
@@ -59,7 +67,7 @@ object UpdateInstaller {
         return scope.launch {
             val file = destinationFile(app, version)
             runCatching { file.delete() }
-            toast(app, "Downloading update…")
+            downloadProgress.value = DownloadStatus(0, 0f, 0f)
             try {
                 val req = Request.Builder()
                     .url(apkUrl)
@@ -71,41 +79,52 @@ object UpdateInstaller {
                     if (!resp.isSuccessful) {
                         Log.e(TAG, "download failed HTTP ${resp.code} from $apkUrl")
                         toast(app, "Update failed: HTTP ${resp.code}")
+                        downloadProgress.value = null
                         return@launch
                     }
                     val body = resp.body ?: run {
                         toast(app, "Update failed: empty body")
+                        downloadProgress.value = null
                         return@launch
                     }
                     val total = body.contentLength().takeIf { it > 0 } ?: -1L
+                    val totalMb = if (total > 0) total / 1_000_000f else 0f
                     body.byteStream().use { input ->
                         FileOutputStream(file).use { out ->
                             val buf = ByteArray(64 * 1024)
                             var soFar = 0L
                             var lastReport = -1
+                            var lastPct = -1
                             while (true) {
                                 val n = input.read(buf)
                                 if (n <= 0) break
                                 out.write(buf, 0, n)
                                 soFar += n
-                                if (total > 0) {
-                                    val pct = (soFar * 100 / total).toInt()
-                                    // Don't spam logcat — only on 10%
-                                    // boundaries.
-                                    if (pct / 10 != lastReport) {
-                                        lastReport = pct / 10
-                                        Log.i(TAG, "download $version: ${pct}%")
-                                    }
+                                val pct = if (total > 0) (soFar * 100 / total).toInt() else -1
+                                // Push progress to the UI on every 1% change
+                                // (StateFlow conflates, so this is cheap).
+                                if (pct != lastPct) {
+                                    lastPct = pct
+                                    downloadProgress.value =
+                                        DownloadStatus(pct, soFar / 1_000_000f, totalMb)
+                                }
+                                // Don't spam logcat — only on 10% boundaries.
+                                if (total > 0 && pct / 10 != lastReport) {
+                                    lastReport = pct / 10
+                                    Log.i(TAG, "download $version: ${pct}%")
                                 }
                             }
                         }
                     }
                 }
                 Log.i(TAG, "download complete: ${file.absolutePath} (${file.length()} bytes)")
+                downloadProgress.value = DownloadStatus(100, file.length() / 1_000_000f, file.length() / 1_000_000f)
                 withContext(Dispatchers.Main) { install(app, file) }
+                downloadProgress.value = null
             } catch (e: Exception) {
                 Log.e(TAG, "download exception: ${e.message}", e)
                 toast(app, "Update failed: ${e.message?.take(80) ?: e.javaClass.simpleName}")
+                downloadProgress.value = null
             }
         }
     }
