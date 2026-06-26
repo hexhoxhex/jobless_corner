@@ -3,188 +3,278 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<title>Vijana BaruBaru — Download</title>
-<meta name="description" content="Vijana BaruBaru — live TV channels and movies for your Android TV and phone. Download the APK." />
+<title>Vijana BaruBaru — Watch live TV</title>
+<meta name="description" content="Watch hundreds of live TV channels in your browser, free. Sports, news, movies — or download the Android TV & phone app." />
 <meta name="theme-color" content="#0b0f14" />
 <meta property="og:title" content="Vijana BaruBaru" />
-<meta property="og:description" content="Live TV & movies for Android TV and phone. Tap to download." />
+<meta property="og:description" content="Watch live TV in your browser, or get the app." />
+<link rel="preconnect" href="https://raw.githubusercontent.com" />
 <style>
-  :root {
-    --bg: #0b0f14;
-    --bg2: #121821;
-    --card: #161e29;
-    --text: #eef2f7;
-    --muted: #93a1b3;
-    --accent: #2bd4a4;
-    --accent-press: #20b88c;
-    --border: #243042;
+  :root{
+    --bg:#0b0f14; --bg2:#121821; --card:#161e29; --card2:#1b2533;
+    --text:#eef2f7; --muted:#93a1b3; --accent:#2bd4a4; --accent2:#20b88c;
+    --border:#243042; --danger:#e5484d;
   }
-  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-  html, body { margin: 0; padding: 0; }
-  body {
-    background:
-      radial-gradient(120% 60% at 50% -10%, rgba(43,212,164,0.16), transparent 60%),
-      var(--bg);
-    color: var(--text);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
-    min-height: 100dvh;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    padding: 28px 18px calc(28px + env(safe-area-inset-bottom));
-    line-height: 1.5;
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;padding:0}
+  body{
+    background:radial-gradient(120% 50% at 50% -8%, rgba(43,212,164,.14), transparent 55%), var(--bg);
+    color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,system-ui,sans-serif;
+    min-height:100dvh; line-height:1.5;
   }
-  .wrap { width: 100%; max-width: 440px; }
-  .brand {
-    display: flex; align-items: center; gap: 10px;
-    font-weight: 700; font-size: 17px; letter-spacing: .2px;
-    justify-content: center; margin-bottom: 30px;
-  }
-  .brand .dot {
-    width: 30px; height: 30px; border-radius: 9px;
-    background: linear-gradient(135deg, var(--accent), #1c8fbf);
-    display: grid; place-items: center; color: #062018; font-weight: 900;
-  }
-  .hero { text-align: center; margin-bottom: 26px; }
-  .hero h1 { font-size: 30px; line-height: 1.15; margin: 0 0 10px; font-weight: 800; }
-  .hero p { color: var(--muted); margin: 0; font-size: 15px; }
+  a{color:var(--accent);text-decoration:none}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 16px}
 
-  .card {
-    background: linear-gradient(180deg, var(--card), var(--bg2));
-    border: 1px solid var(--border);
-    border-radius: 18px;
-    padding: 20px;
-    margin-bottom: 16px;
-  }
+  header{position:sticky;top:0;z-index:30;backdrop-filter:blur(12px);
+    background:rgba(11,15,20,.82);border-bottom:1px solid var(--border)}
+  .bar{display:flex;align-items:center;gap:12px;height:58px}
+  .brand{display:flex;align-items:center;gap:9px;font-weight:700;font-size:16px}
+  .brand .dot{width:28px;height:28px;border-radius:8px;display:grid;place-items:center;
+    background:linear-gradient(135deg,var(--accent),#1c8fbf);color:#062018;font-weight:900}
+  .spacer{flex:1}
+  .ghost-btn{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--border);
+    background:var(--card);color:var(--text);border-radius:11px;padding:9px 13px;font-weight:600;
+    font-size:13px;cursor:pointer}
+  .ghost-btn:active{transform:scale(.97)}
+  .ghost-btn .ti{color:var(--accent)}
 
-  .dl {
-    display: flex; flex-direction: column; align-items: stretch; gap: 12px;
-  }
-  .btn {
-    display: flex; align-items: center; justify-content: center; gap: 10px;
-    background: var(--accent); color: #042018;
-    font-weight: 800; font-size: 17px;
-    border: none; border-radius: 14px;
-    padding: 16px 18px; text-decoration: none;
-    transition: transform .06s ease, background .15s ease;
-  }
-  .btn:active { transform: scale(.98); background: var(--accent-press); }
-  .btn svg { width: 22px; height: 22px; }
-  .meta {
-    display: flex; justify-content: center; gap: 14px; flex-wrap: wrap;
-    color: var(--muted); font-size: 13px;
-  }
-  .meta b { color: var(--text); font-weight: 600; }
+  .hero{padding:26px 0 14px;text-align:center}
+  .hero h1{font-size:26px;margin:0 0 6px;font-weight:800;letter-spacing:-.3px}
+  .hero p{margin:0;color:var(--muted);font-size:14px}
 
-  .steps { margin: 0; padding: 0; list-style: none; counter-reset: s; }
-  .steps li {
-    counter-increment: s;
-    display: flex; gap: 12px; align-items: flex-start;
-    padding: 11px 0;
-    border-bottom: 1px solid var(--border);
-    font-size: 14.5px;
-  }
-  .steps li:last-child { border-bottom: 0; }
-  .steps li::before {
-    content: counter(s);
-    flex: 0 0 24px; height: 24px; border-radius: 50%;
-    background: rgba(43,212,164,0.15); color: var(--accent);
-    display: grid; place-items: center; font-weight: 700; font-size: 13px;
-    margin-top: 1px;
-  }
-  .ch { color: var(--muted); font-size: 13px; }
-  .ch b { color: var(--text); }
-  .sha {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 11px; color: var(--muted); word-break: break-all;
-    background: #0d131b; border: 1px solid var(--border);
-    border-radius: 8px; padding: 8px 10px; margin-top: 8px;
-  }
-  .foot { text-align: center; color: var(--muted); font-size: 12px; margin-top: 8px; }
-  .foot a { color: var(--accent); text-decoration: none; }
-  h3 { margin: 0 0 12px; font-size: 14px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .6px; }
-  .pill {
-    display: inline-flex; align-items: center; gap: 6px;
-    background: rgba(43,212,164,0.12); color: var(--accent);
-    border-radius: 999px; padding: 4px 11px; font-size: 12px; font-weight: 600;
-    margin-bottom: 14px;
-  }
+  .tools{position:sticky;top:58px;z-index:20;background:rgba(11,15,20,.9);
+    backdrop-filter:blur(8px);padding:12px 0 8px}
+  .search{display:flex;align-items:center;gap:9px;background:var(--card);border:1px solid var(--border);
+    border-radius:13px;padding:11px 13px}
+  .search input{flex:1;background:none;border:none;outline:none;color:var(--text);font-size:15px}
+  .search svg{width:18px;height:18px;color:var(--muted);flex:none}
+  .chips{display:flex;gap:8px;overflow-x:auto;padding:10px 0 2px;scrollbar-width:none}
+  .chips::-webkit-scrollbar{display:none}
+  .chip{flex:none;border:1px solid var(--border);background:var(--card);color:var(--muted);
+    border-radius:999px;padding:7px 13px;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap}
+  .chip.on{background:var(--accent);color:#062018;border-color:var(--accent)}
+
+  .status{color:var(--muted);font-size:12.5px;padding:2px 2px 12px}
+
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;padding-bottom:40px}
+  @media(max-width:520px){.grid{grid-template-columns:repeat(2,1fr);gap:10px}}
+  .ch{background:var(--card);border:1px solid var(--border);border-radius:14px;overflow:hidden;
+    cursor:pointer;display:flex;flex-direction:column;transition:transform .08s ease,border-color .15s}
+  .ch:hover{border-color:var(--accent)}
+  .ch:active{transform:scale(.98)}
+  .logo{height:84px;display:grid;place-items:center;background:var(--card2);padding:12px}
+  .logo img{max-height:60px;max-width:100%;object-fit:contain}
+  .logo .ph{font-weight:800;font-size:22px;color:var(--muted);letter-spacing:1px}
+  .ch .nm{padding:9px 11px 11px;font-size:13px;font-weight:600;line-height:1.3}
+  .ch .grp{color:var(--muted);font-weight:500;font-size:11px;display:block;margin-top:2px}
+
+  .empty{text-align:center;color:var(--muted);padding:50px 0}
+
+  .overlay{position:fixed;inset:0;z-index:50;background:rgba(4,7,11,.92);display:none;
+    flex-direction:column;backdrop-filter:blur(4px)}
+  .overlay.show{display:flex}
+  .pbar{display:flex;align-items:center;gap:12px;padding:14px 16px}
+  .pbar .t{flex:1;font-weight:700;font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .pbar .live{background:var(--danger);color:#fff;font-size:10px;font-weight:800;border-radius:5px;padding:2px 6px}
+  .x{width:38px;height:38px;border-radius:50%;border:1px solid var(--border);background:var(--card);
+    color:var(--text);font-size:20px;cursor:pointer;display:grid;place-items:center;flex:none}
+  .stage{flex:1;display:flex;align-items:center;justify-content:center;padding:0 12px 16px;min-height:0}
+  video{width:100%;max-width:1000px;max-height:100%;background:#000;border-radius:12px;aspect-ratio:16/9}
+  .pmsg{position:absolute;color:var(--muted);font-size:14px;text-align:center;pointer-events:none}
+
+  .modal{position:fixed;inset:0;z-index:60;background:rgba(4,7,11,.7);display:none;
+    align-items:flex-end;justify-content:center;backdrop-filter:blur(3px)}
+  @media(min-width:600px){.modal{align-items:center}}
+  .modal.show{display:flex}
+  .sheet{background:linear-gradient(180deg,var(--card),var(--bg2));border:1px solid var(--border);
+    border-radius:20px 20px 0 0;width:100%;max-width:440px;padding:22px 20px calc(22px + env(safe-area-inset-bottom))}
+  @media(min-width:600px){.sheet{border-radius:20px}}
+  .sheet h3{margin:0 0 4px;font-size:18px}
+  .sheet p{margin:0 0 16px;color:var(--muted);font-size:13.5px}
+  .dlbtn{display:flex;align-items:center;justify-content:center;gap:10px;background:var(--accent);
+    color:#042018;font-weight:800;font-size:16px;border:none;border-radius:13px;padding:15px;width:100%;cursor:pointer}
+  .dlbtn svg{width:20px;height:20px}
+  .dlmeta{display:flex;justify-content:center;gap:14px;color:var(--muted);font-size:12px;margin-top:11px}
+  .dlmeta b{color:var(--text)}
+  .steps{margin:16px 0 0;padding:0;list-style:none;counter-reset:s}
+  .steps li{counter-increment:s;display:flex;gap:10px;padding:7px 0;font-size:13px;color:var(--text)}
+  .steps li::before{content:counter(s);flex:none;width:21px;height:21px;border-radius:50%;
+    background:rgba(43,212,164,.15);color:var(--accent);display:grid;place-items:center;font-weight:700;font-size:12px}
+  .sclose{position:absolute;top:14px;right:16px}
 </style>
 </head>
 <body>
-  <div class="wrap">
-    <div class="brand"><span class="dot">V</span> Vijana BaruBaru</div>
 
-    <div class="hero">
-      <span class="pill">● Android TV &amp; phone</span>
-      <h1>Live TV &amp; movies,<br/>on every screen.</h1>
-      <p>Hundreds of live channels and a full movie &amp; series catalogue. Install the app and pair your phone as a remote.</p>
-    </div>
+<header>
+  <div class="wrap bar">
+    <span class="brand"><span class="dot">V</span> Vijana BaruBaru</span>
+    <span class="spacer"></span>
+    <button class="ghost-btn" id="getApp">
+      <svg class="ti" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px"><path d="M12 4v12"/><path d="M7 11l5 5 5-5"/><path d="M5 20h14"/></svg>
+      Get the app
+    </button>
+  </div>
+</header>
 
-    <div class="card">
-      <div class="dl">
-        <a id="dlBtn" class="btn" href="https://github.com/hexhoxhex/jobless_corner/releases/latest" rel="noopener">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12"/><path d="M7 11l5 5 5-5"/><path d="M5 20h14"/></svg>
-          <span id="dlLabel">Download APK</span>
-        </a>
-        <div class="meta">
-          <span>Version <b id="ver">latest</b></span>
-          <span><b id="size">—</b></span>
-          <span>Android <b>7.0+</b></span>
-        </div>
-      </div>
-    </div>
-
-    <div class="card">
-      <h3>Install in 4 steps</h3>
-      <ul class="steps">
-        <li>Tap <b style="color:var(--accent)">&nbsp;Download APK&nbsp;</b> above and let it finish.</li>
-        <li>Open the downloaded file (check Downloads if nothing happens).</li>
-        <li>If asked, allow your browser to <b>install unknown apps</b> — just this once.</li>
-        <li>Tap <b>Install</b>. Updates land inside the app from then on.</li>
-      </ul>
-    </div>
-
-    <div class="card" id="verifyCard" style="display:none">
-      <h3>Verify (optional)</h3>
-      <div class="ch">SHA-256 of the APK — compare after download if you like:</div>
-      <div class="sha" id="sha">—</div>
-    </div>
-
-    <div class="foot">
-      On a TV? Sideload with <b>adb install</b>, or open this page in the TV browser.<br/>
-      <a id="allReleases" href="https://github.com/hexhoxhex/jobless_corner/releases">All versions &amp; changelog</a>
-    </div>
+<div class="wrap">
+  <div class="hero">
+    <h1>Watch live TV, free</h1>
+    <p>Hundreds of channels — sports, news, entertainment. Plays right here in your browser.</p>
   </div>
 
+  <div class="tools">
+    <div class="search">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+      <input id="q" type="search" placeholder="Search channels…" autocomplete="off" />
+    </div>
+    <div class="chips" id="chips"></div>
+  </div>
+
+  <div class="status" id="status">Loading channels…</div>
+  <div class="grid" id="grid"></div>
+  <div class="empty" id="empty" style="display:none">No channels match your search.</div>
+</div>
+
+<div class="overlay" id="player">
+  <div class="pbar">
+    <span class="live">LIVE</span>
+    <span class="t" id="pTitle">—</span>
+    <button class="x" id="pClose" aria-label="Close">&times;</button>
+  </div>
+  <div class="stage">
+    <div class="pmsg" id="pMsg"></div>
+    <video id="video" controls playsinline autoplay></video>
+  </div>
+</div>
+
+<div class="modal" id="appModal">
+  <div class="sheet">
+    <button class="x sclose" id="mClose" aria-label="Close">&times;</button>
+    <h3>Get the app</h3>
+    <p>Android TV &amp; phone. Live TV plus a full movie &amp; series library, with your phone as a remote.</p>
+    <a class="dlbtn" id="dl" href="https://github.com/hexhoxhex/jobless_corner/releases/latest">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12"/><path d="M7 11l5 5 5-5"/><path d="M5 20h14"/></svg>
+      Download APK
+    </a>
+    <div class="dlmeta">
+      <span>Version <b id="ver">latest</b></span><span><b id="size">—</b></span><span>Android <b>7+</b></span>
+    </div>
+    <ul class="steps">
+      <li>Download the APK and open it.</li>
+      <li>If asked, allow installing unknown apps — once.</li>
+      <li>Tap Install. Updates land inside the app after that.</li>
+    </ul>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
 <script>
-  // Always point at the newest release. We ask the GitHub API for the latest
-  // release and rewrite the button to the direct APK asset; if that fails
-  // (offline / rate-limited) the button keeps its default "latest release"
-  // link so it still works.
-  const REPO = "hexhoxhex/jobless_corner";
-  (async () => {
-    try {
-      const r = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, {
-        headers: { "Accept": "application/vnd.github+json" },
-      });
-      if (!r.ok) return;
-      const rel = await r.json();
-      const apk = (rel.assets || []).find(a => /\.apk$/i.test(a.name));
-      if (apk) {
-        document.getElementById("dlBtn").href = apk.browser_download_url;
-        const mb = (apk.size / 1e6).toFixed(1);
-        document.getElementById("size").textContent = mb + " MB";
+const CHANNELS_URL = "https://raw.githubusercontent.com/hexhoxhex/mkurugenzi_viewer/main/data/channels.json";
+const REPO = "hexhoxhex/jobless_corner";
+let all = [], group = "", query = "";
+const $ = s => document.querySelector(s);
+const titleCase = s => (s||"").split(" ").map(w=>w?w[0].toUpperCase()+w.slice(1):w).join(" ");
+
+async function load(){
+  try{
+    const r = await fetch(CHANNELS_URL);
+    const d = await r.json();
+    const ch = Array.isArray(d) ? d : (d.channels||[]);
+    all = ch.filter(c => c.status==="ok" && c.stream_url);
+    $("#status").textContent = `${all.length} live channels`;
+    buildGroups(); render();
+  }catch(e){ $("#status").textContent = "Couldn't load the channel list. Refresh to retry."; }
+}
+function buildGroups(){
+  const counts = {};
+  all.forEach(c => { const g=(c.group||"").trim(); if(g) counts[g]=(counts[g]||0)+1; });
+  const top = Object.entries(counts).sort((a,b)=>b[1]-a[1]).slice(0,14).map(x=>x[0]);
+  const host = $("#chips"); host.innerHTML="";
+  [["","All"], ...top.map(g=>[g,g])].forEach(([val,label])=>{
+    const b=document.createElement("button");
+    b.className="chip"+(val===group?" on":""); b.textContent=titleCase(label);
+    b.onclick=()=>{ group=val; [...host.children].forEach(c=>c.classList.remove("on")); b.classList.add("on"); render(); };
+    host.appendChild(b);
+  });
+}
+function render(){
+  const q=query.toLowerCase();
+  const list = all.filter(c =>
+    (!group || (c.group||"")===group) &&
+    (!q || (c.name||"").toLowerCase().includes(q)));
+  const grid=$("#grid"); grid.innerHTML="";
+  $("#empty").style.display = list.length ? "none" : "block";
+  const frag=document.createDocumentFragment();
+  list.forEach(c=>{
+    const el=document.createElement("div"); el.className="ch";
+    const logo = c.logo
+      ? `<div class="logo"><img loading="lazy" src="${c.logo}" alt="" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'ph',textContent:'${(c.name||'').slice(0,3).toUpperCase()}'}))"/></div>`
+      : `<div class="logo"><span class="ph">${(c.name||"").slice(0,3).toUpperCase()}</span></div>`;
+    el.innerHTML = logo + `<div class="nm">${titleCase(c.name)}${c.group?`<span class="grp">${titleCase(c.group)}</span>`:""}</div>`;
+    el.onclick=()=>play(c);
+    frag.appendChild(el);
+  });
+  grid.appendChild(frag);
+}
+
+let hls=null;
+const video=$("#video");
+function play(c){
+  $("#pTitle").textContent = titleCase(c.name);
+  $("#pMsg").textContent = "Connecting…";
+  $("#player").classList.add("show");
+  document.body.style.overflow="hidden";
+  if(hls){ hls.destroy(); hls=null; }
+  const url=c.stream_url;
+  const onPlaying=()=>{ $("#pMsg").textContent=""; };
+  video.onplaying=onPlaying;
+  if(window.Hls && Hls.isSupported()){
+    hls=new Hls({lowLatencyMode:true, backBufferLength:30});
+    hls.loadSource(url); hls.attachMedia(video);
+    hls.on(Hls.Events.ERROR,(e,data)=>{
+      if(data.fatal){
+        if(data.type===Hls.ErrorTypes.NETWORK_ERROR){ hls.startLoad(); }
+        else if(data.type===Hls.ErrorTypes.MEDIA_ERROR){ hls.recoverMediaError(); }
+        else { $("#pMsg").textContent="This channel isn't available right now — try another."; }
       }
-      if (rel.tag_name) document.getElementById("ver").textContent = rel.tag_name;
-      // The release body carries "**SHA-256:** `<hash>`" — surface it for trust.
-      const m = (rel.body || "").match(/SHA-256:\s*`?([a-f0-9]{64})`?/i);
-      if (m) {
-        document.getElementById("sha").textContent = m[1];
-        document.getElementById("verifyCard").style.display = "";
-      }
-    } catch (e) { /* keep the default fallback link */ }
-  })();
+    });
+  } else if(video.canPlayType("application/vnd.apple.mpegurl")){
+    video.src=url; video.play().catch(()=>{});
+  } else {
+    $("#pMsg").textContent="Your browser can't play this stream.";
+  }
+}
+function closePlayer(){
+  $("#player").classList.remove("show");
+  document.body.style.overflow="";
+  if(hls){ hls.destroy(); hls=null; }
+  video.removeAttribute("src"); video.load();
+}
+$("#pClose").onclick=closePlayer;
+
+// search (debounced)
+let t=null;
+$("#q").addEventListener("input",e=>{ clearTimeout(t); t=setTimeout(()=>{ query=e.target.value.trim(); render(); },180); });
+
+// get-app modal + dynamic latest release
+$("#getApp").onclick=()=>$("#appModal").classList.add("show");
+$("#mClose").onclick=()=>$("#appModal").classList.remove("show");
+$("#appModal").addEventListener("click",e=>{ if(e.target.id==="appModal") $("#appModal").classList.remove("show"); });
+(async()=>{
+  try{
+    const r=await fetch(`https://api.github.com/repos/${REPO}/releases/latest`,{headers:{Accept:"application/vnd.github+json"}});
+    if(!r.ok) return;
+    const rel=await r.json();
+    const apk=(rel.assets||[]).find(a=>/\.apk$/i.test(a.name));
+    if(apk){ $("#dl").href=apk.browser_download_url; $("#size").textContent=(apk.size/1e6).toFixed(1)+" MB"; }
+    if(rel.tag_name) $("#ver").textContent=rel.tag_name;
+  }catch(e){}
+})();
+
+// hardware/browser back closes the open layer first
+window.addEventListener("keydown",e=>{ if(e.key==="Escape"){ closePlayer(); $("#appModal").classList.remove("show"); }});
+
+load();
 </script>
 </body>
 </html>
