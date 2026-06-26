@@ -2,6 +2,9 @@ package com.moviebox.tv.data.live
 
 import android.util.Base64
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -46,18 +49,29 @@ class LiveResolver(
      * holds, but it's still the right next step before giving up).
      */
     suspend fun resolveStream(channelId: String): String? = withContext(Dispatchers.IO) {
-        // Try every known resolver host × every daddyN suffix. Hosts are
-        // ordered cheap-first: the current cached/discovered host, then
-        // known-good hardcodes, then last-resort discovery from dlhd.
+        // Try every known resolver host (cheap-first), and within each host
+        // probe ALL daddyN endpoints CONCURRENTLY, taking the lowest-numbered
+        // one that returns a playable manifest. Serial probing fell apart once
+        // the CDN got slow: ~8 s per endpoint × 5 = ~40 s, which blew past the
+        // call timeout, rejected the valid-but-slow stream, and handed the dead
+        // daddy.php fallback to ExoPlayer — the "stuck loading / reconnecting"
+        // the user hit on FOX and most channels. Parallel = one slow probe, not
+        // the sum of them.
         for (host in resolverHosts(channelId)) {
-            for (suffix in DADDY_ENDPOINTS) {
-                runCatching { tryEndpoint(host, channelId, suffix) }
-                    .getOrNull()
-                    ?.let {
-                        com.moviebox.tv.debug.ProviderHealth.success("donis@$host")
-                        rememberWorkingHost(host)
-                        return@withContext it
+            val winner = coroutineScope {
+                DADDY_ENDPOINTS.mapIndexed { idx, suffix ->
+                    async {
+                        idx to runCatching { tryEndpoint(host, channelId, suffix) }.getOrNull()
                     }
+                }.awaitAll()
+                    .filter { it.second != null }
+                    .minByOrNull { it.first }
+                    ?.second
+            }
+            if (winner != null) {
+                com.moviebox.tv.debug.ProviderHealth.success("donis@$host")
+                rememberWorkingHost(host)
+                return@withContext winner
             }
         }
         com.moviebox.tv.debug.ProviderHealth.failure(
@@ -135,15 +149,18 @@ class LiveResolver(
         // Validate that the resolved URL actually serves a manifest. daddy.php
         // returning 200 with a blob is necessary but not sufficient — the
         // pontos/vomos sibling the URL points at may itself be 500-ing
-        // ("Error fetching index playlist"). When that happens we want to
-        // rotate to the next daddyN.php which usually picks a healthier
-        // sibling, not hand a dead URL to ExoPlayer.
+        // ("Error fetching index playlist"). When that happens we want a
+        // sibling that gives a real manifest, not to hand a dead URL to
+        // ExoPlayer. Validate with a GET that reads the response head: HEAD is
+        // unreliable on these CDNs (some 200 a HEAD but 403/500 the real GET),
+        // and a true #EXTM3U master is exactly what ExoPlayer needs next.
         return runCatching {
-            val probe = Request.Builder().url(resolved).head()
+            val probe = Request.Builder().url(resolved).get()
                 .header("User-Agent", CHROME_ANDROID_UA)
                 .build()
             client.newCall(probe).execute().use { r ->
-                if (r.isSuccessful) resolved else null
+                val head = r.body?.string().orEmpty()
+                if (r.isSuccessful && head.trimStart().startsWith("#EXTM3U")) resolved else null
             }
         }.getOrNull()
     }
@@ -192,17 +209,17 @@ class LiveResolver(
                 "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 
         private fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
-            // Tight timeouts because the proxy's [LiveStreamProxy.ensureCached]
-            // runBlocks on resolveStream — every second wasted here is a
-            // second NanoHTTPD's client thread is blocked, after which
-            // ExoPlayer's source-timeout fires and the connection drops
-            // with "broken pipe at NanoHTTPD" and the player stuck on
-            // the loading spinner. Old 8 s × 5 endpoints = 40 s worst
-            // case hang. New 4 s × 5 = 20 s; with the early-return on
-            // first success, typical resolve is <2 s.
-            .connectTimeout(4, java.util.concurrent.TimeUnit.SECONDS)
-            .readTimeout(4, java.util.concurrent.TimeUnit.SECONDS)
-            .callTimeout(6, java.util.concurrent.TimeUnit.SECONDS)
+            // Timeouts must clear ONE slow CDN response, not be a tight cap on
+            // the whole resolve. The endpoints are now probed in parallel
+            // (see resolveStream), so total resolve ≈ the slowest single probe
+            // rather than the sum. phantemlis has been answering the validating
+            // GET in ~8 s under load (during live games) — the old 6 s call
+            // timeout rejected those valid streams and dropped to the dead
+            // fallback. 14 s clears them with headroom while still bailing on a
+            // genuinely hung endpoint.
+            .connectTimeout(6, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+            .callTimeout(14, java.util.concurrent.TimeUnit.SECONDS)
             // Follow donis -> Cloudflare redirects but not endlessly.
             .followRedirects(true)
             .followSslRedirects(true)
