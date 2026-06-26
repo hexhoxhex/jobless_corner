@@ -42,6 +42,7 @@ import java.util.concurrent.TimeUnit
 object UpdateInstaller {
 
     private const val TAG = "UpdateInstaller"
+    private const val MAX_ATTEMPTS = 3
 
     /** Live download state for the UI. null = idle / not downloading. While a
      *  download is in flight the banner shows [pct] + MB so the user sees it's
@@ -66,67 +67,97 @@ object UpdateInstaller {
         val app = context.applicationContext
         return scope.launch {
             val file = destinationFile(app, version)
-            runCatching { file.delete() }
             downloadProgress.value = DownloadStatus(0, 0f, 0f)
-            try {
-                val req = Request.Builder()
-                    .url(apkUrl)
-                    // GitHub asks public clients to identify themselves.
-                    // No Authorization header — we are anonymous.
-                    .header("User-Agent", "vijana-barubaru-updater/$version")
-                    .build()
-                client.newCall(req).execute().use { resp ->
-                    if (!resp.isSuccessful) {
-                        Log.e(TAG, "download failed HTTP ${resp.code} from $apkUrl")
-                        toast(app, "Update failed: HTTP ${resp.code}")
-                        downloadProgress.value = null
-                        return@launch
-                    }
-                    val body = resp.body ?: run {
-                        toast(app, "Update failed: empty body")
-                        downloadProgress.value = null
-                        return@launch
-                    }
-                    val total = body.contentLength().takeIf { it > 0 } ?: -1L
-                    val totalMb = if (total > 0) total / 1_000_000f else 0f
-                    body.byteStream().use { input ->
-                        FileOutputStream(file).use { out ->
-                            val buf = ByteArray(64 * 1024)
-                            var soFar = 0L
-                            var lastReport = -1
-                            var lastPct = -1
-                            while (true) {
-                                val n = input.read(buf)
-                                if (n <= 0) break
-                                out.write(buf, 0, n)
-                                soFar += n
-                                val pct = if (total > 0) (soFar * 100 / total).toInt() else -1
-                                // Push progress to the UI on every 1% change
-                                // (StateFlow conflates, so this is cheap).
-                                if (pct != lastPct) {
-                                    lastPct = pct
-                                    downloadProgress.value =
-                                        DownloadStatus(pct, soFar / 1_000_000f, totalMb)
-                                }
-                                // Don't spam logcat — only on 10% boundaries.
-                                if (total > 0 && pct / 10 != lastReport) {
-                                    lastReport = pct / 10
-                                    Log.i(TAG, "download $version: ${pct}%")
-                                }
-                            }
+            var lastError: String? = null
+            // Retry a few times: GitHub asset downloads occasionally truncate
+            // mid-stream, which used to leave a partial file that the system
+            // installer rejected with the cryptic "problem parsing the
+            // package". We now verify each attempt and only install a complete,
+            // parseable APK.
+            repeat(MAX_ATTEMPTS) { attempt ->
+                runCatching { file.delete() }
+                val total = try {
+                    downloadOnce(apkUrl, version, file)
+                } catch (e: Exception) {
+                    Log.e(TAG, "download attempt ${attempt + 1} failed: ${e.message}", e)
+                    lastError = e.message?.take(80) ?: e.javaClass.simpleName
+                    return@repeat
+                }
+                if (isCompleteApk(file, total)) {
+                    Log.i(TAG, "download verified OK: ${file.length()} bytes")
+                    downloadProgress.value = DownloadStatus(
+                        100, file.length() / 1_000_000f, file.length() / 1_000_000f,
+                    )
+                    withContext(Dispatchers.Main) { install(app, file) }
+                    downloadProgress.value = null
+                    return@launch
+                }
+                Log.e(TAG, "APK failed verification (got ${file.length()} / expected $total) " +
+                    "attempt ${attempt + 1}")
+                lastError = "incomplete download"
+            }
+            runCatching { file.delete() }
+            toast(app, "Update failed (${lastError ?: "download error"}) — please try again")
+            downloadProgress.value = null
+        }
+    }
+
+    /** One download attempt: stream [apkUrl] into [file], pushing progress.
+     *  Returns the server's Content-Length (-1 if unknown). Throws on HTTP /
+     *  network error. */
+    private suspend fun downloadOnce(apkUrl: String, version: String, file: File): Long {
+        val req = Request.Builder()
+            .url(apkUrl)
+            // GitHub asks public clients to identify themselves. No
+            // Authorization header — we are anonymous.
+            .header("User-Agent", "vijana-barubaru-updater/$version")
+            .build()
+        client.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) error("HTTP ${resp.code}")
+            val body = resp.body ?: error("empty body")
+            val total = body.contentLength().takeIf { it > 0 } ?: -1L
+            val totalMb = if (total > 0) total / 1_000_000f else 0f
+            var lastReport = -1
+            body.byteStream().use { input ->
+                FileOutputStream(file).use { out ->
+                    val buf = ByteArray(64 * 1024)
+                    var soFar = 0L
+                    var lastPct = -1
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n <= 0) break
+                        out.write(buf, 0, n)
+                        soFar += n
+                        val pct = if (total > 0) (soFar * 100 / total).toInt() else -1
+                        if (pct != lastPct) {
+                            lastPct = pct
+                            downloadProgress.value =
+                                DownloadStatus(pct, soFar / 1_000_000f, totalMb)
+                        }
+                        if (total > 0 && pct / 10 != lastReport) {
+                            lastReport = pct / 10
+                            Log.i(TAG, "download $version: ${pct}%")
                         }
                     }
                 }
-                Log.i(TAG, "download complete: ${file.absolutePath} (${file.length()} bytes)")
-                downloadProgress.value = DownloadStatus(100, file.length() / 1_000_000f, file.length() / 1_000_000f)
-                withContext(Dispatchers.Main) { install(app, file) }
-                downloadProgress.value = null
-            } catch (e: Exception) {
-                Log.e(TAG, "download exception: ${e.message}", e)
-                toast(app, "Update failed: ${e.message?.take(80) ?: e.javaClass.simpleName}")
-                downloadProgress.value = null
             }
+            return total
         }
+    }
+
+    /** True only if [file] is a complete, parseable APK: the byte count matches
+     *  the server's Content-Length (when known) AND the zip central directory
+     *  reads back with the APK's required entries. A truncated download fails
+     *  the zip open, so this catches it here instead of at the installer. */
+    private fun isCompleteApk(file: File, expectedSize: Long): Boolean {
+        if (!file.exists() || file.length() == 0L) return false
+        if (expectedSize > 0 && file.length() != expectedSize) return false
+        return runCatching {
+            java.util.zip.ZipFile(file).use { zip ->
+                zip.getEntry("AndroidManifest.xml") != null &&
+                    zip.getEntry("classes.dex") != null
+            }
+        }.getOrDefault(false)
     }
 
     private fun destinationFile(context: Context, version: String): File {
