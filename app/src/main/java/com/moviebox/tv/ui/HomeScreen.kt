@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
@@ -162,6 +163,15 @@ fun HomeScreen(state: UiState, vm: MainViewModel) {
             }
         }
         items(home.rows, key = { it.title }) { row ->
+            // MovieWay shows numbered ranking badges (1, 2, 3 …) on rows that
+            // are explicitly leaderboards. Apply that to Trending and the
+            // top "Popular" rows — server-curated lists where the order is
+            // meaningful. Other rows (themed buckets like "Superhero Series",
+            // "Teen Romance") render with the regular rating pill.
+            val isRanked = row.title.contains("Trending", ignoreCase = true) ||
+                row.title.contains("Top", ignoreCase = true) ||
+                row.title.contains("Ranking", ignoreCase = true) ||
+                row.title.contains("Most", ignoreCase = true)
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 SectionHeader(row.title)
                 key(
@@ -176,8 +186,12 @@ fun HomeScreen(state: UiState, vm: MainViewModel) {
                         contentPadding = PaddingValues(horizontal = 16.dp),
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
-                        items(row.items, key = { it.subjectId }) { item ->
-                            PosterCard(item) { vm.openItem(item) }
+                        itemsIndexed(row.items, key = { _, it -> it.subjectId }) { idx, item ->
+                            PosterCard(
+                                item = item,
+                                rank = if (isRanked) idx + 1 else null,
+                                onClick = { vm.openItem(item) },
+                            )
                         }
                     }
                 }

@@ -68,7 +68,15 @@ fun DetailScreen(state: UiState, vm: MainViewModel) {
     val favIds by vm.favouriteIds.collectAsState()
     val isFav = favIds.contains(item.subjectId)
 
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+    Box(Modifier.fillMaxSize()) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            // Leave room at the bottom for the sticky CTA bar so the last
+            // scrolling content (For You row) isn't hidden behind it.
+            .padding(bottom = 96.dp),
+    ) {
         Box(Modifier.fillMaxWidth().height(360.dp)) {
             AsyncImage(
                 model = item.coverUrl,
@@ -201,6 +209,47 @@ fun DetailScreen(state: UiState, vm: MainViewModel) {
             }
             Spacer(Modifier.height(12.dp))
         }
+    }
+    // Sticky bottom CTA — MovieWay's iconic green Play/Download button
+    // anchored at the bottom edge, always visible while the user scrolls
+    // through the rest of the detail page. Same gradient scrim as their
+    // app so the button reads cleanly over any content behind it.
+    Box(
+        Modifier
+            .align(Alignment.BottomCenter)
+            .fillMaxWidth()
+            .background(
+                androidx.compose.ui.graphics.Brush.verticalGradient(
+                    0f to androidx.compose.ui.graphics.Color.Transparent,
+                    0.4f to com.moviebox.tv.ui.theme.Bg.copy(alpha = 0.8f),
+                    1f to com.moviebox.tv.ui.theme.Bg,
+                )
+            )
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+    ) {
+        Button(
+            onClick = {
+                if (item.isSeries) {
+                    val s1 = state.details?.seasons?.firstOrNull()?.season ?: 1
+                    vm.playEpisode(s1, 1, restoreResume = true)
+                } else vm.playMovie()
+            },
+            modifier = Modifier.fillMaxWidth().height(54.dp),
+            shape = RoundedCornerShape(28.dp),
+            colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                containerColor = com.moviebox.tv.ui.theme.Accent,
+                contentColor = androidx.compose.ui.graphics.Color.Black,
+            ),
+        ) {
+            Icon(Icons.Filled.PlayArrow, null)
+            val label = when {
+                state.availability == Availability.UNAVAILABLE -> "Not available — pick from search"
+                item.isSeries -> "Play S${state.details?.seasons?.firstOrNull()?.season ?: 1}E1"
+                else -> "Play"
+            }
+            Text("  $label", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+        }
+    }
     }
 }
 

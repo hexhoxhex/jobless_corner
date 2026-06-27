@@ -256,6 +256,10 @@ private fun titleColors(title: String): Pair<Color, Color> {
 fun PosterCard(
     item: Item,
     width: Dp? = null,
+    /** When non-null, renders a big numbered badge at the top-left corner of
+     *  the poster (MovieWay's "Series Rankings" pattern — 1, 2, 3 with the
+     *  brand-green pill behind). Used for ranked rows like Trending. */
+    rank: Int? = null,
     onClick: () -> Unit,
 ) {
     val isTv = LocalIsTv.current
@@ -275,10 +279,38 @@ fun PosterCard(
                 .clip(RoundedCornerShape(10.dp)),
         ) {
             PosterImage(item.coverUrl, item.title, Modifier.fillMaxSize())
-            RatingPill(
-                item.rating,
-                Modifier.align(Alignment.TopStart).padding(6.dp),
-            )
+            if (rank != null) {
+                // Ranked badge: solid brand-green pill with big number in the
+                // top-left. Sits over the rating pill if both are present —
+                // ranked rows get the rank, others get the rating.
+                Box(
+                    Modifier
+                        .align(Alignment.TopStart)
+                        .padding(start = 6.dp, top = 6.dp)
+                        .background(
+                            com.moviebox.tv.ui.theme.Accent,
+                            shape = RoundedCornerShape(
+                                topStart = 6.dp,
+                                bottomEnd = 8.dp,
+                                topEnd = 0.dp,
+                                bottomStart = 0.dp,
+                            ),
+                        )
+                        .padding(horizontal = 8.dp, vertical = 2.dp),
+                ) {
+                    Text(
+                        "$rank",
+                        color = androidx.compose.ui.graphics.Color.Black,
+                        fontWeight = FontWeight.Black,
+                        fontSize = if (isTv) 18.sp else 16.sp,
+                    )
+                }
+            } else {
+                RatingPill(
+                    item.rating,
+                    Modifier.align(Alignment.TopStart).padding(6.dp),
+                )
+            }
         }
         Text(
             item.title,
