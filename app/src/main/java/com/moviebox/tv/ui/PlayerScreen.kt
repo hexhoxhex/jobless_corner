@@ -1579,7 +1579,43 @@ private fun VideoPlayer(
                     }
                 )
         } else {
-            DefaultMediaSourceFactory(dataSourceFactory)
+            // For VOD: route DASH (.mpd) manifests through DashMediaSource and
+            // everything else through the default factory. aoneroom's
+            // high-quality movie streams come as DASH (the subject/play
+            // response's `dash[0].url` points at h5-api.aoneroom.com/playstream.mpd);
+            // without this branch ExoPlayer would treat the manifest as MP4 and
+            // fail to start. The DefaultMediaSourceFactory below handles plain
+            // MP4 + everything else.
+            object : androidx.media3.exoplayer.source.MediaSource.Factory {
+                private val dash = androidx.media3.exoplayer.dash.DashMediaSource
+                    .Factory(dataSourceFactory)
+                private val default = DefaultMediaSourceFactory(dataSourceFactory)
+                private fun isDash(uri: android.net.Uri): Boolean {
+                    val path = uri.path?.lowercase().orEmpty()
+                    return path.endsWith(".mpd") || path.contains("playstream.mpd")
+                }
+                override fun getSupportedTypes(): IntArray =
+                    (default.supportedTypes.toList() +
+                        dash.supportedTypes.toList()).toIntArray()
+                override fun setDrmSessionManagerProvider(
+                    p: androidx.media3.exoplayer.drm.DrmSessionManagerProvider,
+                ): androidx.media3.exoplayer.source.MediaSource.Factory {
+                    dash.setDrmSessionManagerProvider(p); default.setDrmSessionManagerProvider(p); return this
+                }
+                override fun setLoadErrorHandlingPolicy(
+                    p: androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy,
+                ): androidx.media3.exoplayer.source.MediaSource.Factory {
+                    dash.setLoadErrorHandlingPolicy(p); default.setLoadErrorHandlingPolicy(p); return this
+                }
+                override fun createMediaSource(
+                    mediaItem: MediaItem,
+                ): androidx.media3.exoplayer.source.MediaSource {
+                    val uri = mediaItem.localConfiguration?.uri
+                    return if (uri != null && isDash(uri))
+                        dash.createMediaSource(mediaItem)
+                    else default.createMediaSource(mediaItem)
+                }
+            }
         }
         // Renderer factory: when [preferSoftwareDecoder] is set (the SoC
         // flapped on this channel earlier in the session), filter the

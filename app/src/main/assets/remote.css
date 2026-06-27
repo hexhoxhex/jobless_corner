@@ -1,19 +1,23 @@
 :root {
   color-scheme: dark light;
-  --bg: #0B0D12;
-  --surface: #151821;
-  --surface-2: #1B1F2A;
-  --surface-3: #232733;
-  --line: #232733;
-  --text: #F4F5F7;
-  --muted: #9AA3B2;
-  --accent: #7C5CFC;
-  --accent-2: #5440D9;
-  --accent-soft: rgba(124,92,252,.18);
-  --good: #4ECB71;
-  --good-soft: rgba(78,203,113,.18);
-  --warn: #E8B341;
-  --warn-soft: rgba(232,179,65,.18);
+  /* Palette refreshed from MovieWay (com.community.oneroom). Same data
+     source as us now (v0.1.85); modelling the look closes the loop. */
+  --bg: #101114;          /* deepest base */
+  --surface: #191F2B;     /* primary surface — blue-tinted dark */
+  --surface-2: #28292E;   /* cards */
+  --surface-3: #383A40;   /* hover / elevated */
+  --line: #61656D;        /* borders / dividers */
+  --text: #FFFFFF;
+  --text-2: #EDF0F5;      /* secondary text */
+  --muted: #9BA0A8;       /* tertiary text */
+  --hint: #767B85;        /* hint / placeholder */
+  --accent: #07B84E;      /* primary CTA — vibrant green */
+  --accent-2: #2FF58B;    /* highlight / active */
+  --accent-soft: rgba(7,184,78,.18);
+  --good: #07B84E;
+  --good-soft: rgba(7,184,78,.18);
+  --warn: #F5C518;        /* gold rating */
+  --warn-soft: rgba(245,197,24,.16);
   --bad:  #E5484D;
   --bad-soft: rgba(229,72,77,.16);
   --radius: 14px;

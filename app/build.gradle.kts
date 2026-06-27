@@ -25,8 +25,8 @@ android {
         // ExoPlayer codec support; covers virtually all Android TV devices.
         minSdk = 26
         targetSdk = 35
-        versionCode = 86
-        versionName = "0.1.85"
+        versionCode = 87
+        versionName = "0.1.86"
 
         // Ship only the ABIs real devices use. The universal APK carried four
         // (arm64-v8a, armeabi-v7a, x86, x86_64) = ~40 MB, and that size was
@@ -110,6 +110,11 @@ dependencies {
 
     implementation(libs.media3.exoplayer)
     implementation(libs.media3.exoplayer.hls)
+    // DASH support — aoneroom's high-quality streams come back as
+    // playstream.mpd URLs (the `dash` array in subject/play). Without this,
+    // ExoPlayer can only play the MP4 variants in `streams[]`; with it,
+    // 1080p+ adaptive bitrate works the way MovieWay's player does.
+    implementation(libs.media3.exoplayer.dash)
     implementation(libs.media3.ui)
     implementation(libs.media3.datasource.okhttp)
     // ffmpeg-based audio renderer extension. Substitutes the platform AAC
