@@ -1263,14 +1263,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val matches = runCatching {
                     repo.search(keyword = title, type = SubjectType.ALL)
                 }.getOrNull().orEmpty()
-                val titleLower = title.lowercase().trim()
+                // Title match has to be EXACT (after lowercasing + collapsing
+                // whitespace + stripping leading/trailing punctuation). The
+                // previous startsWith match swapped "Game of Thrones" with
+                // "Game Of Thrones Soundtrack | Best Songs ONLY | Vol. I"
+                // because the soundtrack title starts with the show name —
+                // user landed on a YouTube music playlist instead of the
+                // show. Also restrict to the same content type: a TV series
+                // (type=1) candidate replacing a TV series request; never
+                // a music (type=6) or short (type=other) candidate.
+                fun norm(s: String) = s.lowercase().trim()
+                    .replace(Regex("[\\p{Punct}]"), "")
+                    .replace(Regex("\\s+"), " ")
+                val titleNorm = norm(title)
+                val originalType = _state.value.detailItem?.type
                 val candidates = matches.asSequence()
                     .filter { it.subjectId != resolvedId }
-                    .filter {
-                        val t = it.title.lowercase().trim()
-                        t == titleLower || t.startsWith(titleLower) ||
-                            titleLower.startsWith(t)
-                    }
+                    .filter { originalType == null || it.type == originalType }
+                    .filter { norm(it.title) == titleNorm }
                     .take(3) // bounded — 3 attempts × ~1s each = ~3s budget
                 for (cand in candidates) {
                     android.util.Log.i(

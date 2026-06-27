@@ -218,20 +218,27 @@ fun DetailScreen(state: UiState, vm: MainViewModel) {
                         val hasEpisodes = seasons.any { it.episodes > 0 }
                         when {
                             hasEpisodes -> SeriesEpisodes(state, vm)
-                            // Only show the "no episodes" warning when the
-                            // precheck has POSITIVELY confirmed the show is
-                            // unavailable. CHECKING (in-flight) and AVAILABLE
-                            // (subject-level fallback worked) stay silent —
-                            // the sticky Play CTA does the talking, and
-                            // contradicting it with "no episodes" body text
-                            // confuses the user.
                             state.availability == Availability.UNAVAILABLE -> Text(
                                 "No episodes available yet — the source hasn't " +
                                     "indexed this series. Try again later.",
                                 color = TextMuted, fontSize = 13.sp,
                                 modifier = Modifier.padding(top = 8.dp),
                             )
-                            else -> { /* CHECKING or AVAILABLE — silent */ }
+                            state.availability == Availability.CHECKING -> Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                modifier = Modifier.padding(top = 8.dp),
+                            ) {
+                                com.moviebox.tv.ui.components.LottieLoader(size = 28.dp)
+                                Text(
+                                    "Checking availability…",
+                                    color = TextMuted, fontSize = 13.sp,
+                                )
+                            }
+                            // AVAILABLE with no per-episode list (HBO-tier
+                            // subject-level playable). Silent — the sticky
+                            // Play CTA does the talking.
+                            else -> { /* AVAILABLE — silent */ }
                         }
                     }
                 }
