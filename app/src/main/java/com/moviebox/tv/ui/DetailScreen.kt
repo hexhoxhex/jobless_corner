@@ -183,10 +183,16 @@ fun DetailScreen(state: UiState, vm: MainViewModel) {
                 }
             }
 
+            // Only show the Summary section if the H5 detail actually
+            // returned a description. The old fallback (`?: item.title`)
+            // printed the show's name as its own summary — visible as
+            // "Summary: House of the Dragon" on HBO-tier titles where
+            // aoneroom's H5 detail returns description="".
             val desc = state.details?.description?.takeIf { it.isNotBlank() }
-                ?: item.title
-            Text("Summary", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-            Text(desc, color = TextMuted, fontSize = 13.sp)
+            if (desc != null) {
+                Text("Summary", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                Text(desc, color = TextMuted, fontSize = 13.sp)
+            }
 
             if (item.isSeries) {
                 when {
@@ -212,17 +218,20 @@ fun DetailScreen(state: UiState, vm: MainViewModel) {
                         val hasEpisodes = seasons.any { it.episodes > 0 }
                         when {
                             hasEpisodes -> SeriesEpisodes(state, vm)
-                            state.availability == Availability.AVAILABLE -> {
-                                // Subject-level playable — one watchable
-                                // resource, no per-episode listing. Stay
-                                // silent; the sticky CTA does the talking.
-                            }
-                            else -> Text(
+                            // Only show the "no episodes" warning when the
+                            // precheck has POSITIVELY confirmed the show is
+                            // unavailable. CHECKING (in-flight) and AVAILABLE
+                            // (subject-level fallback worked) stay silent —
+                            // the sticky Play CTA does the talking, and
+                            // contradicting it with "no episodes" body text
+                            // confuses the user.
+                            state.availability == Availability.UNAVAILABLE -> Text(
                                 "No episodes available yet — the source hasn't " +
                                     "indexed this series. Try again later.",
                                 color = TextMuted, fontSize = 13.sp,
                                 modifier = Modifier.padding(top = 8.dp),
                             )
+                            else -> { /* CHECKING or AVAILABLE — silent */ }
                         }
                     }
                 }
