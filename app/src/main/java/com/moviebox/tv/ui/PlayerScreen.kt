@@ -511,6 +511,16 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                 preferSoftwareDecoder = state.currentLiveChannel?.id?.let {
                     vm.preferSoftwareDecoderFor(it)
                 } ?: false,
+                noTunneling = state.currentLiveChannel?.id?.let {
+                    vm.disableTunnelingFor(it)
+                } ?: false,
+                onAudioTrackInitFailed = {
+                    val chId = state.currentLiveChannel?.id
+                    if (chId != null && !vm.disableTunnelingFor(chId)) {
+                        vm.markChannelNeedsNoTunneling(chId)
+                        true // rebuild scheduled — skip the WebView fallback
+                    } else false
+                },
                 onCodecFlapping = {
                     state.currentLiveChannel?.id?.let {
                         vm.markChannelAsCodecFlapping(it)
@@ -1380,9 +1390,24 @@ private fun VideoPlayer(
      *  factory — software decode — to sidestep a hardware codec that
      *  flaps on the current channel's content. See [LiveCodecFlapDetector]. */
     preferSoftwareDecoder: Boolean = false,
+    /** When true, tunneling is disabled even on live. Used for channels
+     *  whose audio sample rate (24 kHz football streams) crashes
+     *  AudioTrack under tunneling — tunneling bypasses the AudioSink's
+     *  SonicAudioProcessor 48 kHz resample. With it off the resample
+     *  chain runs and AudioTrack opens normally. See
+     *  [MainViewModel.disableTunnelingFor]. */
+    noTunneling: Boolean = false,
     /** Fired when [LiveCodecFlapDetector] sees the hardware decoder
      *  being torn down + rebuilt too often on a live stream. */
     onCodecFlapping: () -> Unit = {},
+    /** Fired the first time AUDIO_TRACK_INIT_FAILED hits on a live
+     *  channel. Caller is expected to mark the channel as needing
+     *  tunneling OFF and bump a rebuild revision; the next prepare
+     *  routes audio through the AudioSink's resample chain. Returns
+     *  true if a no-tunneling retry is being scheduled (so the player
+     *  skips the WebView fast-path), false if the channel was already
+     *  marked and we should give up to WebView. */
+    onAudioTrackInitFailed: () -> Boolean = { false },
     title: String,
     modifier: Modifier = Modifier,
 ) {
@@ -1450,20 +1475,23 @@ private fun VideoPlayer(
     val vodDrops = remember(isLive) { VodFrameDropTracker() }
     // Track selector shared between the player and the resilience logic —
     // resilience uses it to cap max bitrate after repeated stalls.
-    val trackSelector = remember(isLive) {
+    val trackSelector = remember(isLive, noTunneling) {
         androidx.media3.exoplayer.trackselection.DefaultTrackSelector(context).apply {
-            // Tunneled video — only for live. SurfaceFlinger on this TCL
-            // panel was composing the BLAST surface at ~31 fps even though
-            // the source is 59.94 fps; result was the codec dropping ~32
-            // frames/sec at render and the user seeing 1 fps choppy video
-            // they perceived as "the stream is reconnecting". Tunneling
-            // pipes codec output past SurfaceFlinger straight to the
-            // display, which is the path TCL/Realtek actually optimize
-            // for live TV. VOD doesn't show the symptom (24/30 fps source
-            // composites cleanly under SurfaceFlinger), so leave it off
-            // there — tunneling makes some Compose UI overlays harder to
-            // mix and we don't want to regress the movies path.
-            if (isLive) {
+            // Tunneled video — only for live, and only when not on the
+            // no-tunneling list. SurfaceFlinger on this TCL panel was
+            // composing the BLAST surface at ~31 fps even though the
+            // source is 59.94 fps; result was the codec dropping ~32
+            // frames/sec at render and the user seeing 1 fps choppy
+            // video they perceived as "the stream is reconnecting".
+            // Tunneling pipes codec output past SurfaceFlinger straight
+            // to the display, which is the path TCL/Realtek actually
+            // optimize for live TV. VOD doesn't show the symptom (24/30
+            // fps source composites cleanly under SurfaceFlinger), so
+            // leave it off there.
+            // The noTunneling param disables it even on live for channels
+            // whose audio sample rate (24 kHz football) crashes
+            // AudioTrack under tunneling — see VideoPlayer's docstring.
+            if (isLive && !noTunneling) {
                 parameters = buildUponParameters()
                     .setTunnelingEnabled(true)
                     .build()
@@ -2228,13 +2256,30 @@ private fun VideoPlayer(
                     if (error.errorCode == androidx.media3.common.PlaybackException
                             .ERROR_CODE_AUDIO_TRACK_INIT_FAILED
                     ) {
+                        // The TV's AudioTrack can't open at the source
+                        // sample rate (24 kHz on football channels). Our
+                        // SonicAudioProcessor → 48 kHz IS in the AudioSink
+                        // chain — but tunneling mode bypasses the
+                        // processor chain and routes decoder output
+                        // straight to AudioTrack at the source rate.
+                        // First failure: ask the VM to mark the channel
+                        // no-tunneling + rebuild. Second time (we're
+                        // already on the no-tunneling path), give up
+                        // and fall to WebView so the user isn't stuck.
+                        val rebuilding = onAudioTrackInitFailed()
+                        if (rebuilding) {
+                            android.util.Log.w(
+                                "LiveDiag",
+                                "PLAYER audio-init failure — disabling " +
+                                    "tunneling + rebuilding (msg=${error.message})",
+                            )
+                            return
+                        }
                         android.util.Log.w(
                             "LiveDiag",
-                            "PLAYER audio-init failure — fast-pathing " +
-                                "to WebView fallback for this channel",
+                            "PLAYER audio-init failure again — no-tunneling " +
+                                "didn't help, falling back to WebView",
                         )
-                        // Tell the resilience cascade to skip its retry
-                        // budget and switch transports immediately.
                         fatalLiveState.value()
                         return
                     }

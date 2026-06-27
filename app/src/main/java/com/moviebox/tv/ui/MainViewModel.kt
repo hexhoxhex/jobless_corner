@@ -669,6 +669,30 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Channels that have crashed AudioTrack init at an exotic sample rate
+     *  (24 kHz football streams on this TCL, etc.). Tunneling mode bypasses
+     *  our SonicAudioProcessor's 48 kHz resample so the raw 24 kHz reaches
+     *  AudioTrack and crashes the player. Remember the channel and disable
+     *  tunneling for the next attempt — the resample chain then runs. */
+    private val nonTunnelingChannels = mutableSetOf<String>()
+
+    fun disableTunnelingFor(channelId: String): Boolean =
+        channelId in nonTunnelingChannels
+
+    fun markChannelNeedsNoTunneling(channelId: String) {
+        if (nonTunnelingChannels.add(channelId)) {
+            com.moviebox.tv.debug.Telemetry.note(
+                com.moviebox.tv.debug.Telemetry.Severity.WARN,
+                "Audio sample-rate crash on $channelId — disabling tunneling",
+            )
+            // Re-use the existing softwareDecoderRevision bumper to force
+            // ExoPlayer rebuild. PlayerScreen's `remember(isLive, ...)` key
+            // already keys off live config; bumping triggers recreation
+            // with the new tunneling flag applied during track selection.
+            _state.update { it.copy(softwareDecoderRevision = it.softwareDecoderRevision + 1) }
+        }
+    }
+
     fun playChannel(ch: Channel) {
         // If this channel has bounced ≥3 times back-to-back, the native
         // HLS path almost certainly won't work this time either — skip
