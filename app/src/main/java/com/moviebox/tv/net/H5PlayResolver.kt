@@ -82,6 +82,18 @@ object H5PlayResolver {
             if (finished) return
             finished = true
             main.post {
+                // Sync the WebView's cookies into OkHttp BEFORE destroying —
+                // this is what makes the next direct play call (no WebView)
+                // work. Android's CookieManager is a separate store from our
+                // OkHttp cookie jar; without the bridge, every play re-runs
+                // the WebView (slow, defeats the cache).
+                runCatching {
+                    val cm = android.webkit.CookieManager.getInstance()
+                    for (host in listOf("themoviebox.org", "h5-api.aoneroom.com")) {
+                        val raw = cm.getCookie("https://$host/") ?: continue
+                        H5Client.pushCookies(host, raw)
+                    }
+                }
                 runCatching {
                     webView?.stopLoading()
                     webView?.loadUrl("about:blank")
@@ -183,9 +195,13 @@ object H5PlayResolver {
     private fun PAGE_URL(
         detailPath: String, subjectId: String, season: Int = 0, episode: Int = 0,
     ): String {
-        val seg = if (season > 0) "tv-shows" else "movies"
-        val seParam = if (season > 0) "&detailSe=$season&detailEp=$episode" else "&detailSe=&detailEp="
-        return "https://themoviebox.org/$seg/$detailPath?id=$subjectId&type=/${if (season>0) "tv" else "movie"}/detail$seParam&lang=en"
+        // themoviebox.org serves BOTH movies and series under /movies/ — series
+        // pages use the same URL shape with type=/movie/detail. The se/ep params
+        // are passed as `detailSe`/`detailEp` and the page's JS picks them up to
+        // auto-play the right episode. Verified from captured curls.
+        val seParam = "&detailSe=${if (season > 0) season else ""}" +
+            "&detailEp=${if (episode > 0) episode else ""}"
+        return "https://themoviebox.org/movies/$detailPath?id=$subjectId&type=/movie/detail$seParam&lang=en"
     }
 
     private fun parseStreams(data: JSONObject?): List<H5Api.PlayStream> {

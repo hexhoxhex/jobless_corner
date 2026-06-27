@@ -72,6 +72,38 @@ object H5Client {
         }
     }
 
+    /** Push raw cookies from elsewhere (e.g. Android's WebView CookieManager
+     *  after the headless play resolver loads a page) into our OkHttp jar.
+     *  This is what bridges the WebView session — which mints the
+     *  resource-capable `mb_token` + `token` cookies — into the OkHttp client
+     *  that subsequent direct play calls use. Without this sync the WebView
+     *  unlocked the proxy session but our OkHttp never benefited; every play
+     *  re-ran the WebView. After syncing, direct H5/proxy calls reuse the
+     *  same cookies and skip the WebView round trip entirely. */
+    fun pushCookies(host: String, rawCookies: String) {
+        if (rawCookies.isBlank()) return
+        val httpUrl = HttpUrl.Builder().scheme("https").host(host).build()
+        val parsed = rawCookies.split(";").mapNotNull { part ->
+            val trimmed = part.trim()
+            if (trimmed.isEmpty()) return@mapNotNull null
+            val eq = trimmed.indexOf('=')
+            if (eq <= 0) return@mapNotNull null
+            val name = trimmed.substring(0, eq).trim()
+            val value = trimmed.substring(eq + 1).trim()
+            runCatching {
+                Cookie.Builder().name(name).value(value).domain(host).path("/")
+                    .expiresAt(System.currentTimeMillis() + 30L * 24 * 3600_000)
+                    .build()
+            }.getOrNull()
+        }
+        if (parsed.isNotEmpty()) {
+            cookieJar.saveFromResponse(httpUrl, parsed)
+            val tok = parsed.firstOrNull { it.name == "token" }?.value
+            if (!tok.isNullOrBlank()) bearer = tok
+            android.util.Log.i("H5", "pushCookies($host) +${parsed.size} cookies, bearer=${if (bearer.isNullOrBlank()) "NO" else "YES"}")
+        }
+    }
+
     /** One-shot session warm. Two steps:
      *   1. `country-code` — establishes the H5 `token` cookie our cookie jar
      *      then carries to the themoviebox.org play proxy.
