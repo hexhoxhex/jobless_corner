@@ -319,26 +319,42 @@ class Repository(
             }
         }
 
-    suspend fun details(subjectId: String): Details {
-        // H5 path first — the legacy mobile itemDetails returns 441 "miss
-        // token" since aoneroom locked down the mobile API. We use the H5
-        // /detail endpoint when we know the canonical detailPath (search
-        // hits populate that cache).
+    suspend fun details(subjectId: String, titleHint: String? = null): Details {
+        // H5 path: the legacy mobile itemDetails returns 441 "miss token". We
+        // get every field the old path returned (title, description, year,
+        // seasons, dubs) from the H5 /detail endpoint — same data, different
+        // host. If we don't already have a detailPath cached from search,
+        // search by title to find one (detail-rec returns recommendations,
+        // not the subject itself, so it's not usable as a lookup).
         val dp = com.moviebox.tv.net.H5Api.detailPathFor(subjectId)
+            ?: com.moviebox.tv.net.H5Api.lookupDetailPath(subjectId, titleHint)
         val h5 = dp?.let { com.moviebox.tv.net.H5Api.detail(it) }
         if (h5 != null) {
             val type = if (h5.isSeries) SubjectType.TV_SERIES else SubjectType.MOVIE
+            // Prefer the enumerated episode list when it has already
+            // completed; otherwise the H5 detail call's `resource.seasons`
+            // (which mirrors the old mobile seasonInfo's `maxEp` + resolutions)
+            // is good enough for the picker to render.
             val seasons = if (h5.isSeries) {
-                // Real episode counts come from enumerateEpisodes; declared
-                // counts from the mobile seasonInfo can't be trusted now.
-                runCatching { enumerateEpisodes(subjectId) }.getOrNull()
-                    ?.entries?.sortedBy { it.key }?.map { (se, eps) ->
+                val enumerated = runCatching { enumerateEpisodes(subjectId) }.getOrNull()
+                if (!enumerated.isNullOrEmpty()) {
+                    enumerated.entries.sortedBy { it.key }.map { (se, eps) ->
+                        val h5se = h5.seasons.firstOrNull { it.season == se }
                         SeasonInfo(
                             season = se, episodes = eps.size,
-                            resolutions = emptyList(), realEpisodes = eps,
+                            resolutions = h5se?.resolutions ?: emptyList(),
+                            realEpisodes = eps,
                         )
-                    } ?: emptyList()
+                    }
+                } else {
+                    h5.seasons.map {
+                        SeasonInfo(season = it.season, episodes = it.maxEp, resolutions = it.resolutions)
+                    }
+                }
             } else emptyList()
+            val dubs = h5.dubs.map {
+                Dub(name = mapDubName(it.name), code = it.code, original = it.original)
+            }
             return Details(
                 subjectId = subjectId,
                 title = h5.title,
@@ -347,12 +363,11 @@ class Repository(
                 year = h5.year,
                 isSeries = h5.isSeries,
                 seasons = seasons,
-                dubs = emptyList(),
+                dubs = dubs,
             )
         }
-        // Mobile path — try, but fall back gracefully so we never show
-        // "isn't available" just because details couldn't be fetched. The
-        // player can still resolve a stream via H5Api.play.
+        // Mobile path — try, but never throw the 441 cascade. The player can
+        // still resolve a stream via H5Api.play even if details came up empty.
         val d = runCatching { api.itemDetails(subjectId).unwrap() }.getOrNull()
         if (d != null) {
             val type = SubjectType.fromCode(d.subjectType)
@@ -378,7 +393,7 @@ class Repository(
                 dubs = d.dubs.map { it.toDomain() },
             )
         }
-        // Last resort: a minimal placeholder so the UI doesn't error out.
+        // Last resort: a minimal placeholder so the UI doesn't crash.
         return Details(
             subjectId = subjectId, title = "", type = SubjectType.MOVIE,
             description = "", year = null, isSeries = false,
@@ -392,25 +407,35 @@ class Repository(
         season: Int? = null,
         episode: Int? = null,
         dub: String = "Original",
+        titleHint: String? = null,
     ): PlayInfo {
-        // Migrated to the H5 + themoviebox.org proxy flow — the mobile
-        // resource endpoint rejects guests with 401. Details/captions are
-        // best-effort against the legacy mobile API; failures fall back to
-        // what the H5 play response itself gives us (title, duration).
-        val legacyDetail = runCatching { api.itemDetails(subjectId).unwrap() }.getOrNull()
-        val dubs = legacyDetail?.dubs?.map { it.toDomain() } ?: emptyList()
-        val (effectiveId, selectedDub) = if (legacyDetail != null && legacyDetail.dubs.isNotEmpty()) {
-            val target = pickDub(legacyDetail.dubs, dub)
-            target.subjectId to mapDubName(target.lanName)
-        } else subjectId to "Original"
+        // Get the real title + dubs from the H5 detail endpoint. The legacy
+        // mobile itemDetails returns 441 now, so without this the player
+        // showed the raw subjectId number instead of the movie name. Look the
+        // detailPath up if we don't already have one cached from search.
+        val dp = com.moviebox.tv.net.H5Api.detailPathFor(subjectId)
+            ?: com.moviebox.tv.net.H5Api.lookupDetailPath(subjectId, titleHint)
+        val h5Detail = dp?.let { com.moviebox.tv.net.H5Api.detail(it) }
 
-        // Prefer the REAL detailPath stashed by search (the proxy 400s with
-        // "empty subjectId" if the slug doesn't match the subjectId). Fall back
-        // to a synthetic when we never saw a search hit for this id.
-        val detailPath = com.moviebox.tv.net.H5Api.detailPathFor(effectiveId)
-            ?: com.moviebox.tv.net.H5Client.syntheticDetailPath(
-                legacyDetail?.title ?: subjectId
-            )
+        val (effectiveId, selectedDub, detailPath) = run {
+            val matchDub = h5Detail?.dubs?.let { dubs ->
+                if (dubs.isEmpty()) null
+                else {
+                    val byCode = dubs.firstOrNull { it.code.equals(dub, true) }
+                    val byName = dubs.firstOrNull { it.name.equals(dub, true) }
+                    val original = dubs.firstOrNull { it.original }
+                    byCode ?: byName ?: original ?: dubs.first()
+                }
+            }
+            if (matchDub != null) {
+                Triple(matchDub.subjectId, mapDubName(matchDub.name), matchDub.detailPath.ifBlank { dp ?: "" })
+            } else {
+                Triple(subjectId, "Original", dp ?: com.moviebox.tv.net.H5Client.syntheticDetailPath(h5Detail?.title ?: subjectId))
+            }
+        }
+        val dubs = h5Detail?.dubs?.map {
+            Dub(name = mapDubName(it.name), code = it.code, original = it.original)
+        } ?: emptyList()
         val play = try {
             com.moviebox.tv.net.H5Api.play(
                 subjectId = effectiveId,
@@ -444,8 +469,11 @@ class Repository(
                 .extCaptions.map { CaptionTrack(it.lan, it.lanName, it.url) }
         }.getOrDefault(emptyList())
 
+        // Real movie / series name from H5 detail; falls back to the subjectId
+        // only as a last resort if the detail endpoint had nothing.
+        val displayTitle = h5Detail?.title?.takeIf { it.isNotBlank() } ?: subjectId
         return PlayInfo(
-            title = legacyDetail?.title?.ifBlank { effectiveId } ?: effectiveId,
+            title = displayTitle,
             mediaUrl = selectedStream.url,
             selected = if (selectedStream.resolution > 0) "${selectedStream.resolution}P"
                        else selectedStream.format,

@@ -55,17 +55,30 @@ object H5Api {
         if (detailPath.isNotBlank()) detailPathCache[subjectId] = detailPath
     }
 
+    data class DetailDub(
+        val subjectId: String, val name: String, val code: String,
+        val original: Boolean, val detailPath: String,
+    )
+    data class DetailSeason(
+        val season: Int, val maxEp: Int, val resolutions: List<Int>,
+    )
     data class DetailResult(
+        val subjectId: String,
         val title: String,
         val description: String,
         val year: Int?,
         val isSeries: Boolean,
         val cover: String?,
+        val detailPath: String,
+        val dubs: List<DetailDub>,
+        val seasons: List<DetailSeason>,
+        val hasResource: Boolean,
     )
 
-    /** Fetch H5 `/detail?detailPath=…` for [detailPath]. Returns null when the
-     *  endpoint doesn't answer with a usable subject (the caller falls back to
-     *  what it already knows about the title). */
+    /** Fetch H5 `/detail?detailPath=…` for [detailPath]. Returns the full
+     *  subject record (title, description, year, dubs, seasons w/ resolutions)
+     *  — everything the UI used to get from the legacy mobile itemDetails +
+     *  seasonInfo before aoneroom locked the mobile API. */
     suspend fun detail(detailPath: String): DetailResult? = withContext(Dispatchers.IO) {
         if (detailPath.isBlank()) return@withContext null
         val raw = runCatching {
@@ -79,13 +92,79 @@ object H5Api {
         val year = subj.optString("releaseDate").takeIf { it.length >= 4 }
             ?.substring(0, 4)?.toIntOrNull()
         val st = subj.optInt("subjectType", 0)
+        val sid = subj.optString("subjectId")
+        val dp = subj.optString("detailPath").ifBlank { detailPath }
+
+        val dubsArr = subj.optJSONArray("dubs") ?: JSONArray()
+        val dubs = (0 until dubsArr.length()).mapNotNull { i ->
+            runCatching {
+                val o = dubsArr.getJSONObject(i)
+                DetailDub(
+                    subjectId = o.optString("subjectId"),
+                    name = o.optString("lanName"),
+                    code = o.optString("lanCode"),
+                    original = o.optBoolean("original"),
+                    detailPath = o.optString("detailPath"),
+                )
+            }.getOrNull()
+        }
+
+        val seasonsList = data.optJSONObject("resource")?.optJSONArray("seasons") ?: JSONArray()
+        val seasons = (0 until seasonsList.length()).mapNotNull { i ->
+            runCatching {
+                val s = seasonsList.getJSONObject(i)
+                val resArr = s.optJSONArray("resolutions") ?: JSONArray()
+                val res = (0 until resArr.length()).map { j ->
+                    resArr.getJSONObject(j).optInt("resolution")
+                }.distinct().sorted()
+                DetailSeason(
+                    season = s.optInt("se"),
+                    maxEp = s.optInt("maxEp"),
+                    resolutions = res,
+                )
+            }.getOrNull()
+        }
+
+        if (sid.isNotBlank()) detailPathCache[sid] = dp
         DetailResult(
+            subjectId = sid,
             title = subj.optString("title"),
             description = subj.optString("description"),
             year = year,
             isSeries = st == 2,
             cover = cover,
+            detailPath = dp,
+            dubs = dubs,
+            seasons = seasons,
+            hasResource = subj.optBoolean("hasResource"),
         )
+    }
+
+    /** Find the canonical detailPath for [subjectId] when we don't already
+     *  have one cached. Strategy: search by [titleHint] (if we have one) and
+     *  pick the result whose subjectId matches. detail-rec returns
+     *  RECOMMENDATIONS rather than the subject itself, so it can't be used
+     *  here — Avatar 2009's first rec is Avengers: Endgame, etc. Title-based
+     *  search reliably surfaces the subject as a top hit. */
+    suspend fun lookupDetailPath(
+        subjectId: String, titleHint: String? = null,
+    ): String? = withContext(Dispatchers.IO) {
+        detailPathCache[subjectId]?.let { return@withContext it }
+        if (subjectId.isBlank() || titleHint.isNullOrBlank()) return@withContext null
+        // search() populates detailPathCache for every hit it returns. After
+        // the call we can simply re-check the cache.
+        runCatching { search(titleHint, perPage = 20) }.onSuccess { results ->
+            // Be tolerant: prefer an exact subjectId match; otherwise fall
+            // back to the top hit (often the canonical form of the same
+            // title, useful when search returns a "primary" subject with the
+            // dub variant we were given).
+            val exact = results.firstOrNull { it.subjectId == subjectId }
+            if (exact != null) detailPathCache[subjectId] = detailPathCache[exact.subjectId] ?: return@onSuccess
+            else results.firstOrNull()?.let { hit ->
+                detailPathCache[hit.subjectId]?.let { detailPathCache[subjectId] = it }
+            }
+        }
+        detailPathCache[subjectId]
     }
 
     suspend fun search(

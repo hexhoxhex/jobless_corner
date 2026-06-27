@@ -949,7 +949,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             } else item.subjectId
 
             subjectId = resolvedId
-            runCatching { repo.details(resolvedId) }
+            runCatching { repo.details(resolvedId, titleHint = item.title) }
                 .onSuccess { d ->
                     _state.update { it.copy(details = d, detailLoading = false) }
                     // Verify in the background — the Play button reflects the
@@ -1025,6 +1025,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     season = if (d.isSeries) s1 else null,
                     episode = if (d.isSeries) 1 else null,
                     dub = dub,
+                    titleHint = d.title,
                 )
             }
             val ok = result.isSuccess &&
@@ -1280,7 +1281,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 )
             }
             if (season != null) {
-                runCatching { repo.details(effectiveId) }
+                runCatching { repo.details(effectiveId, titleHint = title) }
                     .onSuccess { d ->
                         _state.update { it.copy(details = d) }
                         enumerateEpisodesInBackground(effectiveId, d)
@@ -1332,6 +1333,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     subjectId = subjectId, resolution = quality,
                     season = _state.value.currentSe, episode = _state.value.currentEp,
                     dub = dub,
+                    // Hint lets the H5 lookup search by title when no
+                    // detailPath is cached (e.g. resume from history,
+                    // direct deep-link). Without it we'd land on the wrong
+                    // detailPath and play the wrong movie.
+                    titleHint = _state.value.detailItem?.title,
                 )
             }.onSuccess { p ->
                 pendingTmdbId = null
@@ -1449,7 +1455,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         // Load details too so autoplay-next works for series.
         if (h.season > 0) {
             viewModelScope.launch {
-                runCatching { repo.details(h.subjectId) }
+                runCatching { repo.details(h.subjectId, titleHint = h.title) }
                     .onSuccess { d ->
                         _state.update { it.copy(details = d) }
                         enumerateEpisodesInBackground(h.subjectId, d)
@@ -1475,7 +1481,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val key = WatchHistoryEntity.keyOf(item.subjectId, season, episode)
             if (downloadDao.byKey(key) != null) return@launch
             val play = runCatching {
-                repo.resolvePlay(item.subjectId, DEFAULT_QUALITY, season, episode, "Original")
+                repo.resolvePlay(item.subjectId, DEFAULT_QUALITY, season, episode, "Original", titleHint = item.title)
             }.getOrNull() ?: return@launch
 
             val app = getApplication<android.app.Application>()
