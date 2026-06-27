@@ -57,7 +57,12 @@ private const val DEFAULT_QUALITY = "720p"
  *  drives this counter up. A 5-minute session was hitting 6 too easily
  *  on borderline-flaky channels and dumping the user into the (Adscore-
  *  blocked) WebView path. */
-private const val MAX_RESOLVE_FAILURES_BEFORE_WEBVIEW: Int = 10
+// v0.1.78: 10 → 25. Mid-game CDN hiccups (load spikes during live sports) were
+// running this counter up to 10 in a few minutes and dumping the user into the
+// raw dlhd iframe page mid-retry — the "shows daddy live page when reconnecting"
+// complaint. The native resolver retry path almost always recovers; reserve the
+// WebView path for genuinely-broken streams.
+private const val MAX_RESOLVE_FAILURES_BEFORE_WEBVIEW: Int = 25
 
 /** Rolling window for the failure counter. A channel that's been quiet
  *  for this long is presumed healthy again — reset the counter so a

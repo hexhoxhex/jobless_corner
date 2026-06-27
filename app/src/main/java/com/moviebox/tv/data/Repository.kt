@@ -160,11 +160,20 @@ class Repository(
         type: SubjectType = SubjectType.ALL,
         page: Int = 1,
     ): List<Item> {
-        val data = api.search(
-            SearchRequest(keyword, page, PER_PAGE, type.code)
-        ).unwrap()
+        // aoneroom's mobile search now returns code=441 "miss token". The H5
+        // surface still serves search to guests and returns the same fields
+        // we already model — see net/H5Api.kt for the swap rationale.
+        val items = try {
+            com.moviebox.tv.net.H5Api.search(
+                keyword = keyword, page = page, perPage = PER_PAGE, subjectType = type.code,
+            )
+        } catch (e: Throwable) {
+            android.util.Log.w("H5", "search($keyword) failed: ${e.message}", e)
+            throw e
+        }
+        android.util.Log.i("H5", "search($keyword) -> ${items.size} items")
         val deny = TastePrefs.denyLanguages()
-        return data.items.map { it.toItem() }
+        return items
             .filter { keepByLanguage(it.title, deny) }
             // Skip items previously marked unavailable so the user
             // doesn't keep tapping on dead-on-arrival results.
@@ -345,59 +354,66 @@ class Repository(
         episode: Int? = null,
         dub: String = "Original",
     ): PlayInfo {
-        val detail = api.itemDetails(subjectId).unwrap()
-        val dubs = detail.dubs.map { it.toDomain() }
+        // Migrated to the H5 + themoviebox.org proxy flow — the mobile
+        // resource endpoint rejects guests with 401. Details/captions are
+        // best-effort against the legacy mobile API; failures fall back to
+        // what the H5 play response itself gives us (title, duration).
+        val legacyDetail = runCatching { api.itemDetails(subjectId).unwrap() }.getOrNull()
+        val dubs = legacyDetail?.dubs?.map { it.toDomain() } ?: emptyList()
+        val (effectiveId, selectedDub) = if (legacyDetail != null && legacyDetail.dubs.isNotEmpty()) {
+            val target = pickDub(legacyDetail.dubs, dub)
+            target.subjectId to mapDubName(target.lanName)
+        } else subjectId to "Original"
 
-        val effectiveId: String
-        val selectedDub: String
-        if (detail.dubs.isNotEmpty()) {
-            val target = pickDub(detail.dubs, dub)
-            effectiveId = target.subjectId
-            selectedDub = mapDubName(target.lanName)
-        } else {
-            effectiveId = subjectId
-            selectedDub = "Original"
+        val detailPath = com.moviebox.tv.net.H5Client.syntheticDetailPath(
+            legacyDetail?.title ?: subjectId
+        )
+        val play = try {
+            com.moviebox.tv.net.H5Api.play(
+                subjectId = effectiveId,
+                season = season ?: 0,
+                episode = episode ?: 0,
+                detailPath = detailPath,
+            )
+        } catch (e: Throwable) {
+            android.util.Log.w("H5", "play($effectiveId, se=$season ep=$episode) failed: ${e.message}", e)
+            throw e
         }
-
-        val selectedFile: VideoFile
-        val qualities: List<Quality>
-
-        if (season != null && episode != null) {
-            val (file, available) =
-                resolveEpisode(effectiveId, resolution, season, episode)
-            selectedFile = file
-            qualities = available.map { res ->
-                Quality(
-                    label = "${res}P",
-                    mediaUrl = if (res == file.resolution) file.resourceLink
-                    else null,
-                )
-            }
-        } else {
-            val files = resolveMovie(effectiveId, resolution)
-            selectedFile = files.first
-            qualities = files.second.sortedBy { it.resolution }.map {
-                Quality("${it.resolution}P", it.resourceLink)
-            }
+        android.util.Log.i(
+            "H5", "play($effectiveId, se=$season ep=$episode) streams=${play.streams.size} hasResource=${play.hasResource}",
+        )
+        if (play.streams.isEmpty()) {
+            throw ApiException("This title isn't available right now.")
         }
-
+        // Pick the best stream the user asked for. "best" → highest resolution.
+        val targetRes = resolution.filter { it.isDigit() }.toIntOrNull()
+        val sorted = play.streams.sortedByDescending { it.resolution }
+        val selectedStream = (targetRes?.let { t -> sorted.firstOrNull { it.resolution == t } })
+            ?: sorted.first()
+        val qualities = sorted.map { s ->
+            Quality(
+                label = if (s.resolution > 0) "${s.resolution}P" else s.format,
+                mediaUrl = s.url,
+            )
+        }
         val captions = runCatching {
-            api.extCaptions(effectiveId, selectedFile.resourceId).unwrap()
+            api.extCaptions(effectiveId, selectedStream.id).unwrap()
                 .extCaptions.map { CaptionTrack(it.lan, it.lanName, it.url) }
         }.getOrDefault(emptyList())
 
         return PlayInfo(
-            title = detail.title.ifBlank { selectedFile.title },
-            mediaUrl = selectedFile.resourceLink,
-            selected = "${selectedFile.resolution}P",
+            title = legacyDetail?.title?.ifBlank { effectiveId } ?: effectiveId,
+            mediaUrl = selectedStream.url,
+            selected = if (selectedStream.resolution > 0) "${selectedStream.resolution}P"
+                       else selectedStream.format,
             qualities = qualities,
             captions = captions,
             dubs = dubs,
             selectedDub = selectedDub,
-            season = selectedFile.se,
-            episode = selectedFile.ep,
-            episodeTitle = selectedFile.title,
-            durationSec = selectedFile.duration,
+            season = season ?: 0,
+            episode = episode ?: 0,
+            episodeTitle = "",
+            durationSec = selectedStream.durationSec,
         )
     }
 
