@@ -825,11 +825,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 "/${MAX_RESOLVE_FAILURES_BEFORE_WEBVIEW} " +
                 "windowSinceLastFailMs=$window",
         )
-        // (Cache invalidation removed — v0.1.11's LiveStreamProxy doesn't
-        // expose invalidate(); the proxy's own background refresh handles
-        // poisoned-cache recovery via its refresh-at-age logic. If a future
-        // proxy version reintroduces invalidate(), this is the place to
-        // call it.)
+        // Drop the proxy's cached resolution + the resolver's cached host so
+        // the next /master fetch from ExoPlayer is forced to re-resolve from
+        // scratch. Closes the death loop the user described as
+        // "works → reconnects → works → reconnects → finally stops":
+        // before this call, the proxy kept handing back the same dead
+        // upstream URL on every prepare() retry, and only the proxy's own
+        // 401/403/410 detection inside /inner would invalidate. Non-auth
+        // failures (PlaylistStuck, mid-segment HTTP weirdness, transient
+        // origin 5xx that fell off the retry budget) never triggered an
+        // invalidation, so the player retried indefinitely on poisoned cache.
+        runCatching { liveProxy.invalidate(chId) }
         return true
     }
 

@@ -166,6 +166,31 @@ class LiveStreamProxy(
         return "http://127.0.0.1:${server.listeningPort}/master/$channelId"
     }
 
+    /**
+     * Force-drop the cached upstream resolution for [channelId] so the
+     * next /master or /inner fetch must re-resolve via [LiveResolver].
+     * Called by [MainViewModel.refreshLiveStream] when the player hits an
+     * error the proxy itself couldn't infer was a token death (e.g.
+     * HlsPlaylistTracker.PlaylistStuckException, mid-segment HTTP failures
+     * ExoPlayer reports without ever asking the proxy for a new /inner).
+     *
+     * Without this, the player loops: error → prepare() → /master → same
+     * stale entry → /inner → same dead upstream URL → error → ... → 25
+     * failures → WebView fallback (Adscore-blocked = black screen). With
+     * this, the next /master fetch forces refreshCache(), the resolver
+     * picks a fresh signed URL from donis, and the stream recovers in
+     * place — exactly the "reconnect that actually works" the user wants.
+     *
+     * Also resets [LiveResolver]'s cachedHost so a host that's slowly
+     * dying (or that we got stuck on) gets re-discovered.
+     */
+    fun invalidate(channelId: String) {
+        Log.i(DIAG, "PROXY ch=$channelId INVALIDATE (caller-requested)")
+        cache.remove(channelId)
+        innerState.remove(channelId)
+        resolver.resetCachedHost()
+    }
+
     // ---- internals ----
 
     private inner class ProxyServer : NanoHTTPD("127.0.0.1", /* port = */ 0) {

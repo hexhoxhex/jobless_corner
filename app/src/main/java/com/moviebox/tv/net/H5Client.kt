@@ -128,7 +128,31 @@ object H5Client {
             .header("x-request-lang", "en")
                         .get().build(),
                 ).execute().use { r ->
-                    android.util.Log.i("H5", "warm country-code ${r.code} cookies=${r.headers("set-cookie").size}")
+                    // CRITICAL: country-code's x-user header carries the
+                    // atp:3 anonymous-premium JWT — the same bearer
+                    // themoviebox.org's SPA uses for subject/search. Reading
+                    // it here is what unlocks the FULL catalog (House of the
+                    // Dragon, Wednesday, Barbie, Breaking Bad, etc.). Before
+                    // this fix, only the second warm call (search-suggest)
+                    // populated the bearer — and search-suggest's x-user is a
+                    // lower-tier guest JWT that filters those titles out
+                    // server-side. Verified against a live themoviebox.org
+                    // page-load capture: country-code mints uid with atp:3,
+                    // search-suggest then rotates inside the same session
+                    // but the *first* mint is what flips the catalog tier.
+                    val xUser = r.header("x-user")
+                    if (!xUser.isNullOrBlank()) {
+                        runCatching {
+                            JSONObject(xUser).optString("token")
+                                .takeIf { it.isNotBlank() }
+                        }.getOrNull()?.let { bearer = it }
+                    }
+                    android.util.Log.i(
+                        "H5",
+                        "warm country-code ${r.code} cookies=${r.headers("set-cookie").size} " +
+                            "x-user=${if (xUser.isNullOrBlank()) "NO" else "YES"} " +
+                            "bearer=${if (bearer.isNullOrBlank()) "NO" else "len=${bearer!!.length}"}"
+                    )
                 }
             }.onFailure { android.util.Log.w("H5", "warm country-code failed: ${it.message}") }
             runCatching {

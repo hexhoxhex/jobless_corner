@@ -122,6 +122,15 @@ class LiveResolver(
 
     private fun rememberWorkingHost(host: String) { cachedHost = host }
 
+    /**
+     * Drop the remembered "last-good" host so the next [resolveStream]
+     * call has to re-discover via [discoverHostFromDlhd]. Called by
+     * [LiveStreamProxy.invalidate] when the player requested a re-resolve —
+     * the previously-good host may itself have died, and we don't want
+     * to loop on it. Cheap: the discovery scrape adds ~300 ms one-shot.
+     */
+    fun resetCachedHost() { cachedHost = null }
+
     private fun tryEndpoint(
         host: String, channelId: String, daddySuffix: String,
     ): String? {
