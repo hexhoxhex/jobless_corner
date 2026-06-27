@@ -67,6 +67,18 @@ fun DetailScreen(state: UiState, vm: MainViewModel) {
     val item = state.detailItem ?: return
     val favIds by vm.favouriteIds.collectAsState()
     val isFav = favIds.contains(item.subjectId)
+    // Authoritative content type. Use the H5 detail's isSeries flag ONLY
+    // when it has season metadata to back it up — that's the signal that
+    // H5 actively classified this as a series. For titles where H5
+    // returns seasons=[] (could mean either "movie" or "series we don't
+    // have season data for"), fall back to the cached Item.type so we
+    // don't silently flip a Continue Watching series tile to "Movie"
+    // while waiting on a slow H5 detail response. Generic — handles the
+    // Continue Watching → play → back path where item.type was stale
+    // movie (from an old history row) but H5 says it's a series with
+    // season data.
+    val isSeries = state.details?.takeIf { it.seasons.isNotEmpty() }?.isSeries
+        ?: item.isSeries
 
     // Self-heal: if the user landed here from the player's back arrow on a
     // Continue Watching resume (where details were never loaded — we went
@@ -124,7 +136,7 @@ fun DetailScreen(state: UiState, vm: MainViewModel) {
                         Text("★ %.1f".format(it), color = Gold, fontSize = 13.sp,
                             fontWeight = FontWeight.SemiBold)
                     }
-                    Text(if (item.isSeries) "TV Series" else "Movie",
+                    Text(if (isSeries) "TV Series" else "Movie",
                         color = TextMuted, fontSize = 13.sp)
                 }
             }
@@ -137,7 +149,7 @@ fun DetailScreen(state: UiState, vm: MainViewModel) {
                 }
             }
 
-            if (!item.isSeries) {
+            if (!isSeries) {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     when (state.availability) {
                         Availability.CHECKING -> Button(
@@ -194,7 +206,7 @@ fun DetailScreen(state: UiState, vm: MainViewModel) {
                 Text(desc, color = TextMuted, fontSize = 13.sp)
             }
 
-            if (item.isSeries) {
+            if (isSeries) {
                 when {
                     state.detailLoading ->
                         com.moviebox.tv.ui.components.LottieLoader(size = 48.dp)
@@ -265,7 +277,7 @@ fun DetailScreen(state: UiState, vm: MainViewModel) {
     ) {
         Button(
             onClick = {
-                if (item.isSeries) {
+                if (isSeries) {
                     val s1 = state.details?.seasons?.firstOrNull()?.season ?: 1
                     vm.playEpisode(s1, 1, restoreResume = true)
                 } else vm.playMovie()
@@ -280,7 +292,7 @@ fun DetailScreen(state: UiState, vm: MainViewModel) {
             Icon(Icons.Filled.PlayArrow, null)
             val label = when {
                 state.availability == Availability.UNAVAILABLE -> "Not available — pick from search"
-                item.isSeries -> "Play S${state.details?.seasons?.firstOrNull()?.season ?: 1}E1"
+                isSeries -> "Play S${state.details?.seasons?.firstOrNull()?.season ?: 1}E1"
                 else -> "Play"
             }
             Text("  $label", fontWeight = FontWeight.Bold, fontSize = 16.sp)
