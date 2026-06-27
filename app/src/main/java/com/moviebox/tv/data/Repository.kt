@@ -320,30 +320,69 @@ class Repository(
         }
 
     suspend fun details(subjectId: String): Details {
-        val d = api.itemDetails(subjectId).unwrap()
-        val type = SubjectType.fromCode(d.subjectType)
-
-        val seasons = if (type.isSeries) {
-            runCatching { api.seasonInfo(subjectId).unwrap() }
-                .getOrNull()?.seasons?.map {
-                    SeasonInfo(
-                        season = it.se,
-                        episodes = it.maxEp,
-                        resolutions = it.resolutions.map { r -> r.resolution }
-                            .distinct().sorted(),
-                    )
-                } ?: emptyList()
-        } else emptyList()
-
+        // H5 path first — the legacy mobile itemDetails returns 441 "miss
+        // token" since aoneroom locked down the mobile API. We use the H5
+        // /detail endpoint when we know the canonical detailPath (search
+        // hits populate that cache).
+        val dp = com.moviebox.tv.net.H5Api.detailPathFor(subjectId)
+        val h5 = dp?.let { com.moviebox.tv.net.H5Api.detail(it) }
+        if (h5 != null) {
+            val type = if (h5.isSeries) SubjectType.TV_SERIES else SubjectType.MOVIE
+            val seasons = if (h5.isSeries) {
+                // Real episode counts come from enumerateEpisodes; declared
+                // counts from the mobile seasonInfo can't be trusted now.
+                runCatching { enumerateEpisodes(subjectId) }.getOrNull()
+                    ?.entries?.sortedBy { it.key }?.map { (se, eps) ->
+                        SeasonInfo(
+                            season = se, episodes = eps.size,
+                            resolutions = emptyList(), realEpisodes = eps,
+                        )
+                    } ?: emptyList()
+            } else emptyList()
+            return Details(
+                subjectId = subjectId,
+                title = h5.title,
+                type = type,
+                description = h5.description,
+                year = h5.year,
+                isSeries = h5.isSeries,
+                seasons = seasons,
+                dubs = emptyList(),
+            )
+        }
+        // Mobile path — try, but fall back gracefully so we never show
+        // "isn't available" just because details couldn't be fetched. The
+        // player can still resolve a stream via H5Api.play.
+        val d = runCatching { api.itemDetails(subjectId).unwrap() }.getOrNull()
+        if (d != null) {
+            val type = SubjectType.fromCode(d.subjectType)
+            val seasons = if (type.isSeries) {
+                runCatching { api.seasonInfo(subjectId).unwrap() }
+                    .getOrNull()?.seasons?.map {
+                        SeasonInfo(
+                            season = it.se,
+                            episodes = it.maxEp,
+                            resolutions = it.resolutions.map { r -> r.resolution }
+                                .distinct().sorted(),
+                        )
+                    } ?: emptyList()
+            } else emptyList()
+            return Details(
+                subjectId = d.subjectId.ifBlank { subjectId },
+                title = d.title,
+                type = type,
+                description = d.description.orEmpty(),
+                year = parseYear(d.releaseDate),
+                isSeries = type.isSeries,
+                seasons = seasons,
+                dubs = d.dubs.map { it.toDomain() },
+            )
+        }
+        // Last resort: a minimal placeholder so the UI doesn't error out.
         return Details(
-            subjectId = d.subjectId.ifBlank { subjectId },
-            title = d.title,
-            type = type,
-            description = d.description.orEmpty(),
-            year = parseYear(d.releaseDate),
-            isSeries = type.isSeries,
-            seasons = seasons,
-            dubs = d.dubs.map { it.toDomain() },
+            subjectId = subjectId, title = "", type = SubjectType.MOVIE,
+            description = "", year = null, isSeries = false,
+            seasons = emptyList(), dubs = emptyList(),
         )
     }
 

@@ -22,6 +22,7 @@ object H5Api {
 
     private const val PATH_SEARCH = "/wefeed-h5api-bff/subject/search"
     private const val PATH_PLAY = "/wefeed-h5api-bff/subject/play"
+    private const val PATH_DETAIL = "/wefeed-h5api-bff/detail"
 
     data class PlayStream(
         val url: String,
@@ -38,7 +39,54 @@ object H5Api {
      *  Cleared with the process; no persistence needed. */
     private val detailPathCache = java.util.concurrent.ConcurrentHashMap<String, String>()
 
+    /** Cached resolved streams per (subjectId, season, episode). The signed
+     *  mp4 URLs carry a `t=` timestamp valid for ~3h, but we expire entries
+     *  at 30 min — well inside that window, and avoids re-running the WebView
+     *  resolver if the user re-opens the same title shortly after. */
+    private data class CachedStreams(val streams: List<PlayStream>, val expiresAt: Long)
+    private val streamCache = java.util.concurrent.ConcurrentHashMap<String, CachedStreams>()
+    private fun cacheKey(subjectId: String, se: Int, ep: Int) = "$subjectId|$se|$ep"
+
     fun detailPathFor(subjectId: String): String? = detailPathCache[subjectId]
+
+    /** Remember a detailPath outside of search (e.g. when the user picks from
+     *  Browse and we resolve it via a side channel). */
+    fun rememberDetailPath(subjectId: String, detailPath: String) {
+        if (detailPath.isNotBlank()) detailPathCache[subjectId] = detailPath
+    }
+
+    data class DetailResult(
+        val title: String,
+        val description: String,
+        val year: Int?,
+        val isSeries: Boolean,
+        val cover: String?,
+    )
+
+    /** Fetch H5 `/detail?detailPath=…` for [detailPath]. Returns null when the
+     *  endpoint doesn't answer with a usable subject (the caller falls back to
+     *  what it already knows about the title). */
+    suspend fun detail(detailPath: String): DetailResult? = withContext(Dispatchers.IO) {
+        if (detailPath.isBlank()) return@withContext null
+        val raw = runCatching {
+            H5Client.signedGet(PATH_DETAIL, "detailPath=${urlEncode(detailPath)}")
+        }.getOrNull() ?: return@withContext null
+        val data = runCatching { JSONObject(raw).optJSONObject("data") }.getOrNull()
+            ?: return@withContext null
+        val subj = data.optJSONObject("subject") ?: return@withContext null
+        val cover = subj.optJSONObject("cover")?.optString("url")
+            ?: subj.optString("cover").takeIf { it.isNotBlank() }
+        val year = subj.optString("releaseDate").takeIf { it.length >= 4 }
+            ?.substring(0, 4)?.toIntOrNull()
+        val st = subj.optInt("subjectType", 0)
+        DetailResult(
+            title = subj.optString("title"),
+            description = subj.optString("description"),
+            year = year,
+            isSeries = st == 2,
+            cover = cover,
+        )
+    }
 
     suspend fun search(
         keyword: String,
@@ -76,6 +124,14 @@ object H5Api {
         episode: Int,
         detailPath: String,
     ): PlayResult = withContext(Dispatchers.IO) {
+        // Stream cache: a recent successful resolve for the same (id, se, ep)
+        // is still good for ~3h on the CDN; we expire at 30 min to be safe.
+        // Saves the user the 2-4s WebView round trip on re-opens.
+        val ckey = cacheKey(subjectId, season, episode)
+        streamCache[ckey]?.takeIf { it.expiresAt > System.currentTimeMillis() }?.let {
+            android.util.Log.i("H5Api", "stream cache HIT $ckey (${it.streams.size} streams)")
+            return@withContext PlayResult(it.streams, hasResource = true)
+        }
         // Prime the proxy with a movie-page hit: this is what mints a
         // resource-capable `token` cookie. Without it, the play call returns
         // hasResource:false. Cheap and safe to repeat (the proxy just resets
@@ -92,6 +148,7 @@ object H5Api {
         val data = raw?.let { runCatching { JSONObject(it).optJSONObject("data") }.getOrNull() }
         val direct = data?.let { parseStreamsList(it) } ?: emptyList()
         if (direct.isNotEmpty()) {
+            streamCache[ckey] = CachedStreams(direct, System.currentTimeMillis() + 30 * 60_000L)
             return@withContext PlayResult(direct, hasResource = data?.optBoolean("hasResource") ?: true)
         }
         // Direct HTTP returned 0 streams (typical: the proxy requires a real
@@ -103,6 +160,14 @@ object H5Api {
             subjectId = subjectId, detailPath = detailPath,
             season = season, episode = episode,
         )
+        if (viaWebView.isNotEmpty()) {
+            streamCache[ckey] = CachedStreams(viaWebView, System.currentTimeMillis() + 30 * 60_000L)
+        } else {
+            // Both paths failed. Wipe the session so the next play starts
+            // clean — the cached cookies/JWT are likely the reason the proxy
+            // keeps refusing this title.
+            H5Client.resetSession()
+        }
         PlayResult(viaWebView, hasResource = viaWebView.isNotEmpty())
     }
 

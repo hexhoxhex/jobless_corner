@@ -60,6 +60,18 @@ object H5Client {
     @Volatile private var bearer: String? = null
     private val warmLock = Any()
 
+    /** Force the next H5/proxy call to re-warm and pick up a fresh session.
+     *  Called when a play attempt returns zero streams despite the WebView
+     *  resolver running — likely the cached `token` cookie has been
+     *  invalidated server-side. */
+    fun resetSession() {
+        synchronized(warmLock) {
+            warmed = false
+            bearer = null
+            cookieJar.clear()
+        }
+    }
+
     /** One-shot session warm. Two steps:
      *   1. `country-code` — establishes the H5 `token` cookie our cookie jar
      *      then carries to the themoviebox.org play proxy.
@@ -129,6 +141,40 @@ object H5Client {
                 }
             }.onFailure { android.util.Log.w("H5", "warm search-suggest failed: ${it.message}") }
             warmed = true
+        }
+    }
+
+    /** Signed GET to the H5 origin. Used for /detail and other read endpoints
+     *  that need the same auth as POST search. */
+    fun signedGet(path: String, query: String = ""): String {
+        ensureWarm()
+        val ts = System.currentTimeMillis()
+        val accept = "application/json"
+        val canonical = if (query.isNotEmpty()) "$path?$query" else path
+        val sig = Crypto.trSignature(
+            method = "GET",
+            accept = accept,
+            contentType = accept,
+            url = "$H5_BASE$canonical",
+            body = null,
+            timestampMs = ts,
+        )
+        val builder = Request.Builder()
+            .url("$H5_BASE$canonical")
+            .header("User-Agent", BROWSER_UA)
+            .header("Accept", accept)
+            .header("Referer", PAGE_REFERER)
+            .header("X-Client-Token", Crypto.clientToken(ts))
+            .header("x-tr-signature", sig)
+            .header("X-Client-Info", X_CLIENT_INFO)
+            .header("X-Client-Status", "0")
+            .header("x-request-lang", "en")
+            .get()
+        effectiveBearer()?.let { builder.header("Authorization", "Bearer $it") }
+        return client.newCall(builder.build()).execute().use { r ->
+            absorbXUser(r.header("x-user"))
+            if (!r.isSuccessful) error("H5 ${r.code} on $path")
+            r.body?.string().orEmpty()
         }
     }
 
@@ -246,32 +292,86 @@ object H5Client {
     }
 }
 
-/** Tiny in-memory cookie jar. Only one process / one user, so a plain map is
- *  enough — no persistence needed (the H5 token rotates on every call anyway). */
-private class SimpleCookieJar : CookieJar {
+/** Cookie jar that persists across process restarts. The proxy's session
+ *  state lives partly in its `token` cookie — saving it skips the warm calls
+ *  on subsequent app launches, and means a recently-played title can be
+ *  re-played without re-running the WebView resolver. */
+internal class SimpleCookieJar : CookieJar {
     private val store = mutableMapOf<String, MutableList<Cookie>>()
+    private val prefs: android.content.SharedPreferences? = runCatching {
+        com.moviebox.tv.App.instance.getSharedPreferences("h5_cookies", android.content.Context.MODE_PRIVATE)
+    }.getOrNull()
+    @Volatile private var loaded = false
+
+    @Synchronized
+    private fun ensureLoaded() {
+        if (loaded) return
+        loaded = true
+        val p = prefs ?: return
+        runCatching {
+            val arr = org.json.JSONArray(p.getString("jar", "[]") ?: "[]")
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                val expires = o.optLong("expires", 0L)
+                if (expires in 1..System.currentTimeMillis()) continue
+                val b = Cookie.Builder().name(o.getString("name")).value(o.getString("value"))
+                    .domain(o.getString("domain")).path(o.optString("path", "/"))
+                if (expires > 0) b.expiresAt(expires)
+                if (o.optBoolean("secure")) b.secure()
+                if (o.optBoolean("httpOnly")) b.httpOnly()
+                val c = b.build()
+                store.getOrPut(o.getString("domain")) { mutableListOf() }.add(c)
+            }
+        }
+    }
+
+    @Synchronized
+    private fun persist() {
+        val p = prefs ?: return
+        runCatching {
+            val arr = org.json.JSONArray()
+            store.forEach { (host, list) ->
+                list.forEach { c ->
+                    arr.put(
+                        org.json.JSONObject()
+                            .put("name", c.name).put("value", c.value)
+                            .put("domain", host).put("path", c.path)
+                            .put("expires", c.expiresAt)
+                            .put("secure", c.secure).put("httpOnly", c.httpOnly)
+                    )
+                }
+            }
+            p.edit().putString("jar", arr.toString()).apply()
+        }
+    }
 
     @Synchronized
     override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
+        ensureLoaded()
         if (cookies.isEmpty()) return
         val list = store.getOrPut(url.host) { mutableListOf() }
         cookies.forEach { c ->
             list.removeAll { it.name == c.name }
             list.add(c)
         }
+        persist()
     }
 
     @Synchronized
     override fun loadForRequest(url: HttpUrl): List<Cookie> {
-        // Send cookies set by either H5 origin or the proxy itself — the proxy
-        // accepts the H5 origin's `token` cookie when the host matches its
-        // own session policy (verified on device + via the headless capture).
+        ensureLoaded()
         val matches = mutableListOf<Cookie>()
         store.forEach { (_, list) ->
-            list.forEach { c ->
-                if (c.matches(url)) matches.add(c)
-            }
+            list.forEach { c -> if (c.matches(url)) matches.add(c) }
         }
         return matches
+    }
+
+    /** Wipe the jar — used when a play attempt fails with empty streams to
+     *  force a fresh proxy session next time. */
+    @Synchronized
+    fun clear() {
+        store.clear()
+        prefs?.edit()?.remove("jar")?.apply()
     }
 }
