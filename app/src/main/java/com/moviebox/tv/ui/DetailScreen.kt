@@ -68,6 +68,16 @@ fun DetailScreen(state: UiState, vm: MainViewModel) {
     val favIds by vm.favouriteIds.collectAsState()
     val isFav = favIds.contains(item.subjectId)
 
+    // Self-heal: if the user landed here from the player's back arrow on a
+    // Continue Watching resume (where details were never loaded — we went
+    // straight to the player), lazily fetch them now so the episode picker
+    // can render. Cheap no-op if details are already there or loading.
+    androidx.compose.runtime.LaunchedEffect(item.subjectId) {
+        if (state.details == null && !state.detailLoading) {
+            vm.ensureDetails(item)
+        }
+    }
+
     Box(Modifier.fillMaxSize()) {
     Column(
         Modifier

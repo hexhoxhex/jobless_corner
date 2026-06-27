@@ -1064,6 +1064,41 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * Idempotent details load. Used by [DetailScreen]'s self-heal when the
+     * user lands on Detail from the player's back button without details
+     * ever having been fetched — typical of a Continue Watching resume that
+     * went straight into the player.
+     *
+     * Cheap no-op when details for this item are already loaded or in
+     * flight. Does NOT touch currentSe/currentEp (back from player wants
+     * to remember which episode was playing so the picker auto-scrolls to
+     * the right row).
+     */
+    fun ensureDetails(item: Item) {
+        val cur = _state.value
+        if (cur.detailLoading) return
+        if (cur.details?.subjectId == item.subjectId) return
+        _state.update { it.copy(detailLoading = true) }
+        viewModelScope.launch {
+            runCatching { repo.details(item.subjectId, titleHint = item.title) }
+                .onSuccess { d ->
+                    _state.update {
+                        if (it.detailItem?.subjectId == item.subjectId) {
+                            it.copy(details = d, detailLoading = false)
+                        } else it
+                    }
+                    precheckPlayback(item.subjectId, d)
+                    enumerateEpisodesInBackground(item.subjectId, d)
+                }
+                .onFailure { e ->
+                    _state.update {
+                        it.copy(detailLoading = false, error = e.message)
+                    }
+                }
+        }
+    }
+
     /** Background walk of aoneroom's file listing to replace each
      *  season's maxEp-based episode count with the authoritative real
      *  set. Non-blocking: details render immediately with maxEp, then
@@ -1410,7 +1445,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                             useLiveWebPlayer = false,
                         )
                     }
-                    it.details != null || it.currentSe != null ->
+                    // VOD: ANY detailItem means we have a show/movie to fall
+                    // back to. Going to DETAIL even when details/currentSe
+                    // are still loading lets the user reach the season/
+                    // episode picker that this VM lazy-loads in the
+                    // background. Previously this required currentSe OR
+                    // details — for a Continue Watching resume of a series
+                    // whose history row had season=0 (movies, but also old
+                    // pre-v0.1.83 rows where season was lost), currentSe
+                    // came back null and details hadn't loaded yet, so back
+                    // dumped the user on the Home tab. Now we trust the
+                    // detailItem alone — DetailScreen calls openItem when
+                    // it mounts without details, which fills them in.
+                    it.detailItem != null ->
                         it.copy(screen = Screen.DETAIL, play = null)
                     else -> it.copy(screen = Screen.TABS, play = null)
                 }

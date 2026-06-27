@@ -878,10 +878,16 @@ async function refresh() {
     // Toggle the episode controls row visibility based on series state.
     // CSS hides the row when data-show-eps="false" — we flip the attr so
     // the user only sees Prev/Next/Stop while a series is playing.
-    // Show the episode controls (incl. the new "All episodes" button) only
-    // while a series is playing. There are several .np-eps elements now, so
-    // toggle them all — querySelector would miss the standalone button.
-    const showEps = (s.episode != null && s.subjectId) ? "true" : "false";
+    // Show whenever a SERIES is playing (type==1), even if the current
+    // episode isn't tracked. For HBO-tier titles (House of the Dragon,
+    // Wednesday, etc.) the play uses aoneroom's subject-level resource —
+    // state.episode comes back null, but the show IS a series and the
+    // user should still be able to open the picker to switch episodes.
+    // Previously the picker was gated on s.episode != null and stayed
+    // hidden for those titles, locking the user into whatever the
+    // subject-level resource happened to be.
+    const playingSeries = s.subjectId && (s.type === 1 || s.season != null || s.episode != null);
+    const showEps = playingSeries ? "true" : "false";
     document.querySelectorAll(".np-eps").forEach(el => { el.dataset.showEps = showEps; });
     // Cache the title for the Live channel grid render so the
     // currently-playing tile shows a "NOW PLAYING" badge instead of
@@ -958,13 +964,15 @@ $("#npClose")?.addEventListener("click", () => post("/api/player/close"));
 // "All episodes" → open the real season/episode picker for the playing series.
 $("#epList")?.addEventListener("click", () => {
   const s = lastState;
-  if (!s || !s.subjectId || s.season == null) {
-    toast("Episode list not available yet"); return;
-  }
+  if (!s || !s.subjectId) { toast("Episode list not available yet"); return; }
+  // For HBO-tier titles the play uses the subject-level resource and the
+  // state doesn't carry season/episode. Fall through to the picker with
+  // se=1 ep=1 so it can fetch the season list from /api/details — the
+  // picker has its own "show came back empty" handling.
   openEpisodePicker({
     subjectId: s.subjectId, title: s.title, year: s.year,
-    type: s.type != null ? s.type : 2, cover: "",
-    se: s.season, ep: s.episode,
+    type: s.type != null ? s.type : 1, cover: "",
+    se: s.season ?? 1, ep: s.episode ?? 1,
   });
 });
 $("#back10").onclick = () => {
