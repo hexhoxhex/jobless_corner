@@ -31,6 +31,12 @@ object RemoteController {
      *  "netflix" | "hbo" | "disney" | "prime" | "apple" | "hulu" |
      *  "genre_movie:<csv ids>" | "genre_tv:<csv ids>". */
     suspend fun browse(slice: String): List<Item> = runCatching {
+        // Try aoneroom's own server-curated rows first — every item is real
+        // catalog with hasResource + detailPath, so the SPA's Browse stops
+        // showing TMDB titles that aoneroom can't actually stream. Only
+        // fall through to TMDB for the legacy network/genre slices.
+        val h5 = h5BrowseSlice(slice)
+        if (h5 != null) return@runCatching h5
         val rows = when {
             slice == "trending"        -> tmdb.trending()
             slice == "popular_movies"  -> tmdb.popularMovies()
@@ -55,6 +61,29 @@ object RemoteController {
         // so the phone's Browse rows stop showing things that "don't exist".
         rows.filter { !com.moviebox.tv.data.UnavailableCatalog.isUnavailable(it.subjectId) }
     }.getOrDefault(emptyList())
+
+    /** Map a SPA browse slice to a real aoneroom row when possible. Returns
+     *  null if the slice is genre/network — those still use TMDB. */
+    private suspend fun h5BrowseSlice(slice: String): List<Item>? = runCatching {
+        when (slice) {
+            "trending" -> com.moviebox.tv.net.H5Api.trending()
+            "popular_movies", "popular_tv" -> {
+                val wantSeries = (slice == "popular_tv")
+                val rows = com.moviebox.tv.net.H5Api.home()
+                // The server names the rows directly — "Popular Movie" /
+                // "Popular Series". Match by name; fall back to the first
+                // row that matches the type if the names ever drift.
+                val byName = rows.firstOrNull {
+                    it.title.contains("Popular", ignoreCase = true) &&
+                        it.title.contains(if (wantSeries) "Series" else "Movie", ignoreCase = true)
+                }
+                (byName?.items ?: rows.flatMap { it.items })
+                    .filter { it.isSeries == wantSeries }
+                    .take(24)
+            }
+            else -> return@runCatching null
+        }
+    }.getOrNull()
 
     suspend fun movieGenres() = runCatching { tmdb.movieGenres() }
         .getOrDefault(emptyList())

@@ -23,6 +23,65 @@ object H5Api {
     private const val PATH_SEARCH = "/wefeed-h5api-bff/subject/search"
     private const val PATH_PLAY = "/wefeed-h5api-bff/subject/play"
     private const val PATH_DETAIL = "/wefeed-h5api-bff/detail"
+    private const val PATH_HOME = "/wefeed-h5api-bff/home"
+    private const val PATH_TRENDING = "/wefeed-h5api-bff/subject/trending"
+
+    data class HomeRowRaw(val title: String, val type: Int, val items: List<Item>)
+
+    /** Fetch the home feed exactly as MovieWay sees it — 40+ server-curated
+     *  rows ("Popular Movie", "Superhero Series", "Teen Romance", …) where
+     *  every item is real aoneroom catalog with hasResource + detailPath.
+     *  This is what replaces TMDB-based browsing and eliminates the entire
+     *  "TMDB → aoneroom bridge" class of bugs (no more "couldn't auto-match",
+     *  no more recommending titles that don't exist). */
+    suspend fun home(): List<HomeRowRaw> = withContext(Dispatchers.IO) {
+        val raw = runCatching { H5Client.signedGet(PATH_HOME) }.getOrNull()
+            ?: return@withContext emptyList()
+        val ol = runCatching {
+            JSONObject(raw).optJSONObject("data")?.optJSONArray("operatingList")
+        }.getOrNull() ?: return@withContext emptyList()
+        val out = mutableListOf<HomeRowRaw>()
+        for (i in 0 until ol.length()) {
+            val row = ol.getJSONObject(i)
+            val title = row.optString("title")
+            if (title.isBlank()) continue
+            val subjects = row.optJSONArray("subjects") ?: continue
+            val items = (0 until subjects.length()).mapNotNull { j ->
+                runCatching {
+                    val raw = subjects.getJSONObject(j)
+                    val item = raw.toItem()
+                    raw.optString("detailPath").takeIf { it.isNotBlank() }
+                        ?.let { detailPathCache[item.subjectId] = it }
+                    // Filter: only show items the server says have a resource.
+                    // hasResource=false → guaranteed "not available right now"
+                    // → exactly the items the user kept seeing in recs.
+                    if (raw.optBoolean("hasResource", false)) item else null
+                }.getOrNull()
+            }
+            if (items.isNotEmpty()) out.add(HomeRowRaw(title = title, type = row.optInt("type"), items = items))
+        }
+        out
+    }
+
+    /** The Trending row — also from real aoneroom catalog, 24 items with
+     *  hasResource flag. Used as the hero source and the top-of-home row. */
+    suspend fun trending(perPage: Int = 24): List<Item> = withContext(Dispatchers.IO) {
+        val raw = runCatching {
+            H5Client.signedGet(PATH_TRENDING, "page=1&perPage=$perPage")
+        }.getOrNull() ?: return@withContext emptyList()
+        val arr = runCatching {
+            JSONObject(raw).optJSONObject("data")?.optJSONArray("subjectList")
+        }.getOrNull() ?: return@withContext emptyList()
+        (0 until arr.length()).mapNotNull { i ->
+            runCatching {
+                val o = arr.getJSONObject(i)
+                val item = o.toItem()
+                o.optString("detailPath").takeIf { it.isNotBlank() }
+                    ?.let { detailPathCache[item.subjectId] = it }
+                if (o.optBoolean("hasResource", false)) item else null
+            }.getOrNull()
+        }
+    }
 
     data class PlayStream(
         val url: String,

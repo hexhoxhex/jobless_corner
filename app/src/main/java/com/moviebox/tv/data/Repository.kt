@@ -52,6 +52,43 @@ class Repository(
         onError: (Throwable) -> Unit,
     ): Unit = coroutineScope {
         val deny = TastePrefs.denyLanguages()
+        // H5 path first — aoneroom's own server-curated home rows. Every item
+        // is real catalog (no TMDB bridging needed) and the hasResource flag
+        // filtered at the H5Api layer means we never surface dead titles in
+        // browse. Falls back to TMDB if H5 returns nothing — the user can
+        // still discover via TMDB while aoneroom is down.
+        val h5Rows = runCatching {
+            com.moviebox.tv.net.H5Api.home()
+        }.getOrDefault(emptyList())
+        if (h5Rows.isNotEmpty()) {
+            // Heroes: first 5 from the dedicated trending fetch (richer
+            // metadata than the banner items in operatingList[0]).
+            val trending = runCatching { com.moviebox.tv.net.H5Api.trending() }
+                .getOrDefault(emptyList())
+                .filter { keepByLanguage(it.title, deny) }
+            trending.take(5).forEach { item ->
+                onHero(
+                    Hero(
+                        item = item,
+                        backdropUrl = item.backdropUrl ?: item.coverUrl,
+                        tagline = item.overview.orEmpty(),
+                    )
+                )
+            }
+            if (trending.isNotEmpty()) {
+                onRow(HomeRow("🔥 Trending Now", trending.take(14)))
+            }
+            // Then every server-named row (Popular Movie, Superhero Series,
+            // Teen Romance, …) in operatingList order.
+            h5Rows.forEach { r ->
+                val filtered = r.items
+                    .filter { keepByLanguage(it.title, deny) }
+                    .filter { !UnavailableCatalog.isUnavailable(it.subjectId) }
+                    .take(14)
+                if (filtered.isNotEmpty()) onRow(HomeRow(r.title, filtered))
+            }
+            return@coroutineScope
+        }
         suspend fun row(
             title: String, isSeries: Boolean? = null,
             fetch: suspend () -> List<TmdbItemDto>,
