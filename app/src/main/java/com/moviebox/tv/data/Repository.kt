@@ -506,7 +506,15 @@ class Repository(
                 "play($effectiveId, se=$season ep=$episode) failed: ${it.message}",
             )
         }
-        val needsFallback = (season != null || episode != null) && (
+        // Subject-level fallback ONLY for S1E1. The H5 pattern this exists
+        // for is "show registered as one subject-level playable" — so the
+        // subject's single resource IS S1E1 by convention. Firing the
+        // fallback for ANY (se, ep) that returns 0 streams would silently
+        // play S1E1 when the user asked for S2E1 — silent content
+        // corruption. Verified on HotD: aoneroom has S1 only; asking for
+        // S2E1 must surface "not available", NOT silently swap to S1E1.
+        val isS1E1 = (season == null || season == 1) && (episode == null || episode == 1)
+        val needsFallback = isS1E1 && (
             firstAttempt.isFailure ||
                 (firstAttempt.getOrNull()?.streams?.isEmpty() == true)
         )

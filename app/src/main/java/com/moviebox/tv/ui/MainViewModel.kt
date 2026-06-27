@@ -64,6 +64,11 @@ private const val DEFAULT_QUALITY = "720p"
 // WebView path for genuinely-broken streams.
 private const val MAX_RESOLVE_FAILURES_BEFORE_WEBVIEW: Int = 25
 
+/** Probe up to this season number when discovering hidden seasons that
+ *  the H5 detail endpoint under-reports. ~5 covers most network shows
+ *  without spamming the origin. */
+private const val HIDDEN_SEASON_PROBE_MAX: Int = 6
+
 /** Rolling window for the failure counter. A channel that's been quiet
  *  for this long is presumed healthy again — reset the counter so a
  *  brand-new failure doesn't immediately trigger fallback based on
@@ -1107,6 +1112,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun enumerateEpisodesInBackground(resolvedId: String, d: Details) {
         if (!d.isSeries || d.seasons.isEmpty()) return
         viewModelScope.launch {
+            // Probe for hidden seasons in parallel — doesn't depend on the
+            // episode-enumeration walk succeeding. enumerateEpisodes hits
+            // the legacy mobile API which is 441-gated now; probing only
+            // uses the H5 play endpoint we already rely on.
+            launch { probeHiddenSeasons(resolvedId, d.subjectId) }
             val realMap = runCatching { repo.enumerateEpisodes(resolvedId) }
                 .getOrNull() ?: return@launch  // walk failed/truncated → keep maxEp
             // Guard against the user having navigated away mid-walk.
@@ -1137,6 +1147,72 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     st.copy(details = st.details.copy(seasons = refined))
                 } else st
             }
+        }
+    }
+
+    /**
+     * Try play(subjectId, se=N, ep=1) for N above the highest known season.
+     * Each call that returns streams reveals a hidden season the H5 detail
+     * endpoint didn't list. Adds discovered seasons to state.details so the
+     * picker dropdown shows them. The subject-level fallback is restricted
+     * to S1E1, so a streams=true response for se=N here is a real S(N)
+     * resource — no risk of confusing the show's subject-level S1E1 with a
+     * fake S(N) entry.
+     *
+     * Bounded: probes at most [HIDDEN_SEASON_PROBE_MAX] seasons above the
+     * highest known one, and stops on the first consecutive gap (two empty
+     * responses in a row).
+     */
+    private suspend fun probeHiddenSeasons(resolvedId: String, expectedDetailId: String) {
+        val cur = _state.value
+        val known = cur.details?.seasons.orEmpty().mapNotNull { it.season }
+            .toMutableList()
+        val highest = known.maxOrNull() ?: 0
+        if (highest >= HIDDEN_SEASON_PROBE_MAX) return
+        val discovered = mutableListOf<Int>()
+        var consecutiveGaps = 0
+        for (se in (highest + 1)..HIDDEN_SEASON_PROBE_MAX) {
+            val result = runCatching {
+                com.moviebox.tv.net.H5Api.play(
+                    subjectId = resolvedId,
+                    season = se, episode = 1,
+                    detailPath = com.moviebox.tv.net.H5Api.detailPathFor(resolvedId) ?: "",
+                )
+            }.getOrNull()
+            if (result != null && result.streams.isNotEmpty()) {
+                discovered.add(se)
+                consecutiveGaps = 0
+                android.util.Log.i(
+                    "SeasonProbe",
+                    "$resolvedId hidden season discovered: S$se (streams=${result.streams.size})",
+                )
+            } else {
+                consecutiveGaps += 1
+                if (consecutiveGaps >= 2) break // two empties → no more seasons
+            }
+        }
+        if (discovered.isEmpty()) return
+        val cur2 = _state.value
+        if (cur2.details?.subjectId != expectedDetailId ||
+            cur2.detailItem?.subjectId != resolvedId
+        ) return
+        _state.update { st ->
+            val curDetails = st.details ?: return@update st
+            // Build new season entries. We don't know maxEp from the probe,
+            // so we estimate from S1's count (typical for most series).
+            // realEpisodes is left null so the user-visible flow can still
+            // refine via enumeration if available.
+            val s1Eps = curDetails.seasons.firstOrNull()?.episodes ?: 10
+            val newSeasons = curDetails.seasons.toMutableList()
+            for (se in discovered) {
+                if (newSeasons.none { it.season == se }) {
+                    newSeasons.add(curDetails.seasons.first().copy(
+                        season = se, episodes = s1Eps, realEpisodes = null,
+                    ))
+                }
+            }
+            newSeasons.sortBy { it.season }
+            st.copy(details = curDetails.copy(seasons = newSeasons))
         }
     }
 
