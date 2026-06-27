@@ -354,6 +354,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 .filter { !UnavailableCatalog.isUnavailable(it.subjectId) }
         }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
+    /** subjectId → last-seen cover URL. Populated whenever we encounter an
+     *  Item with a cover (search hits, openItem, remotePlay, history rows).
+     *  Used as a fallback in saveProgress so an auto-advance to a brand new
+     *  Item (no cover yet) doesn't wipe the Continue Watching poster. */
+    private val knownCovers = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private fun rememberCover(item: Item?) {
+        item?.subjectId?.let { id ->
+            item.coverUrl?.takeIf { it.isNotBlank() }?.let { knownCovers[id] = it }
+        }
+    }
+
     private var subjectId: String = ""
     /**
      * If the current item was bridged from TMDB, holds the original tmdb id so
@@ -899,6 +910,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun openItem(item: Item) {
+        rememberCover(item)
         dub = "Original"
         quality = DEFAULT_QUALITY
         _state.update {
@@ -919,12 +931,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     repo.resolveByTitle(item.title, item.year, item.isSeries)
                 }.getOrNull()
                 if (match == null) {
-                    // Couldn't auto-match (e.g. aoneroom uses an abbreviation
-                    // we can't reach by string similarity). Push the user into
-                    // Search with the title pre-filled — they can pick the
-                    // right record themselves. We do NOT mark the id as dead
-                    // here, since the title may well exist under a different
-                    // form.
+                    // Mark the TMDB pick as un-bridgeable so the recommendations
+                    // row stops surfacing it on the next refresh — the same
+                    // "Couldn't auto-match" loop kept hitting the user. Push
+                    // them into Search with the title pre-filled so they can
+                    // pick another record themselves.
+                    UnavailableCatalog.mark(item.subjectId)
                     _state.update {
                         it.copy(
                             screen = Screen.TABS,
@@ -1217,6 +1229,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         // so the old movie kept playing in the foreground while the new
         // title resolved async — user perception: the new pick opens "in
         // the background". Same cleanup openItem() does for the direct path.
+        // Remember cover early so even if the play call fails mid-flight,
+        // a re-open via history still has the poster.
+        coverUrl?.takeIf { it.isNotBlank() }?.let { knownCovers[subjectId] = it }
         _state.update {
             it.copy(
                 screen = Screen.PLAYER,
@@ -1225,7 +1240,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 resumeMs = 0L,
                 detailItem = Item(
                     subjectId, title, SubjectType.fromCode(type), year, null,
-                    coverUrl, 0,
+                    coverUrl ?: knownCovers[subjectId], 0,
                 ),
                 details = null,
                 currentSe = season,
@@ -1247,8 +1262,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     repo.resolveByTitle(title, year, isSeries)
                 }.getOrNull()
                 if (match == null) {
-                    // Same as openItem: don't strand the user. Push the TV to
-                    // Search with the title pre-filled so they can pick.
+                    // Mark this TMDB pick as un-bridgeable so the recommendations
+                    // row stops surfacing it on the next refresh — the "Supergirl
+                    // → couldn't auto-match" loop the user kept hitting was the
+                    // same item bubbling back to the top each time. Same as
+                    // openItem: don't strand the user. Push the TV to Search
+                    // with the title pre-filled so they can pick.
+                    UnavailableCatalog.mark(subjectId)
                     _state.update {
                         it.copy(
                             screen = Screen.TABS,
@@ -1417,7 +1437,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     key = key,
                     subjectId = subjectId,
                     title = item?.title ?: play.title,
-                    coverUrl = item?.coverUrl,
+                    // Fall back to the per-subjectId cover map so a re-save
+                    // during an auto-advance (when detailItem briefly loses
+                    // its cover) doesn't write null and erase the poster on
+                    // Continue Watching.
+                    coverUrl = item?.coverUrl ?: knownCovers[subjectId],
                     type = item?.type?.code ?: 0,
                     season = play.season,
                     episode = play.episode,
