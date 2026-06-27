@@ -199,15 +199,25 @@ fun DetailScreen(state: UiState, vm: MainViewModel) {
                         // mediaType=tv and aoneroom answers with an empty
                         // seasons array — the old code rendered the picker
                         // anyway, so the user tapped an episode chip and
-                        // got the "episode not available" error. Show
-                        // an honest "no episodes available yet" line
-                        // instead so the user knows it's not them.
+                        // got the "episode not available" error.
+                        //
+                        // BUT: if availability is AVAILABLE the show IS
+                        // playable via the subject-level fallback added in
+                        // v0.1.90 (HBO-tier titles like House of the Dragon
+                        // play as a single resource even though aoneroom
+                        // returns seasons=[]). Don't tell the user "no
+                        // episodes available" when they're about to tap
+                        // a green "Play" button that works.
                         val seasons = state.details?.seasons.orEmpty()
                         val hasEpisodes = seasons.any { it.episodes > 0 }
-                        if (hasEpisodes) {
-                            SeriesEpisodes(state, vm)
-                        } else {
-                            Text(
+                        when {
+                            hasEpisodes -> SeriesEpisodes(state, vm)
+                            state.availability == Availability.AVAILABLE -> {
+                                // Subject-level playable — one watchable
+                                // resource, no per-episode listing. Stay
+                                // silent; the sticky CTA does the talking.
+                            }
+                            else -> Text(
                                 "No episodes available yet — the source hasn't " +
                                     "indexed this series. Try again later.",
                                 color = TextMuted, fontSize = 13.sp,

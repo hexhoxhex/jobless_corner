@@ -1148,7 +1148,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun precheckPlayback(resolvedId: String, d: Details) {
         _state.update { it.copy(availability = Availability.CHECKING) }
         viewModelScope.launch {
-            val s1 = d.seasons.firstOrNull()?.season
+            // Default to S1 when a series has no season metadata. HBO-tier
+            // titles (House of the Dragon, etc.) come back from H5 detail
+            // with seasons=[] even though the play call accepts se=1 ep=1
+            // and returns subject-level streams. Passing season=null
+            // upstream skipped that path and the precheck spuriously
+            // marked the show UNAVAILABLE.
+            val s1 = d.seasons.firstOrNull()?.season ?: 1
             val result = runCatching {
                 repo.resolvePlay(
                     subjectId = resolvedId,

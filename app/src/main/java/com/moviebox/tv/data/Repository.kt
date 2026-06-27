@@ -476,34 +476,44 @@ class Repository(
         // Try the season/episode-specific resource first. For HBO/Netflix-tier
         // titles (House of the Dragon, The Last of Us, etc.) aoneroom's H5
         // surface registers the show under one subjectId but doesn't expose
-        // per-episode resource files — the play call with se=1 ep=1 comes
-        // back with streams=0 even though hasResource=true. The exact same
-        // call with se=0 ep=0 returns the subject-level resource (4 quality
-        // variants, 3 dubs). That's the playable file the official MovieBox
-        // APK hides behind "Download" because its mobile-API surface has
-        // those titles gated to download_only; we picked the H5 surface
-        // (after the country-code atp:3 bearer unlock in v0.1.89) which
-        // doesn't carry that gate. Without this fallback the user sees
-        // "Not available — pick from search" on every HBO-tier title even
-        // though they're streamable.
-        var play = try {
+        // per-episode resource files — the play call with se=1 ep=1 either
+        // returns streams=0 OR throws server-side ("invalid season"). The
+        // exact same call with se=0 ep=0 returns the subject-level resource
+        // (4 quality variants, 3 dubs). That's the playable file the
+        // official MovieBox APK hides behind "Download" because its
+        // mobile-API surface has those titles gated to download_only; we
+        // picked the H5 surface (after the country-code atp:3 bearer unlock
+        // in v0.1.89) which doesn't carry that gate. Without this fallback
+        // the user sees "Not available — pick from search" on every
+        // HBO-tier title even though they're streamable.
+        val firstAttempt = runCatching {
             com.moviebox.tv.net.H5Api.play(
                 subjectId = effectiveId,
                 season = season ?: 0,
                 episode = episode ?: 0,
                 detailPath = detailPath,
             )
-        } catch (e: Throwable) {
-            android.util.Log.w("H5", "play($effectiveId, se=$season ep=$episode) failed: ${e.message}", e)
-            throw e
         }
-        android.util.Log.i(
-            "H5", "play($effectiveId, se=$season ep=$episode) streams=${play.streams.size} hasResource=${play.hasResource}",
+        firstAttempt.onSuccess {
+            android.util.Log.i(
+                "H5",
+                "play($effectiveId, se=$season ep=$episode) streams=${it.streams.size} hasResource=${it.hasResource}",
+            )
+        }
+        firstAttempt.onFailure {
+            android.util.Log.w(
+                "H5",
+                "play($effectiveId, se=$season ep=$episode) failed: ${it.message}",
+            )
+        }
+        val needsFallback = (season != null || episode != null) && (
+            firstAttempt.isFailure ||
+                (firstAttempt.getOrNull()?.streams?.isEmpty() == true)
         )
-        if (play.streams.isEmpty() && (season != null || episode != null)) {
-            // Subject-level fallback for the HBO/Netflix-tier case described
-            // above. Only fires when we asked for a specific (se, ep) —
-            // resolves the show as a single playable.
+        var play = if (needsFallback) {
+            // Subject-level fallback. Fires whenever the (se, ep)-specific
+            // call EITHER threw OR came back with no streams — both surface
+            // as "no episode files" on aoneroom's H5 H5BO-tier titles.
             val fallback = runCatching {
                 com.moviebox.tv.net.H5Api.play(
                     subjectId = effectiveId,
@@ -514,10 +524,16 @@ class Repository(
             if (fallback != null && fallback.streams.isNotEmpty()) {
                 android.util.Log.i(
                     "H5",
-                    "play($effectiveId) subject-level fallback streams=${fallback.streams.size}"
+                    "play($effectiveId) subject-level fallback streams=${fallback.streams.size}",
                 )
-                play = fallback
+                fallback
+            } else {
+                firstAttempt.getOrNull()
+                    ?: throw (firstAttempt.exceptionOrNull()
+                        ?: ApiException("This title isn't available right now."))
             }
+        } else {
+            firstAttempt.getOrThrow()
         }
         if (play.streams.isEmpty()) {
             throw ApiException("This title isn't available right now.")
