@@ -473,7 +473,20 @@ class Repository(
         val dubs = h5Detail?.dubs?.map {
             Dub(name = mapDubName(it.name), code = it.code, original = it.original)
         } ?: emptyList()
-        val play = try {
+        // Try the season/episode-specific resource first. For HBO/Netflix-tier
+        // titles (House of the Dragon, The Last of Us, etc.) aoneroom's H5
+        // surface registers the show under one subjectId but doesn't expose
+        // per-episode resource files — the play call with se=1 ep=1 comes
+        // back with streams=0 even though hasResource=true. The exact same
+        // call with se=0 ep=0 returns the subject-level resource (4 quality
+        // variants, 3 dubs). That's the playable file the official MovieBox
+        // APK hides behind "Download" because its mobile-API surface has
+        // those titles gated to download_only; we picked the H5 surface
+        // (after the country-code atp:3 bearer unlock in v0.1.89) which
+        // doesn't carry that gate. Without this fallback the user sees
+        // "Not available — pick from search" on every HBO-tier title even
+        // though they're streamable.
+        var play = try {
             com.moviebox.tv.net.H5Api.play(
                 subjectId = effectiveId,
                 season = season ?: 0,
@@ -487,6 +500,25 @@ class Repository(
         android.util.Log.i(
             "H5", "play($effectiveId, se=$season ep=$episode) streams=${play.streams.size} hasResource=${play.hasResource}",
         )
+        if (play.streams.isEmpty() && (season != null || episode != null)) {
+            // Subject-level fallback for the HBO/Netflix-tier case described
+            // above. Only fires when we asked for a specific (se, ep) —
+            // resolves the show as a single playable.
+            val fallback = runCatching {
+                com.moviebox.tv.net.H5Api.play(
+                    subjectId = effectiveId,
+                    season = 0, episode = 0,
+                    detailPath = detailPath,
+                )
+            }.getOrNull()
+            if (fallback != null && fallback.streams.isNotEmpty()) {
+                android.util.Log.i(
+                    "H5",
+                    "play($effectiveId) subject-level fallback streams=${fallback.streams.size}"
+                )
+                play = fallback
+            }
+        }
         if (play.streams.isEmpty()) {
             throw ApiException("This title isn't available right now.")
         }
