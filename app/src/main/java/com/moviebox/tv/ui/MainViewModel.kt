@@ -1658,10 +1658,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         contentSwitchAtMs = android.os.SystemClock.elapsedRealtime()
         _state.update { it.copy(playLoading = true, error = null, screen = Screen.PLAYER) }
         viewModelScope.launch {
-            runCatching {
+            val originalSe = _state.value.currentSe
+            val originalEp = _state.value.currentEp
+            // Try the requested (se, ep) first. If it fails AND we asked
+            // for something other than S1E1, retry once with S1E1 — this
+            // catches "saved watch history pointed at S3 but aoneroom
+            // only has S1" cases. Without this the user got stuck on
+            // "Starting…" forever because v0.1.97 (correctly) stopped
+            // silently substituting S1 for missing higher seasons.
+            suspend fun attempt(se: Int?, ep: Int?) = runCatching {
                 repo.resolvePlay(
                     subjectId = subjectId, resolution = quality,
-                    season = _state.value.currentSe, episode = _state.value.currentEp,
+                    season = se, episode = ep,
                     dub = dub,
                     // Hint lets the H5 lookup search by title when no
                     // detailPath is cached (e.g. resume from history,
@@ -1669,7 +1677,35 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     // detailPath and play the wrong movie.
                     titleHint = _state.value.detailItem?.title,
                 )
-            }.onSuccess { p ->
+            }
+            var primary = attempt(originalSe, originalEp)
+            val askedSpecificEpisode =
+                originalSe != null && originalEp != null &&
+                    (originalSe != 1 || originalEp != 1)
+            if (primary.isFailure && askedSpecificEpisode) {
+                android.util.Log.w(
+                    "VodDiag",
+                    "resolve: S${originalSe}E${originalEp} failed " +
+                        "(${primary.exceptionOrNull()?.message}) — " +
+                        "retrying S1E1 since the saved/requested episode " +
+                        "isn't on this source",
+                )
+                val retry = attempt(1, 1)
+                if (retry.isSuccess) {
+                    // Update state so the player UI reflects the actual
+                    // episode being served + future history saves key on it.
+                    _state.update {
+                        it.copy(
+                            currentSe = 1, currentEp = 1,
+                            error = "Saved progress was for S${originalSe}E${originalEp} — " +
+                                "this source only has S1. Starting from S1E1.",
+                        )
+                    }
+                    com.moviebox.tv.remote.RemoteController.updateEpisode(1, 1)
+                    primary = retry
+                }
+            }
+            primary.onSuccess { p ->
                 pendingTmdbId = null
                 quality = p.selected
                 val key = WatchHistoryEntity.keyOf(
