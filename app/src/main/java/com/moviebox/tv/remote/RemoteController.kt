@@ -227,6 +227,12 @@ object RemoteController {
     fun history(): List<WatchHistoryEntity> = vm?.continueWatching?.value ?: emptyList()
     fun downloads(): List<DownloadEntity> = vm?.downloads?.value ?: emptyList()
     fun deleteHistory(key: String) = main.post { vm?.removeHistory(key) }
+
+    /** Per-process cover fallback for the /api/history endpoint — old
+     *  WatchHistory rows pre-v0.1.83 have null coverUrl, so the SPA's
+     *  Continue Watching list rendered as names only. The VM populates this
+     *  map from search/openItem/remotePlay and the startup backfill task. */
+    fun knownCover(subjectId: String): String? = vm?.coverFor(subjectId)
     fun clearHistory() = main.post { vm?.clearHistory() }
 
     fun startDownload(

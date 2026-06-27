@@ -359,6 +359,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      *  Used as a fallback in saveProgress so an auto-advance to a brand new
      *  Item (no cover yet) doesn't wipe the Continue Watching poster. */
     private val knownCovers = java.util.concurrent.ConcurrentHashMap<String, String>()
+    fun coverFor(subjectId: String): String? = knownCovers[subjectId]
     private fun rememberCover(item: Item?) {
         item?.subjectId?.let { id ->
             item.coverUrl?.takeIf { it.isNotBlank() }?.let { knownCovers[id] = it }
@@ -381,6 +382,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         loadHome()
+        backfillHistoryCovers()
+        prevalidateRecommendations()
         // Fire one update check on launch. Public GitHub release lookup,
         // no token. Failures are silent — SPA / TV banner just won't show.
         viewModelScope.launch {
@@ -441,6 +444,81 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         com.moviebox.tv.debug.UpdateInstaller.download(
             context, apkUrl = u.apkUrl, version = u.tag,
         )
+    }
+
+    /** One-shot startup migration: backfill missing covers in the watch
+     *  history. Entries written before v0.1.83 stored coverUrl=null because
+     *  the auto-advance path didn't preserve it — Continue Watching then
+     *  rendered as a list of names with no posters. For each row with a
+     *  blank cover we do a single H5 search by title, take the first hit's
+     *  cover, and update the row. Bounded: at most one search per row, the
+     *  whole thing runs once per launch, and any failure is silent. */
+    /** Background-validate TMDB items in the recommendation pool: try the
+     *  H5 search bridge once for each, and mark the failures as unavailable
+     *  so they never reach the recommendations row. This is what stops the
+     *  "Supergirl → Couldn't auto-match" loop at the source — before, items
+     *  were only marked dead AFTER the user tapped one. Capped + throttled
+     *  so it can't hammer the API on a fresh launch. */
+    private fun prevalidateRecommendations() {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            // Wait for the home feed to populate, then check the first ~30
+            // TMDB items. Empirically that covers ~5 recommendation rows;
+            // anything past that, the user can prune as they go.
+            kotlinx.coroutines.delay(2_500)
+            val home = homeFlow.value ?: return@launch
+            val pool = (home.rows.flatMap { r -> r.items } + home.heroes.map { it.item })
+                .distinctBy { it.subjectId }
+                .filter { it.subjectId.startsWith("tmdb:") }
+                .filter { !UnavailableCatalog.isUnavailable(it.subjectId) }
+                .take(30)
+            for (item in pool) {
+                runCatching {
+                    val match = repo.resolveByTitle(item.title, item.year, item.isSeries)
+                    if (match == null) {
+                        UnavailableCatalog.mark(item.subjectId)
+                        android.util.Log.i(
+                            "VodDiag",
+                            "prevalidate: marked unavailable ${item.title}",
+                        )
+                    }
+                }
+                kotlinx.coroutines.delay(120)  // be a good citizen
+            }
+        }
+    }
+
+    private fun backfillHistoryCovers() {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val rows = runCatching { watchDao.allOnce() }.getOrNull() ?: return@launch
+            // First pass: pre-populate knownCovers from rows that ALREADY have
+            // a cover. That way /api/history's in-process fallback can serve
+            // posters for the missing rows immediately, even before the async
+            // search-backfill below finishes.
+            rows.forEach { r ->
+                r.coverUrl?.takeIf { it.isNotBlank() }?.let { knownCovers[r.subjectId] = it }
+            }
+            val missing = rows.filter { it.coverUrl.isNullOrBlank() && it.title.isNotBlank() }
+            if (missing.isEmpty()) return@launch
+            android.util.Log.i(
+                "VodDiag",
+                "backfillHistoryCovers: ${missing.size} rows missing covers",
+            )
+            for (row in missing.take(50)) {  // hard cap so a huge history can't hammer the API
+                runCatching {
+                    val items = com.moviebox.tv.net.H5Api.search(row.title, perPage = 5)
+                    // Prefer an exact subjectId match, then a year match, then the top hit.
+                    val pick = items.firstOrNull { it.subjectId == row.subjectId }
+                        ?: items.firstOrNull { row.year != null && it.year == row.year }
+                        ?: items.firstOrNull()
+                    val cover = pick?.coverUrl?.takeIf { it.isNotBlank() }
+                    if (cover != null) {
+                        knownCovers[row.subjectId] = cover
+                        watchDao.upsert(row.copy(coverUrl = cover))
+                    }
+                }
+                kotlinx.coroutines.delay(80)  // gentle, don't burst the H5 search rate limit
+            }
+        }
     }
 
     fun loadHome() {

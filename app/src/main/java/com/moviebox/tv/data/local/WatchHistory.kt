@@ -64,6 +64,9 @@ interface WatchHistoryDao {
     @Query("SELECT * FROM watch_history ORDER BY updatedAt DESC")
     fun all(): Flow<List<WatchHistoryEntity>>
 
+    @Query("SELECT * FROM watch_history ORDER BY updatedAt DESC")
+    suspend fun allOnce(): List<WatchHistoryEntity>
+
     @Query("SELECT positionMs FROM watch_history WHERE key = :key")
     suspend fun positionOf(key: String): Long?
 

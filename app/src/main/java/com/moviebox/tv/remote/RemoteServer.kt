@@ -211,11 +211,19 @@ class RemoteServer(
             uri == "/api/history" -> {
                 val arr = JSONArray()
                 RemoteController.history().forEach {
+                    // Fall back to the in-process cover map for entries
+                    // written before v0.1.83 where coverUrl was lost. The
+                    // startup backfill walks the DB and writes covers back,
+                    // but it runs async — this keeps Continue Watching
+                    // showing posters in the meantime.
+                    val cover = it.coverUrl?.takeIf { url -> url.isNotBlank() }
+                        ?: RemoteController.knownCover(it.subjectId)
+                        ?: ""
                     arr.put(
                         JSONObject()
                             .put("key", it.key)
                             .put("title", it.title)
-                            .put("cover", it.coverUrl ?: "")
+                            .put("cover", cover)
                             .put("season", it.season)
                             .put("episode", it.episode)
                             .put("subjectId", it.subjectId)
