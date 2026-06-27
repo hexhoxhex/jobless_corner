@@ -25,8 +25,8 @@ android {
         // ExoPlayer codec support; covers virtually all Android TV devices.
         minSdk = 26
         targetSdk = 35
-        versionCode = 87
-        versionName = "0.1.86"
+        versionCode = 88
+        versionName = "0.1.87"
 
         // Ship only the ABIs real devices use. The universal APK carried four
         // (arm64-v8a, armeabi-v7a, x86, x86_64) = ~40 MB, and that size was
@@ -137,4 +137,10 @@ dependencies {
 
     implementation(libs.nanohttpd)
     implementation(libs.zxing.core)
+    // Lottie for vector animations — loading spinners, buffering hint,
+    // download in-progress, success checkmark. Replaces the stock
+    // CircularProgressIndicator at user-visible spots (Home loading, player
+    // buffering, detail loading) for the same "smooth" feel MovieWay gets
+    // from 87 Lottie refs in their app.
+    implementation(libs.lottie.compose)
 }

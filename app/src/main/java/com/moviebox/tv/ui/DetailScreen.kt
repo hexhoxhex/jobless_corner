@@ -173,7 +173,7 @@ fun DetailScreen(state: UiState, vm: MainViewModel) {
             if (item.isSeries) {
                 when {
                     state.detailLoading ->
-                        CircularProgressIndicator(Modifier.size(28.dp))
+                        com.moviebox.tv.ui.components.LottieLoader(size = 48.dp)
                     state.details != null -> {
                         // Don't render the episode picker if the source has
                         // no seasons OR no episodes inside any season. TMDB

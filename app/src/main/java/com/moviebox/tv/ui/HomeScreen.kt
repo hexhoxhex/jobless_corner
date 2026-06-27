@@ -67,7 +67,7 @@ fun HomeScreen(state: UiState, vm: MainViewModel) {
     val home = state.home
     if (home == null) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            if (state.homeLoading) CircularProgressIndicator()
+            if (state.homeLoading) com.moviebox.tv.ui.components.LottieLoader()
             else ErrorView(state.error, onRetry = { vm.loadHome() })
         }
         return

@@ -1275,9 +1275,9 @@ private fun LoadingPulse() {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        CircularProgressIndicator(
-            color = Accent, strokeWidth = 3.dp, modifier = Modifier.size(46.dp),
-        )
+        // Lottie dot-pulse in brand green replaces the Material spinner —
+        // matches the smooth feel of MovieWay's player loader.
+        com.moviebox.tv.ui.components.LottieLoader(size = 72.dp)
         Text(
             "Starting…",
             color = Color.White.copy(alpha = alpha),
