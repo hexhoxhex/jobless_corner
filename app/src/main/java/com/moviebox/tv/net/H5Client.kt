@@ -81,6 +81,7 @@ object H5Client {
                         .header("User-Agent", BROWSER_UA)
                         .header("Referer", PAGE_REFERER)
                         .header("X-Client-Info", X_CLIENT_INFO)
+            .header("x-request-lang", "en")
                         .get().build(),
                 ).execute().use { r ->
                     android.util.Log.i("H5", "warm country-code ${r.code} cookies=${r.headers("set-cookie").size}")
@@ -110,6 +111,7 @@ object H5Client {
                         ),
                     )
                     .header("X-Client-Info", X_CLIENT_INFO)
+            .header("x-request-lang", "en")
                     .header("X-Client-Status", "0")
                     .post(body.toRequestBody(ctype.toMediaType()))
                     .build()
@@ -154,6 +156,7 @@ object H5Client {
             .header("X-Client-Token", Crypto.clientToken(ts))
             .header("x-tr-signature", sig)
             .header("X-Client-Info", X_CLIENT_INFO)
+            .header("x-request-lang", "en")
             .header("X-Client-Status", "0")
             .post(jsonBody.toRequestBody(contentType.toMediaType()))
         effectiveBearer()?.let { builder.header("Authorization", "Bearer $it") }
@@ -196,6 +199,7 @@ object H5Client {
             .header("Accept", "application/json")
             .header("Referer", PAGE_REFERER)
             .header("X-Client-Info", X_CLIENT_INFO)
+            .header("x-request-lang", "en")
             .header("X-Source", "")
             .get()
         effectiveBearer()?.let { builder.header("Authorization", "Bearer $it") }
@@ -218,6 +222,27 @@ object H5Client {
             .trim('-')
             .ifEmpty { "title" }
         return "$slug$SYNTHETIC_DETAIL_PATH_SUFFIX"
+    }
+
+    /** Visit the movie page on themoviebox.org. This is what *actually*
+     *  unlocks playback for a guest: the page load mints a resource-capable
+     *  `token` cookie on the proxy origin. The bootstrap token from
+     *  h5-api.search-suggest has a different uid and the proxy rejects it
+     *  with `hasResource:false`. Reproduced end-to-end via a Playwright
+     *  capture — only the cookie set by the page visit returned streams. */
+    fun primeProxyForPlay(detailPath: String) {
+        runCatching {
+            val req = Request.Builder()
+                .url("$PROXY_BASE/movies/$detailPath")
+                .header("User-Agent", BROWSER_UA)
+                .header(
+                    "Accept",
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                )
+                .header("Accept-Language", "en-US,en;q=0.9")
+                .get().build()
+            client.newCall(req).execute().close()
+        }
     }
 }
 

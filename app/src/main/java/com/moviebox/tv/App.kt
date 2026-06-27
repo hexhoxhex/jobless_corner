@@ -19,12 +19,19 @@ class App : Application(), ImageLoaderFactory {
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         installCrashHandler()
         // Debug / telemetry plumbing — resets in-memory session log, leaves
         // persisted daily rollups intact. NetworkMonitor starts listening
         // for connectivity changes immediately.
         com.moviebox.tv.debug.Telemetry.init(this)
         com.moviebox.tv.debug.NetworkMonitor.start(this)
+    }
+
+    companion object {
+        /** App-context handle for static helpers that need a Context but live
+         *  outside the activity/VM (e.g. the headless WebView play resolver). */
+        @Volatile lateinit var instance: App
     }
 
     /** Show a friendly crash screen instead of the system "app stopped". */

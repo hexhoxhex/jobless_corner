@@ -365,9 +365,13 @@ class Repository(
             target.subjectId to mapDubName(target.lanName)
         } else subjectId to "Original"
 
-        val detailPath = com.moviebox.tv.net.H5Client.syntheticDetailPath(
-            legacyDetail?.title ?: subjectId
-        )
+        // Prefer the REAL detailPath stashed by search (the proxy 400s with
+        // "empty subjectId" if the slug doesn't match the subjectId). Fall back
+        // to a synthetic when we never saw a search hit for this id.
+        val detailPath = com.moviebox.tv.net.H5Api.detailPathFor(effectiveId)
+            ?: com.moviebox.tv.net.H5Client.syntheticDetailPath(
+                legacyDetail?.title ?: subjectId
+            )
         val play = try {
             com.moviebox.tv.net.H5Api.play(
                 subjectId = effectiveId,
