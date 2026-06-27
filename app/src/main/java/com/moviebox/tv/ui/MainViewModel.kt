@@ -1227,13 +1227,46 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     _state.update {
                         it.copy(
                             detailItem = it.detailItem?.copy(subjectId = workingId),
+                            // Drop the OLD details (they belong to the dead
+                            // subjectId — e.g. for HotD the Popular Series
+                            // subjectId returns seasons=[] but the working
+                            // search subjectId may return real seasons +
+                            // episodes). Setting detailLoading=true makes
+                            // the spinner appear while the reload below
+                            // runs; SeriesEpisodes gates on details!=null
+                            // so it won't render until the new ones arrive.
+                            details = null,
+                            detailLoading = true,
                             availability = Availability.AVAILABLE,
                         )
                     }
                     android.util.Log.i(
                         "VodDiag",
-                        "precheck swapped $resolvedId → $workingId (auto-pick from search)",
+                        "precheck swapped $resolvedId → $workingId — reloading details",
                     )
+                    // Reload details for the working subjectId so the
+                    // episode picker can render. Without this the picker
+                    // stayed empty after a swap because state.details still
+                    // held the dead subjectId's (empty) season list.
+                    runCatching {
+                        repo.details(workingId, titleHint = title)
+                    }.onSuccess { newD ->
+                        val curNow = _state.value
+                        if (curNow.detailItem?.subjectId == workingId &&
+                            curNow.screen == Screen.DETAIL
+                        ) {
+                            _state.update {
+                                it.copy(details = newD, detailLoading = false)
+                            }
+                            // Enumerate episodes for the working id too —
+                            // the original enumeration ran against the
+                            // dead id, so the picker would show phantom
+                            // episode counts without this re-run.
+                            enumerateEpisodesInBackground(workingId, newD)
+                        }
+                    }.onFailure {
+                        _state.update { it.copy(detailLoading = false) }
+                    }
                 } else {
                     _state.update {
                         it.copy(
