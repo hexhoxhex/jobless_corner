@@ -1155,29 +1155,93 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             // upstream skipped that path and the precheck spuriously
             // marked the show UNAVAILABLE.
             val s1 = d.seasons.firstOrNull()?.season ?: 1
-            val result = runCatching {
+            val title = d.title.ifBlank { _state.value.detailItem?.title.orEmpty() }
+            val isSeries = d.isSeries
+            suspend fun tryResolve(id: String) = runCatching {
                 repo.resolvePlay(
-                    subjectId = resolvedId,
+                    subjectId = id,
                     resolution = quality,
-                    season = if (d.isSeries) s1 else null,
-                    episode = if (d.isSeries) 1 else null,
+                    season = if (isSeries) s1 else null,
+                    episode = if (isSeries) 1 else null,
                     dub = dub,
-                    titleHint = d.title,
+                    titleHint = title,
                 )
             }
-            val ok = result.isSuccess &&
-                (result.getOrNull()?.mediaUrl?.isNotBlank() == true)
+
+            // 1. Try the tapped subjectId first.
+            val first = tryResolve(resolvedId)
+            var workingId: String? = if (first.isSuccess &&
+                first.getOrNull()?.mediaUrl?.isNotBlank() == true) {
+                resolvedId
+            } else null
+
+            // 2. If the tapped subjectId has no streams, AUTO-PICK from search
+            //    instead of telling the user to "pick from search" manually.
+            //    aoneroom's home/Popular Series rows surface different
+            //    subjectIds than search — e.g. HotD shows on Popular Series
+            //    as 5373384118887662624 (no streams) while search returns
+            //    7721864815710718808 (works). We search the same title,
+            //    iterate matching items, and swap to the first playable one.
+            //    Transparent to the user — they see "Play" not "pick".
+            if (workingId == null && title.isNotBlank()) {
+                val matches = runCatching {
+                    repo.search(keyword = title, type = SubjectType.ALL)
+                }.getOrNull().orEmpty()
+                val titleLower = title.lowercase().trim()
+                val candidates = matches.asSequence()
+                    .filter { it.subjectId != resolvedId }
+                    .filter {
+                        val t = it.title.lowercase().trim()
+                        t == titleLower || t.startsWith(titleLower) ||
+                            titleLower.startsWith(t)
+                    }
+                    .take(3) // bounded — 3 attempts × ~1s each = ~3s budget
+                for (cand in candidates) {
+                    android.util.Log.i(
+                        "VodDiag",
+                        "precheck fallback: tapped $resolvedId failed, " +
+                            "trying $cand.subjectId for \"${cand.title}\"",
+                    )
+                    val r = tryResolve(cand.subjectId)
+                    if (r.isSuccess && r.getOrNull()?.mediaUrl?.isNotBlank() == true) {
+                        workingId = cand.subjectId
+                        break
+                    }
+                }
+            }
+
             // Be careful not to overwrite the user's state if they've moved on.
             val cur = _state.value
             if (cur.detailItem?.subjectId == resolvedId &&
                 cur.screen == Screen.DETAIL
             ) {
-                _state.update {
-                    it.copy(
-                        availability =
-                            if (ok) Availability.AVAILABLE
-                            else Availability.UNAVAILABLE,
+                if (workingId != null && workingId != resolvedId) {
+                    // SWAP: route future plays through the working subjectId.
+                    // playMovie/playEpisode read from `this.subjectId`, and
+                    // detailItem.subjectId drives the UI gating, so update
+                    // both. Save a knownCover under the new id so any later
+                    // refresh has the poster.
+                    knownCovers[cur.detailItem.subjectId]
+                        ?.let { knownCovers[workingId] = it }
+                    subjectId = workingId
+                    _state.update {
+                        it.copy(
+                            detailItem = it.detailItem?.copy(subjectId = workingId),
+                            availability = Availability.AVAILABLE,
+                        )
+                    }
+                    android.util.Log.i(
+                        "VodDiag",
+                        "precheck swapped $resolvedId → $workingId (auto-pick from search)",
                     )
+                } else {
+                    _state.update {
+                        it.copy(
+                            availability =
+                                if (workingId != null) Availability.AVAILABLE
+                                else Availability.UNAVAILABLE,
+                        )
+                    }
                 }
             }
         }
