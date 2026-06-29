@@ -1,0 +1,13 @@
+# Next.js
+.next
+out
+node_modules
+*.log
+
+# Tauri / Rust
+src-tauri/target
+src-tauri/Cargo.lock.tmp
+
+# Editor
+.vscode
+.idea
