@@ -24,6 +24,10 @@ composeMultiplatform = "1.7.3"
 # VLCJ — libvlc Java bindings for HLS/DASH/MP4 playback on desktop.
 # Standalone JAR; bundles libvlc binaries via the natives flavor.
 vlcj = "4.10.1"
+# Coil 3 — multiplatform image loading (supports Compose Desktop).
+# coil2 in :app is Android-only; coil3 has a Kotlin Multiplatform
+# build with the same Coil/AsyncImage composables.
+coil3 = "3.0.4"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -64,6 +68,8 @@ lottie-compose = { group = "com.airbnb.android", name = "lottie-compose", versio
 # auto-locate libvlc on Mac/Windows; user only needs VLC installed (or we
 # bundle libvlc into the packaged installer later).
 vlcj = { group = "uk.co.caprica", name = "vlcj", version.ref = "vlcj" }
+coil3-compose = { group = "io.coil-kt.coil3", name = "coil-compose", version.ref = "coil3" }
+coil3-network-okhttp = { group = "io.coil-kt.coil3", name = "coil-network-okhttp", version.ref = "coil3" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

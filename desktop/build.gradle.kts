@@ -40,6 +40,11 @@ dependencies {
     // separately by the user's VLC install for now; later we'll bundle
     // libvlc into the packaged installer.
     implementation(libs.vlcj)
+
+    // Coil 3 multiplatform — real poster images. Replaces the 2-letter
+    // placeholder tiles from the v1 commit.
+    implementation(libs.coil3.compose)
+    implementation(libs.coil3.network.okhttp)
 }
 
 compose.desktop {

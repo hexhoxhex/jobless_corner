@@ -131,6 +131,107 @@ object H5Api {
         return parseRows(raw)
     }
 
+    /** Detail for a single title. Returns description + first season's
+     *  episode count (if series). Matches the Android Repository.details()
+     *  return shape but lighter — desktop doesn't need the full episode
+     *  enumeration walk yet. */
+    fun detail(subjectId: String, titleHint: String): H5Detail {
+        ensureWarm()
+        val path = lookupDetailPath(subjectId, titleHint)
+        val raw = signedGet(path)
+        return parseDetail(raw, subjectId)
+    }
+
+    /** Play call — returns the first playable stream URL + a list of all
+     *  qualities. Falls back to subject-level (se=0, ep=0) when the asked
+     *  (se, ep) returns 0 streams, matching the Android v0.1.93 fix. */
+    fun play(
+        subjectId: String,
+        season: Int = 0,
+        episode: Int = 0,
+        detailPath: String = "",
+    ): H5Play {
+        ensureWarm()
+        val ctype = "application/json; charset=utf-8"
+        val body = """{"subjectId":"$subjectId","se":$season,"ep":$episode,"detailPath":${jsonStr(detailPath)}}"""
+        val raw = signedPost("/wefeed-h5api-bff/subject/play", body, ctype)
+        val first = parsePlay(raw)
+        if (first.streams.isNotEmpty() || (season == 0 && episode == 0)) return first
+        // Subject-level fallback for HBO-tier titles (HotD, etc.).
+        val fbBody = """{"subjectId":"$subjectId","se":0,"ep":0,"detailPath":${jsonStr(detailPath)}}"""
+        val fbRaw = signedPost("/wefeed-h5api-bff/subject/play", fbBody, ctype)
+        val fb = parsePlay(fbRaw)
+        return if (fb.streams.isNotEmpty()) fb else first
+    }
+
+    /** Locate a detailPath for a subjectId via a title search. Mirrors
+     *  Android H5Api.lookupDetailPath. The path is what /subject/detail
+     *  needs; it isn't a clean URL slug, it's a server-side identifier. */
+    private fun lookupDetailPath(subjectId: String, titleHint: String): String {
+        val results = search(titleHint, perPage = 6)
+        val match = results.firstOrNull { it.subjectId == subjectId }
+            ?: return ""  // empty path is OK — server resolves by subjectId
+        return match.subjectId  // detailPath happens to equal subjectId for the H5 detail endpoint
+    }
+
+    private fun signedGet(path: String, query: String = ""): String {
+        ensureWarm()
+        val ts = System.currentTimeMillis()
+        val full = if (query.isBlank()) "$H5_BASE$path" else "$H5_BASE$path?$query"
+        val req = Request.Builder()
+            .url(full)
+            .header("User-Agent", BROWSER_UA)
+            .header("Accept", "application/json")
+            .header("Referer", PAGE_REFERER)
+            .header("X-Client-Token", clientToken(ts))
+            .header("x-tr-signature", trSignature("GET", "application/json", "", full, null, ts))
+            .header("X-Client-Info", X_CLIENT_INFO)
+            .header("x-request-lang", "en")
+            .header("X-Client-Status", "0")
+            .also { b -> bearer?.let { b.header("Authorization", "Bearer $it") } }
+            .get().build()
+        return client.newCall(req).execute().use { r ->
+            absorbXUser(r.header("x-user"))
+            r.body?.string().orEmpty()
+        }
+    }
+
+    private fun parseDetail(raw: String, subjectId: String): H5Detail = runCatching {
+        val data = JSONObject(raw).optJSONObject("data") ?: return@runCatching H5Detail(subjectId, "", "", emptyList(), 0)
+        val subject = data.optJSONObject("subject") ?: data
+        val resourceObj = data.optJSONObject("resource") ?: subject.optJSONObject("resource") ?: JSONObject()
+        val seasonsArr = resourceObj.optJSONArray("seasons") ?: JSONObject().optJSONArray("seasons")
+        val seasons = if (seasonsArr == null) emptyList() else {
+            (0 until seasonsArr.length()).mapNotNull { i ->
+                val s = seasonsArr.optJSONObject(i) ?: return@mapNotNull null
+                H5Season(season = s.optInt("season"), episodes = s.optInt("maxEp"))
+            }
+        }
+        H5Detail(
+            subjectId = subjectId,
+            title = subject.optString("title"),
+            description = subject.optString("description"),
+            seasons = seasons,
+            type = subject.optInt("subjectType"),
+        )
+    }.getOrDefault(H5Detail(subjectId, "", "", emptyList(), 0))
+
+    private fun parsePlay(raw: String): H5Play = runCatching {
+        val data = JSONObject(raw).optJSONObject("data") ?: return@runCatching H5Play(emptyList())
+        val streamsArr = data.optJSONArray("streams") ?: data.optJSONArray("list")
+            ?: return@runCatching H5Play(emptyList())
+        val streams = (0 until streamsArr.length()).mapNotNull { i ->
+            val s = streamsArr.optJSONObject(i) ?: return@mapNotNull null
+            val url = s.optString("url")
+            if (url.isBlank()) null else H5Stream(
+                url = url,
+                resolution = s.optInt("resolution"),
+                format = s.optString("format"),
+            )
+        }
+        H5Play(streams = streams)
+    }.getOrDefault(H5Play(emptyList()))
+
     private fun signedPost(path: String, body: String, ctype: String): String {
         val ts = System.currentTimeMillis()
         val req = Request.Builder()
@@ -248,3 +349,29 @@ data class H5Row(
     val title: String,
     val items: List<H5Item>,
 )
+
+@JsonClass(generateAdapter = true)
+data class H5Detail(
+    val subjectId: String,
+    val title: String,
+    val description: String,
+    val seasons: List<H5Season>,
+    val type: Int,
+) {
+    val isSeries: Boolean get() = type == 1 || seasons.isNotEmpty()
+}
+
+@JsonClass(generateAdapter = true)
+data class H5Season(val season: Int, val episodes: Int)
+
+@JsonClass(generateAdapter = true)
+data class H5Play(val streams: List<H5Stream>)
+
+@JsonClass(generateAdapter = true)
+data class H5Stream(
+    val url: String,
+    val resolution: Int,
+    val format: String,
+) {
+    val label: String get() = if (resolution > 0) "${resolution}P" else format.ifBlank { "Auto" }
+}
