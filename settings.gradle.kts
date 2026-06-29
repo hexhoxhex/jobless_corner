@@ -30,3 +30,8 @@ dependencyResolutionManagement {
 
 rootProject.name = "MovieBoxTV"
 include(":app")
+// Desktop (Mac + Windows) build target via Compose Multiplatform.
+// Lives next to :app — shares this repo, doesn't touch the Android module.
+// Currently brings up its own copy of the network + crypto layer; will
+// share with :app via a future :shared commonMain module once both are stable.
+include(":desktop")

@@ -18,6 +18,12 @@ nanohttpd = "2.3.1"
 zxing = "3.5.3"
 nextlibMedia3 = "0.8.4"
 lottie = "6.6.0"
+# Compose Multiplatform — desktop (Mac + Windows) target. Compatible
+# with Kotlin 2.0.21 (matches kotlin version above).
+composeMultiplatform = "1.7.3"
+# VLCJ — libvlc Java bindings for HLS/DASH/MP4 playback on desktop.
+# Standalone JAR; bundles libvlc binaries via the natives flavor.
+vlcj = "4.10.1"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -54,9 +60,16 @@ room-compiler = { group = "androidx.room", name = "room-compiler", version.ref =
 nanohttpd = { group = "org.nanohttpd", name = "nanohttpd", version.ref = "nanohttpd" }
 zxing-core = { group = "com.google.zxing", name = "core", version.ref = "zxing" }
 lottie-compose = { group = "com.airbnb.android", name = "lottie-compose", version.ref = "lottie" }
+# Desktop only — VLCJ for video playback. nativediscovery + java-natives
+# auto-locate libvlc on Mac/Windows; user only needs VLC installed (or we
+# bundle libvlc into the packaged installer later).
+vlcj = { group = "uk.co.caprica", name = "vlcj", version.ref = "vlcj" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
+# Compose Multiplatform Desktop plugin — adds desktop targets + the
+# native-image packager that produces .dmg (Mac) and .msi/.exe (Windows).
+jetbrains-compose = { id = "org.jetbrains.compose", version.ref = "composeMultiplatform" }
