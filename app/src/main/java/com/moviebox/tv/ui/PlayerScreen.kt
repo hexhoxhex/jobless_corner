@@ -2493,8 +2493,21 @@ private fun VideoPlayer(
         // can't get stuck composing into a SurfaceFlinger layer that the
         // OS has throttled. So we lose nothing by skipping the watchdog
         // here, and lose a major source of user-visible flapping.
+        // Skip the freeze watchdog when:
+        //   - tunneling is ON (old reason: currentPosition stops ticking
+        //     under tunneling so the watchdog sees a stationary position
+        //     and fires every 30s on perfectly healthy playback)
+        //   - noTunneling is forced ON for this channel (new reason,
+        //     v0.1.109: FOX USA / 24 kHz channels run on TextureView
+        //     after the audio rebuild; that path also has choppy
+        //     position reporting at 60 fps that the watchdog mistakes
+        //     for a freeze. Symptom: 30s "stop and play" cadence
+        //     visible to the user, exactly 25 fires → MAX_RESOLVE_-
+        //     FAILURES_BEFORE_WEBVIEW → FALLBACK_WEB → Adscore-blocked
+        //     black screen. Already-degraded channel; another small
+        //     degradation (no watchdog) is fine.
         val tunnelingOn = trackSelector.parameters.tunnelingEnabled
-        if (liveState.value && !tunnelingOn) {
+        if (liveState.value && !tunnelingOn && !noTunneling) {
             freezeWatchdog.start(exo) {
                 android.util.Log.w(
                     "LiveDiag",
