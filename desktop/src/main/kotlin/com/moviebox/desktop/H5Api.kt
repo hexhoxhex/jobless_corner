@@ -107,14 +107,14 @@ object H5Api {
     }
 
     /** Home rows — same call themoviebox.org's SPA makes on first load.
-     *  Returns the list of row buckets the site uses ("Continue Watching",
-     *  "Popular Series", "Trending Now", "Premium VIP HD", etc.). Each
-     *  row carries its own items. Title comes from the row's name. */
+     *  This is a signed GET with `host` as a query param, NOT a POST
+     *  with body (that endpoint returns 404). The actual response shape
+     *  uses `operatingList` at the root with each entry carrying `title`
+     *  and `subjects[]` (or a nested `banner.items[].subject` for the
+     *  hero BANNER row). */
     fun home(): List<H5Row> {
         ensureWarm()
-        val ctype = "application/json; charset=utf-8"
-        val body = """{"host":"themoviebox.org"}"""
-        val raw = signedPost("/wefeed-h5api-bff/home", body, ctype)
+        val raw = signedGet("/wefeed-h5api-bff/home", "host=themoviebox.org")
         return parseRows(raw)
     }
 
@@ -241,45 +241,64 @@ object H5Api {
         }
     }
 
+    /** Parse one item from the H5 subject shape. The fields the site
+     *  uses don't match the names I guessed in v1; this is the
+     *  verified-against-live-response decoder. */
+    private fun parseSubject(o: JSONObject): H5Item? {
+        // The "subject" inside banner.items has the same shape as the
+        // entries in operatingList[i].subjects[j]. Both go through here.
+        val subj = o.optJSONObject("subject") ?: o
+        val id = subj.optString("subjectId")
+        if (id.isBlank()) return null
+        val cover = subj.optJSONObject("cover")
+        val coverUrl = cover?.optString("url").orEmpty()
+            .ifBlank { subj.optString("imageUrl") }
+        // imdbRatingValue is a STRING in the API ("4.8"); optDouble
+        // returns NaN for strings so we parse it manually.
+        val ratingStr = subj.optString("imdbRatingValue")
+        val rating = ratingStr.toDoubleOrNull()?.takeIf { it > 0 }
+        return H5Item(
+            subjectId = id,
+            title = subj.optString("title"),
+            type = subj.optInt("subjectType"),
+            year = subj.optString("releaseDate").take(4).toIntOrNull(),
+            coverUrl = coverUrl,
+            rating = rating,
+        )
+    }
+
     private fun parseItems(raw: String): List<H5Item> = runCatching {
         val data = JSONObject(raw).optJSONObject("data") ?: return@runCatching emptyList()
         val items = data.optJSONArray("items") ?: return@runCatching emptyList()
         (0 until items.length()).mapNotNull { idx ->
             val o = items.optJSONObject(idx) ?: return@mapNotNull null
-            H5Item(
-                subjectId = o.optString("subjectId"),
-                title = o.optString("title"),
-                type = o.optInt("type"),
-                year = o.optString("releaseDate").take(4).toIntOrNull(),
-                coverUrl = o.optString("imageUrl"),
-                rating = o.optDouble("imdbRatingValue", 0.0).takeIf { it > 0 },
-            )
+            parseSubject(o)
         }
     }.getOrDefault(emptyList())
 
     private fun parseRows(raw: String): List<H5Row> = runCatching {
         val data = JSONObject(raw).optJSONObject("data") ?: return@runCatching emptyList()
-        val rows = data.optJSONArray("operatingList")
-            ?: data.optJSONArray("homeList")
-            ?: return@runCatching emptyList()
+        val rows = data.optJSONArray("operatingList") ?: return@runCatching emptyList()
         (0 until rows.length()).mapNotNull { rIdx ->
             val r = rows.optJSONObject(rIdx) ?: return@mapNotNull null
-            val title = r.optString("name").ifBlank { r.optString("title") }
-            val items = r.optJSONArray("subjectList")
-                ?: r.optJSONArray("items")
-                ?: return@mapNotNull null
-            val parsed = (0 until items.length()).mapNotNull { idx ->
-                val o = items.optJSONObject(idx) ?: return@mapNotNull null
-                H5Item(
-                    subjectId = o.optString("subjectId"),
-                    title = o.optString("title"),
-                    type = o.optInt("type"),
-                    year = o.optString("releaseDate").take(4).toIntOrNull(),
-                    coverUrl = o.optString("imageUrl"),
-                    rating = o.optDouble("imdbRatingValue", 0.0).takeIf { it > 0 },
-                )
+            val title = r.optString("title")
+            // Two layouts: regular rows have `subjects[]` directly;
+            // BANNER rows wrap in `banner.items[].subject`.
+            val direct = r.optJSONArray("subjects")
+            val bannerItems = r.optJSONObject("banner")?.optJSONArray("items")
+            val parsed = mutableListOf<H5Item>()
+            if (direct != null) {
+                for (i in 0 until direct.length()) {
+                    direct.optJSONObject(i)?.let { parseSubject(it) }?.let { parsed += it }
+                }
             }
-            if (parsed.isEmpty()) null else H5Row(title = title, items = parsed)
+            if (bannerItems != null) {
+                for (i in 0 until bannerItems.length()) {
+                    bannerItems.optJSONObject(i)?.let { parseSubject(it) }?.let { parsed += it }
+                }
+            }
+            if (parsed.isEmpty() || title.isBlank()) null
+            else H5Row(title = title, items = parsed)
         }
     }.getOrDefault(emptyList())
 

@@ -61,10 +61,32 @@ compose.desktop {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi)
             packageName = "Vijana BaruBaru"
             // MAJOR must be > 0 per packager — start at 1.0.0.
-            packageVersion = "1.0.0"
+            packageVersion = "1.0.1"
             description = "Vijana BaruBaru — desktop edition. Streams aoneroom catalog + dlhd live TV."
             vendor = "hexhoxhex"
-            // App icon: stub for now; replace with .icns / .ico later.
+            // Per-OS app icons. Same source PNG as the Android launcher
+            // (mipmap-xxxhdpi/ic_launcher.png) so the brand matches
+            // across phone, TV, and desktop. .ico has multiple
+            // resolutions baked in (16/32/48/64/128/256) so Windows
+            // Explorer + Start menu + taskbar all pull crisp tiles.
+            windows {
+                iconFile.set(project.file("icons/app.ico"))
+                // Add a Start menu group + per-user install option so
+                // the user can pin "Vijana BaruBaru" without admin.
+                menuGroup = "Vijana BaruBaru"
+                // shortcut: pin to taskbar + start menu by default.
+                shortcut = true
+                // Stable UUID so future MSI builds UPGRADE rather than
+                // installing a second copy.
+                upgradeUuid = "5a4dc8e3-d4b2-4c1f-9b9a-7c6e5f2a1b3d"
+            }
+            macOS {
+                // Same source — when we add the Mac job, this is what
+                // produces the .icns.
+                iconFile.set(project.file("icons/app.ico"))
+                bundleID = "com.moviebox.desktop"
+            }
         }
     }
 }
+
