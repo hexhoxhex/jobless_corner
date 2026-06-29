@@ -1449,7 +1449,17 @@ private fun VideoPlayer(
     // SurfaceView throttles non-tunneled 50fps to ~7fps and tunneled
     // 50fps slow-motions; the TextureView (GPU compositor) presents the
     // full frame rate at correct speed. Resets per channel.
-    var useTextureView by remember(mediaUrl) { mutableStateOf(false) }
+    // Default to TextureView when the channel is on the no-tunneling list.
+    // Reason: tunneling was enabled in the first place because SurfaceFlinger
+    // throttles the BLAST surface to ~31 fps for 60fps live on this TCL panel
+    // (user-visible as dark/choppy video). With tunneling forcibly OFF for
+    // 24 kHz audio channels (FOX USA), we MUST also avoid SurfaceView or the
+    // video composites at the same ~31 fps SurfaceFlinger limit → user saw
+    // "audio works, video black" after v0.1.107's prepare-after-rebuild
+    // fix landed. TextureView (GPU compositor) sidesteps that limit.
+    var useTextureView by remember(mediaUrl, noTunneling) {
+        mutableStateOf(noTunneling)
+    }
     var lastKey by remember { mutableStateOf<String?>(null) }
     val liveState = rememberUpdatedState(isLive)
 
@@ -1499,7 +1509,15 @@ private fun VideoPlayer(
         }
     }
 
-    val exo = remember(isLive, preferSoftwareDecoder) {
+    // CRITICAL: noTunneling is in the remember key. Without it, when
+    // v0.1.103's onAudioTrackInitFailed → markChannelNeedsNoTunneling
+    // fired, the trackSelector was recreated (it IS keyed on noTunneling)
+    // but `exo` kept the OLD trackSelector with tunneling=on. The rebuild
+    // looked like it ran in the logs but the player wasn't actually
+    // remade — next prepare hit the same 24 kHz AudioTrack crash → black
+    // screen. Including noTunneling here forces a fresh ExoPlayer with
+    // the new tunneling-off track selector when the channel is marked.
+    val exo = remember(isLive, preferSoftwareDecoder, noTunneling) {
         // Live streams (public CDN, CORS open, no auth) want a CLEAN factory —
         // injecting the MovieBox Referer would either be ignored or rejected.
         // VOD reuses the header-injecting factory the rest of the app relies on.
@@ -1706,6 +1724,50 @@ private fun VideoPlayer(
                     )
                 }
 
+                // Strip FfmpegAudioRenderer when this channel hit the
+                // 24 kHz AudioTrack crash. NextLib's FfmpegAudioRenderer
+                // constructs its own AudioSink internally — bypasses the
+                // buildAudioSink override that has SonicAudioProcessor in
+                // its chain. Result: 24 kHz audio reaches AudioTrack at 24
+                // kHz and the TV refuses to allocate the AudioTrack →
+                // ERROR_CODE_AUDIO_TRACK_INIT_FAILED → black screen.
+                // Stripping it forces the platform MediaCodecAudioRenderer
+                // (which DOES use our buildAudioSink) → SonicAudioProcessor
+                // resamples 24 → 48 → AudioTrack opens.
+                // EXTENSION_RENDERER_MODE_OFF DOESN'T DO THIS for NextLib's
+                // audio path; explicit removeAll after super does.
+                override fun buildAudioRenderers(
+                    context: android.content.Context,
+                    extensionRendererMode: Int,
+                    mediaCodecSelector: androidx.media3.exoplayer.mediacodec
+                        .MediaCodecSelector,
+                    enableDecoderFallback: Boolean,
+                    audioSink: androidx.media3.exoplayer.audio.AudioSink,
+                    eventHandler: android.os.Handler,
+                    eventListener: androidx.media3.exoplayer.audio
+                        .AudioRendererEventListener,
+                    out: ArrayList<androidx.media3.exoplayer.Renderer>,
+                ) {
+                    super.buildAudioRenderers(
+                        context, extensionRendererMode, mediaCodecSelector,
+                        enableDecoderFallback, audioSink, eventHandler,
+                        eventListener, out,
+                    )
+                    if (noTunneling) {
+                        val beforeA = out.size
+                        out.removeAll {
+                            it is io.github.anilbeesetti.nextlib.media3ext
+                                .ffdecoder.FfmpegAudioRenderer
+                        }
+                        android.util.Log.i(
+                            "LiveDiag",
+                            "RENDERERS noTunneling=true: removed " +
+                                "${beforeA - out.size} ffmpeg audio renderer(s); " +
+                                "${out.size} audio renderer(s) left (platform)",
+                        )
+                    }
+                }
+
                 // Universal audio-rate fix. Some live channels carry odd
                 // sample rates (FOX USA = 24 kHz) that this TCL's AudioTrack
                 // refuses to open — the failure cascaded to the WebView
@@ -1793,7 +1855,14 @@ private fun VideoPlayer(
         // "should we start a Dream" check that fires independently.
     }
 
-    LaunchedEffect(mediaUrl, contentKey) {
+    // CRITICAL: include the same keys as `exo`'s remember(). When the
+    // noTunneling rebuild fires, exo is recreated as a fresh instance —
+    // but without these keys here, this effect won't re-run, so the new
+    // exo never gets setMediaItem + prepare called on it. Result: rebuild
+    // log fires, new player initialised, but no media source attached →
+    // sits idle, no /inner polls, screen stays black. Was the v0.1.106
+    // residual bug: audio strip ran correctly but playback never resumed.
+    LaunchedEffect(mediaUrl, contentKey, preferSoftwareDecoder, noTunneling) {
         if (mediaUrl.isBlank()) return@LaunchedEffect
         val item = if (isLive) {
             // 12s target offset = our "head space" buffer behind the live edge.
