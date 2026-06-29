@@ -4,10 +4,10 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>Vijana BaruBaru — Download</title>
-<meta name="description" content="Vijana BaruBaru — hundreds of live TV channels plus a full movie & series library for Android TV and phone. Download the app." />
+<meta name="description" content="Vijana BaruBaru — hundreds of live TV channels plus a full movie & series library on Android TV, Android phone, and Windows. Download the app." />
 <meta name="theme-color" content="#0b0f14" />
 <meta property="og:title" content="Vijana BaruBaru" />
-<meta property="og:description" content="Live TV & movies for Android TV and phone." />
+<meta property="og:description" content="Live TV & movies for Android TV, phone, and Windows." />
 <style>
   :root{--bg:#0b0f14;--bg2:#121821;--card:#161e29;--text:#eef2f7;--muted:#93a1b3;
     --accent:#2bd4a4;--accent2:#20b88c;--border:#243042}
@@ -57,11 +57,15 @@
     <div class="brand"><span class="dot">V</span> Vijana BaruBaru</div>
 
     <div class="hero">
-      <span class="pill">● Android TV &amp; phone</span>
+      <span class="pill" id="osPill">● Android TV &amp; phone</span>
       <h1>Live TV &amp; movies,<br/>on every screen.</h1>
-      <p>Hundreds of live channels and a full movie &amp; series library. Install the app and pair your phone as a remote.</p>
+      <p>Hundreds of live channels and a full movie &amp; series library. Android TV, Android phone, and now Windows desktop.</p>
     </div>
 
+    <!-- Primary download card. The button's text/href is swapped to
+         the user's likely OS via the JS at the bottom — Windows users
+         get MSI by default, everyone else gets APK. The "Other
+         downloads" card below always shows both. -->
     <div class="card">
       <a class="btn" id="dl" href="https://github.com/hexhoxhex/jobless_corner/releases/latest" rel="noopener">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12"/><path d="M7 11l5 5 5-5"/><path d="M5 20h14"/></svg>
@@ -70,22 +74,62 @@
       <div class="meta">
         <span>Version <b id="ver">latest</b></span>
         <span><b id="size">—</b></span>
-        <span>Android <b>8.0+</b></span>
+        <span id="osReq">Android <b>8.0+</b></span>
       </div>
-      <div class="tip">
+      <div class="tip" id="apkTip">
         <span class="i">!</span>
         <span>Use <b>Chrome</b> to download — if the download stops early it resumes instead of saving a broken file. If you ever see <b>"problem parsing the package"</b>, the download was cut short — just download again.</span>
       </div>
+      <div class="tip" id="msiTip" style="display:none">
+        <span class="i">!</span>
+        <span>Windows SmartScreen will warn on first launch (build isn't code-signed yet) — click <b>More info</b> → <b>Run anyway</b>. You'll also need <b>VLC</b> installed from <a href="https://videolan.org" target="_blank" rel="noopener">videolan.org</a> for playback; future builds will bundle it.</span>
+      </div>
     </div>
 
-    <div class="card">
-      <h3>Install in 4 steps</h3>
+    <!-- Per-OS install steps. JS toggles which card is visible based
+         on detected platform; both remain available via the "Other
+         downloads" card so e.g. a phone user can grab the MSI for
+         their PC. -->
+    <div class="card" id="apkSteps">
+      <h3>Install on Android in 4 steps</h3>
       <ul class="steps">
         <li>Tap <b style="color:var(--accent)">&nbsp;Download APK&nbsp;</b> and let it finish completely.</li>
         <li>Open the downloaded file (check your Downloads if nothing happens).</li>
         <li>If asked, allow your browser to <b>install unknown apps</b> — just once.</li>
         <li>Tap <b>Install</b>. Updates land inside the app from then on.</li>
       </ul>
+    </div>
+
+    <div class="card" id="msiSteps" style="display:none">
+      <h3>Install on Windows in 3 steps</h3>
+      <ul class="steps">
+        <li>Click <b style="color:var(--accent)">&nbsp;Download for Windows&nbsp;</b> and let the MSI finish downloading.</li>
+        <li>Double-click the MSI. If SmartScreen blocks it, hit <b>More info</b> → <b>Run anyway</b>.</li>
+        <li>Launch <b>Vijana BaruBaru</b> from the Start menu. (Install VLC from videolan.org first for video playback.)</li>
+      </ul>
+    </div>
+
+    <!-- Cross-platform jump table. Always visible so any user can grab
+         the other format. Updated dynamically by JS — empty links
+         render as disabled placeholders until the release JSON loads. -->
+    <div class="card">
+      <h3>Other downloads</h3>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <a id="altApk" class="alt" style="display:flex;justify-content:space-between;align-items:center;padding:11px 14px;border:1px solid var(--border);border-radius:11px;text-decoration:none;color:var(--text);font-size:14px"
+           href="https://github.com/hexhoxhex/jobless_corner/releases/latest" rel="noopener">
+          <span><b>Android</b> · APK</span>
+          <span class="ch" id="altApkSize">—</span>
+        </a>
+        <a id="altMsi" class="alt" style="display:flex;justify-content:space-between;align-items:center;padding:11px 14px;border:1px solid var(--border);border-radius:11px;text-decoration:none;color:var(--text);font-size:14px"
+           href="https://github.com/hexhoxhex/jobless_corner/releases/latest" rel="noopener">
+          <span><b>Windows</b> · MSI</span>
+          <span class="ch" id="altMsiSize">—</span>
+        </a>
+        <div style="padding:11px 14px;border:1px solid var(--border);border-radius:11px;color:var(--muted);font-size:14px;display:flex;justify-content:space-between;align-items:center">
+          <span><b>Mac</b> · DMG</span>
+          <span class="ch">Coming soon</span>
+        </div>
+      </div>
     </div>
 
     <div class="card" id="verifyCard" style="display:none">
@@ -102,22 +146,65 @@
 
 <script>
   const REPO = "hexhoxhex/jobless_corner";
+  // Heuristic OS detection. Windows is the only desktop platform we
+  // ship right now (Mac DMG coming later) so anything matching Win* gets
+  // the MSI as the primary download; everything else defaults to APK
+  // (Android phones, Android TV browsers, fallback). userAgentData
+  // is the modern API; userAgent is the fallback for older browsers.
+  function detectOs() {
+    const uad = navigator.userAgentData;
+    if (uad && uad.platform) {
+      if (/windows/i.test(uad.platform)) return "windows";
+      if (/android/i.test(uad.platform)) return "android";
+      if (/mac/i.test(uad.platform))     return "mac";
+    }
+    const ua = navigator.userAgent || "";
+    if (/Windows/i.test(ua) && !/Android/i.test(ua)) return "windows";
+    if (/Android/i.test(ua))                          return "android";
+    if (/Mac/i.test(ua))                              return "mac";
+    return "other";
+  }
+
+  function fmt(bytes) { return (bytes / 1e6).toFixed(1) + " MB"; }
+
   (async () => {
+    const os = detectOs();
     try {
       const r = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`,
         { headers: { "Accept": "application/vnd.github+json" } });
       if (!r.ok) return;
       const rel = await r.json();
-      const apk = (rel.assets || []).find(a => /\.apk$/i.test(a.name));
-      if (apk) {
-        document.getElementById("dl").href = apk.browser_download_url;
-        document.getElementById("size").textContent = (apk.size / 1e6).toFixed(1) + " MB";
-      }
       if (rel.tag_name) document.getElementById("ver").textContent = rel.tag_name;
-      const m = (rel.body || "").match(/SHA-256:\s*`?([a-f0-9]{64})`?/i);
-      if (m) {
-        document.getElementById("sha").textContent = m[1];
-        document.getElementById("verifyCard").style.display = "";
+
+      const apk = (rel.assets || []).find(a => /\.apk$/i.test(a.name));
+      const msi = (rel.assets || []).find(a => /\.msi$/i.test(a.name));
+
+      // "Other downloads" card — always populated when assets exist.
+      if (apk) {
+        document.getElementById("altApk").href = apk.browser_download_url;
+        document.getElementById("altApkSize").textContent = fmt(apk.size);
+      }
+      if (msi) {
+        document.getElementById("altMsi").href = msi.browser_download_url;
+        document.getElementById("altMsiSize").textContent = fmt(msi.size);
+      }
+
+      // Primary button + install steps card swap based on detected OS.
+      // Windows users seeing the page for the first time get the MSI as
+      // the headline action; everyone else keeps the APK default.
+      if (os === "windows" && msi) {
+        document.getElementById("dl").href      = msi.browser_download_url;
+        document.getElementById("dlLabel").textContent = "Download for Windows";
+        document.getElementById("size").textContent    = fmt(msi.size);
+        document.getElementById("osReq").innerHTML     = "Windows <b>10+</b>";
+        document.getElementById("osPill").textContent  = "● Windows desktop";
+        document.getElementById("apkTip").style.display   = "none";
+        document.getElementById("msiTip").style.display   = "";
+        document.getElementById("apkSteps").style.display = "none";
+        document.getElementById("msiSteps").style.display = "";
+      } else if (apk) {
+        document.getElementById("dl").href      = apk.browser_download_url;
+        document.getElementById("size").textContent = fmt(apk.size);
       }
     } catch (e) {}
   })();

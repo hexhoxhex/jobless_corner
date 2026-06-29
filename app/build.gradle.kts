@@ -93,6 +93,12 @@ android {
 }
 
 dependencies {
+    // Shared with :desktop. H5 signing crypto + constants live here so
+    // a patch lands on Android and Desktop at once. The :app keeps its
+    // own thicker Constants object with Android-specific values (client
+    // fingerprint, etc.) that don't make sense on Desktop.
+    implementation(project(":shared"))
+
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.compose)

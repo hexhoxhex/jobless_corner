@@ -14,6 +14,10 @@ repositories {
 }
 
 dependencies {
+    // Shared with :app — signing crypto + shared H5 constants.
+    // A patch to signing edits :shared/Crypto.kt once and lands on both.
+    implementation(project(":shared"))
+
     // Compose Multiplatform desktop. compose.desktop.currentOs picks the
     // right native artifact (windows-x86_64, macos-arm64, macos-x86_64, etc.)
     // for the build host. Production packaging uses the same logic via the

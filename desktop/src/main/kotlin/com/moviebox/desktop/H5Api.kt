@@ -1,8 +1,9 @@
 package com.moviebox.desktop
 
+import com.moviebox.shared.net.Constants as SC
+import com.moviebox.shared.net.Crypto
 import com.squareup.moshi.JsonClass
 import com.squareup.moshi.Moshi
-import com.squareup.moshi.adapter
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import okhttp3.Cookie
 import okhttp3.CookieJar
@@ -12,35 +13,21 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
-import java.security.MessageDigest
-import java.util.Base64
-import javax.crypto.Mac
-import javax.crypto.spec.SecretKeySpec
 
 /**
- * Minimal H5 client for the desktop app. Mirrors the signing + bearer
- * flow used by :app/.../net/H5Client.kt. Pure JVM — no Android deps.
- * Re-implements rather than depending on :app so the desktop module
- * stays standalone until we extract a :shared module.
+ * Minimal H5 client for the desktop app. Signing + endpoint constants
+ * come from :shared/net/Crypto.kt and :shared/net/Constants.kt — patches
+ * to those land in BOTH :app and :desktop at once.
  *
- * Endpoint base + signing constants taken from the Android client
- * verified against live aoneroom traffic (see `_movieway/` notes).
+ * The bearer-mint + cookie-jar flow here is a JVM port of
+ * :app/.../net/H5Client.kt. Will fully migrate to :shared in a later
+ * commit once we abstract the cookie-store + logger glue.
  */
 object H5Api {
-    private const val H5_BASE = "https://h5-api.aoneroom.com"
-    private const val PAGE_REFERER = "https://themoviebox.org/"
-    private const val BROWSER_UA =
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
-
-    private const val SIGNING_KEY_B64 =
-        "76iRl07s0xSN9jqmEWAt79EBJZulIQIsV64FZr2O"
-
-    /** Same X-Client-Info shape Android uses — Nairobi timezone is what
-     *  the H5 backend returned the highest-tier (`atp:3`) bearer for
-     *  during reverse engineering. */
-    private const val X_CLIENT_INFO =
-        """{"timezone":"Africa/Nairobi"}"""
+    private val H5_BASE = SC.H5_BASE
+    private val PAGE_REFERER = SC.PAGE_REFERER
+    private val BROWSER_UA = SC.BROWSER_UA
+    private val X_CLIENT_INFO = SC.X_CLIENT_INFO
 
     private val moshi = Moshi.Builder().add(KotlinJsonAdapterFactory()).build()
 
@@ -97,8 +84,8 @@ object H5Api {
                     .header("Accept", "application/json")
                     .header("Content-Type", ctype)
                     .header("Referer", PAGE_REFERER)
-                    .header("X-Client-Token", clientToken(ts))
-                    .header("x-tr-signature", trSignature("POST", "application/json", ctype, "$H5_BASE$path", body, ts))
+                    .header("X-Client-Token", Crypto.clientToken(ts))
+                    .header("x-tr-signature", Crypto.trSignature("POST", "application/json", ctype, "$H5_BASE$path", body, ts))
                     .header("X-Client-Info", X_CLIENT_INFO)
                     .header("x-request-lang", "en")
                     .header("X-Client-Status", "0")
@@ -183,8 +170,8 @@ object H5Api {
             .header("User-Agent", BROWSER_UA)
             .header("Accept", "application/json")
             .header("Referer", PAGE_REFERER)
-            .header("X-Client-Token", clientToken(ts))
-            .header("x-tr-signature", trSignature("GET", "application/json", "", full, null, ts))
+            .header("X-Client-Token", Crypto.clientToken(ts))
+            .header("x-tr-signature", Crypto.trSignature("GET", "application/json", "", full, null, ts))
             .header("X-Client-Info", X_CLIENT_INFO)
             .header("x-request-lang", "en")
             .header("X-Client-Status", "0")
@@ -240,8 +227,8 @@ object H5Api {
             .header("Accept", "application/json")
             .header("Content-Type", ctype)
             .header("Referer", PAGE_REFERER)
-            .header("X-Client-Token", clientToken(ts))
-            .header("x-tr-signature", trSignature("POST", "application/json", ctype, "$H5_BASE$path", body, ts))
+            .header("X-Client-Token", Crypto.clientToken(ts))
+            .header("x-tr-signature", Crypto.trSignature("POST", "application/json", ctype, "$H5_BASE$path", body, ts))
             .header("X-Client-Info", X_CLIENT_INFO)
             .header("x-request-lang", "en")
             .header("X-Client-Status", "0")
@@ -306,32 +293,14 @@ object H5Api {
 
     // ---- signing ----
 
+    // Tiny JSON-string escaper for inline body building. Kept inline
+    // because the body builder is the only caller and it's not crypto-
+    // adjacent — no sharing benefit.
     private fun jsonStr(s: String): String =
         "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
-    private fun md5Hex(b: ByteArray): String {
-        val d = MessageDigest.getInstance("MD5").digest(b)
-        return d.joinToString("") { "%02x".format(it) }
-    }
-
-    private fun clientToken(ts: Long): String {
-        val reversed = ts.toString().reversed()
-        return "$ts,${md5Hex(reversed.toByteArray())}"
-    }
-
-    private fun trSignature(
-        method: String, accept: String, contentType: String,
-        url: String, body: String?, timestampMs: Long,
-    ): String {
-        val bodyLen = (body?.toByteArray()?.size ?: 0).toString()
-        val bodyHash = if (body == null) "" else md5Hex(body.toByteArray())
-        val canonical = listOf(method, accept, contentType, bodyLen, timestampMs.toString(), bodyHash, url)
-            .joinToString("\n")
-        val key = Base64.getDecoder().decode(SIGNING_KEY_B64)
-        val mac = Mac.getInstance("HmacMD5").apply { init(SecretKeySpec(key, "HmacMD5")) }
-        val signed = mac.doFinal(canonical.toByteArray())
-        return "$timestampMs|2|${Base64.getEncoder().encodeToString(signed)}"
-    }
+    // clientToken + trSignature live in :shared/net/Crypto.kt — see
+    // Crypto.clientToken / Crypto.trSignature calls above.
 }
 
 @JsonClass(generateAdapter = true)

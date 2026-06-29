@@ -30,8 +30,11 @@ dependencyResolutionManagement {
 
 rootProject.name = "MovieBoxTV"
 include(":app")
+// Pure-Kotlin JVM module that both :app (Android) and :desktop (JVM)
+// depend on. Lives here so a patch to the H5 stack, crypto signing, or
+// any shared logic is applied ONCE and benefits both apps. Android-
+// specific glue (logging, key-value storage) is abstracted behind small
+// interfaces; each app provides its own implementation.
+include(":shared")
 // Desktop (Mac + Windows) build target via Compose Multiplatform.
-// Lives next to :app — shares this repo, doesn't touch the Android module.
-// Currently brings up its own copy of the network + crypto layer; will
-// share with :app via a future :shared commonMain module once both are stable.
 include(":desktop")
