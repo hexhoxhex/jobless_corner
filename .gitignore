@@ -34,3 +34,4 @@ Thumbs.db
 # (~/.hexhoxhex/release.jks); this is a belt-and-braces guard.
 *.jks
 *.keystore
+/build
