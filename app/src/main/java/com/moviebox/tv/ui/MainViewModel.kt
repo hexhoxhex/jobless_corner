@@ -64,6 +64,12 @@ private const val DEFAULT_QUALITY = "720p"
 // WebView path for genuinely-broken streams.
 private const val MAX_RESOLVE_FAILURES_BEFORE_WEBVIEW: Int = 25
 
+/** Refresh count that triggers the auto-failover to a sibling channel on
+ *  the same scheduled event. Well below the WebView cap so a genuinely
+ *  broken feed (like BBC One UK's CDN throwing 500s) hands off to a
+ *  working sibling instead of the user staring at a frozen frame. */
+private const val AUTO_FAILOVER_AFTER: Int = 3
+
 /** Probe up to this season number when discovering hidden seasons that
  *  the H5 detail endpoint under-reports. ~5 covers most network shows
  *  without spamming the origin. */
@@ -694,6 +700,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun playChannel(ch: Channel) {
+        // Reset the auto-failover tried-set when the user manually picks
+        // a channel. Auto-failover itself also calls playChannel, but that
+        // path preserves the set — we only want to reset on a fresh
+        // user-initiated tap. The distinction is made by comparing to the
+        // channel we last auto-swapped away from.
+        val prev = _state.value.currentLiveChannel?.id
+        if (prev != null && prev !in triedFailoverAlternates && ch.id != prev) {
+            // User tapped a different channel entirely — starting fresh.
+            triedFailoverAlternates.clear()
+        }
         // If this channel has bounced ≥3 times back-to-back, the native
         // HLS path almost certainly won't work this time either — skip
         // the 90-s cascade and open the WebView fallback directly. A
@@ -865,7 +881,64 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         // origin 5xx that fell off the retry budget) never triggered an
         // invalidation, so the player retried indefinitely on poisoned cache.
         runCatching { liveProxy.invalidate(chId) }
+
+        // Auto-failover: after enough refreshes on the same channel, look
+        // up the schedule for what event this channel is currently on,
+        // find any sibling channels broadcasting the same event, and
+        // hop to the first working one. Handles the "BBC One UK's dlhd
+        // host is throwing 500s but the same match is also on channels
+        // 5066 / 4003 / 4002" case: instead of the user staring at a
+        // frozen frame while we cycle through dead hosts on the same
+        // channel, we sidestep to another feed that works.
+        //
+        // Threshold: 3 refreshes. Well before MAX_RESOLVE_FAILURES_-
+        // BEFORE_WEBVIEW (25) so we swap BEFORE the user gets dumped
+        // on the Adscore-blocked WebView.
+        if (liveResolveFailures == AUTO_FAILOVER_AFTER) {
+            viewModelScope.launch { tryAutoFailoverLive(chId) }
+        }
         return true
+    }
+
+    /** Alternates we've already tried within the current failure cycle.
+     *  Cleared when the user manually picks a different channel (see
+     *  playChannel) so a fresh manual pick starts with a full pool. */
+    private val triedFailoverAlternates = mutableSetOf<String>()
+
+    private suspend fun tryAutoFailoverLive(failingChannelId: String) {
+        val schedule = runCatching { liveRepo.schedule() }
+            .getOrNull() ?: return
+        val channels = runCatching { liveRepo.channels() }
+            .getOrNull() ?: return
+        val nowSec = System.currentTimeMillis() / 1000
+        val alternates = liveRepo.alternatesForEventOn(
+            failingChannelId, channels, schedule, nowSec,
+        )
+        val next = alternates.firstOrNull {
+            it.id != failingChannelId && it.id !in triedFailoverAlternates
+        } ?: run {
+            android.util.Log.i(
+                "LiveDiag",
+                "AUTO_FAILOVER ch=$failingChannelId exhausted — " +
+                    "${alternates.size} sibling(s) tried; giving up",
+            )
+            _state.update { it.copy(
+                error = "This channel and every alternate feed are offline right now.",
+            ) }
+            return
+        }
+        triedFailoverAlternates.add(next.id)
+        android.util.Log.i(
+            "LiveDiag",
+            "AUTO_FAILOVER ch=$failingChannelId → ch=${next.id} (${next.displayName}) — " +
+                "same event, ${triedFailoverAlternates.size}/${alternates.size} tried",
+        )
+        // Surface a small info toast via the existing error field. Not an
+        // error — but the same top-of-screen banner is fine for now.
+        _state.update { it.copy(
+            error = "Switched to ${next.displayName} — original feed had issues.",
+        ) }
+        playChannel(next)
     }
 
     /** Truly-last-resort fallback. Only called after refreshLiveStream has

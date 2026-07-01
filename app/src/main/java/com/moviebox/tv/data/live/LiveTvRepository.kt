@@ -89,6 +89,47 @@ class LiveTvRepository {
         }
     }
 
+    /**
+     * Find OTHER channels currently broadcasting the same event as
+     * [failingChannelId]. Used by [MainViewModel.autoFailoverLive] when
+     * the current channel keeps giving 5xx from its upstream — we look
+     * up which scheduled event contains it, then hand back the sibling
+     * channels in the same event so the app can try them.
+     *
+     * "Currently broadcasting" here means: event has a [ScheduleEvent
+     * .startUnix] within the last 3 hours OR within the next 30 minutes.
+     * Rough — schedule entries don't carry durations — but generous
+     * enough to catch mid-match failures and pre-match warm-ups.
+     *
+     * @param failingChannelId  the channel that's failing
+     * @param nowUnixSec       current epoch seconds (caller passes so
+     *                         tests can inject a fixed time)
+     * @return other Channel objects on the same event, prioritising
+     *         those with `status=ok`. Empty list means no schedule
+     *         match — caller shouldn't auto-failover.
+     */
+    fun alternatesForEventOn(
+        failingChannelId: String,
+        channels: List<Channel>,
+        schedule: List<ScheduleEvent>,
+        nowUnixSec: Long,
+    ): List<Channel> {
+        val event = schedule.firstOrNull { ev ->
+            val includesFailing = ev.channels.any { it.id == failingChannelId }
+            if (!includesFailing) return@firstOrNull false
+            val start = ev.startUnix ?: return@firstOrNull false
+            // ~3h window since start (mid-match) + 30 min pre-start warm-up.
+            nowUnixSec in (start - 30 * 60)..(start + 3 * 60 * 60)
+        } ?: return emptyList()
+
+        val altIds = event.channels.mapNotNull { ref ->
+            ref.id.takeIf { it != failingChannelId }
+        }
+        // Map ref → real Channel and prefer playable (status=ok) ones.
+        return altIds.mapNotNull { id -> channels.firstOrNull { it.id == id } }
+            .sortedByDescending { it.isPlayable }
+    }
+
     private fun List<Channel>.filterPlayable(includeAll: Boolean): List<Channel> =
         if (includeAll) this else filter { it.isPlayable }
 
