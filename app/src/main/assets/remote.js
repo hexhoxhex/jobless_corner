@@ -1479,12 +1479,15 @@ if (schedQEl) {
 }
 
 function renderLiveSchedule(data) {
-  // Filter out events whose start time has already passed (today). The
-  // schedule is published in UTC HH:MM as documented in LiveModels.kt;
-  // compare against the user's current UTC clock so timezone-of-viewer
-  // doesn't matter — events disappear when their broadcast starts, not
-  // when the user's local time rolls past them.
+  // Filter to events that either haven't started yet or are still
+  // reasonably likely to be on the air. Prefer the authoritative
+  // start_unix (POSIX seconds) sent by the RemoteServer — sports
+  // events run 2-3h, so hiding them after 60 minutes (the old bug)
+  // dropped ongoing matches while they were still going. When
+  // start_unix is missing (older builds), fall back to the raw HH:MM
+  // time-of-day comparison with the same 3h grace.
   const now = new Date();
+  const nowUnix = Math.floor(now.getTime() / 1000);
   const nowMinutes = now.getUTCHours() * 60 + now.getUTCMinutes();
   const todayUtc = now.toLocaleDateString(undefined, {
     weekday: "long", month: "short", day: "numeric", timeZone: "UTC",
@@ -1494,6 +1497,13 @@ function renderLiveSchedule(data) {
   let liveCount = 0;
   let upcomingCount = 0;
 
+  // Rough duration estimate for events without a real endUnix — 3h
+  // covers soccer, cricket-innings, basketball games with overtime,
+  // longer-than-average matches with stoppage. Talk shows are shorter
+  // but the over-inclusion is fine (an "over" show gone off-air just
+  // fails to play; it doesn't push a real live show out of view).
+  const EVENT_DURATION_SEC = 3 * 60 * 60;
+
   const q = liveScheduleQuery;
   const cat = liveScheduleCategory;
   // Prep: keep each category, filter its events, drop empty categories.
@@ -1501,17 +1511,28 @@ function renderLiveSchedule(data) {
     const groupMeta = classifyScheduleCategory(g.category);
     if (cat !== "all" && groupMeta !== cat) return { ...g, events: [] };
     const events = (g.events || []).filter(e => {
-      const m = /^(\d{1,2}):(\d{2})$/.exec(e.time || "");
-      if (!m) return true;
-      const evMinutes = parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
-      const stillOnAir = evMinutes >= nowMinutes - 60;
+      let stillOnAir;
+      let isLiveNow;
+      if (typeof e.start_unix === "number" && e.start_unix > 0) {
+        // Preferred path — real timestamps, timezone-free.
+        stillOnAir = nowUnix < e.start_unix + EVENT_DURATION_SEC;
+        isLiveNow = nowUnix >= e.start_unix;
+      } else {
+        // Legacy fallback: raw HH:MM time-of-day. Same 3h grace so a
+        // match that started 2h ago still shows.
+        const m = /^(\d{1,2}):(\d{2})$/.exec(e.time || "");
+        if (!m) return true; // don't drop unparseable — better safe
+        const evMinutes = parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+        stillOnAir = evMinutes >= nowMinutes - EVENT_DURATION_SEC / 60;
+        isLiveNow = evMinutes <= nowMinutes;
+      }
       if (!stillOnAir) return false;
       if (q) {
         const hay = ((e.title || "") + " " + (g.category || "") + " " +
           (e.channels || []).map(c => c.name).join(" ")).toLowerCase();
         if (!hay.includes(q)) return false;
       }
-      if (evMinutes <= nowMinutes) liveCount++;
+      if (isLiveNow) liveCount++;
       else upcomingCount++;
       return true;
     });

@@ -162,8 +162,22 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
         }
     }
     var buffering by remember { mutableStateOf(false) }
-    var playing by remember { mutableStateOf(true) }
+    // Default to `false` so the loader overlay can show during the
+    // ExoPlayer-init/prepare window (before onIsPlayingChanged has fired
+    // even once). Starting `true` masked the loader condition and left
+    // the user staring at a black screen even when the pipeline was
+    // clearly still coming up.
+    var playing by remember { mutableStateOf(false) }
     var statusPill by remember { mutableStateOf<String?>(null) }
+    // Track whether ExoPlayer has decoded and drawn at least one video frame.
+    // Used by the fullscreen loader overlay: once we have a frame, hiding the
+    // loader immediately even if the player briefly re-enters BUFFERING avoids
+    // flicker; without a frame, we keep the loader visible so the user isn't
+    // staring at a mute black surface for 60+ seconds during initial resolve
+    // + buffer of a live HLS stream. Reset whenever the stream URL changes
+    // — a channel switch is a fresh prepare with a fresh first-frame event.
+    var hasRenderedFrame by remember { mutableStateOf(false) }
+    LaunchedEffect(play?.mediaUrl) { hasRenderedFrame = false }
     var resizeMode by remember {
         mutableStateOf(AspectRatioFrameLayout.RESIZE_MODE_FIT)
     }
@@ -465,6 +479,7 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                 onControlsVisible = { /* native controller is off; we own visibility */ },
                 onBuffering = { buffering = it },
                 onPlayingChanged = { playing = it },
+                onFirstFrame = { hasRenderedFrame = true },
                 onExoReady = { exoRef = it },
                 onStabilising = { stabilising = it },
                 tryDowngrade = vm::downgradeQuality,
@@ -541,15 +556,53 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
             }
         }
 
-        // Starting / re-buffering spinner over the video.
-        // The new BigPlayPauseBtn already shows a spinner for buffering inside
-        // the play-button circle. Show the full-screen pulse only for the
-        // initial "we haven't started yet" state where the play button isn't
-        // mounted yet because controls are hidden.
-        if (play != null && play.mediaUrl.isNotBlank() &&
-            state.playLoading && !controlsVisible
-        ) {
-            Box(Modifier.fillMaxSize(), Alignment.Center) { LoadingPulse() }
+        // Starting / re-buffering full-screen overlay.
+        // Live TV over HLS can take 5-90 s to get the first frame decoded
+        // (resolver race + LiveStreamProxy master fetch + inner playlist +
+        // segment download + codec init), and the video surface is BLACK
+        // until decode finishes. Without an overlay the user sees a mute
+        // black screen and thinks the app froze. Show a Lottie + channel
+        // name whenever we're loading OR buffering with nothing on screen
+        // yet — regardless of whether the controls are up. The overlay
+        // dims slightly (0x99 alpha) so the loader reads even if the CDN
+        // did somehow emit a frame while we're still 'loading'.
+        // Show loader while the pipeline is still assembling the stream.
+        // Hide as soon as ANY of these is true:
+        //   - onRenderedFirstFrame fired (canonical: "there is a pixel on screen")
+        //   - isPlaying became true (STATE_READY + playing) — safety net for
+        //     hardware decoders (e.g. Realtek RTK in tunneling mode) that
+        //     don't fire onRenderedFirstFrame reliably. If ExoPlayer says
+        //     it's playing, something IS being pushed to the display plane
+        //     even if we didn't get the surface callback.
+        //   - buffering==false AND playLoading==false — we're not in any
+        //     "loading" state per ExoPlayer's own semantics.
+        val showFullscreenLoader = play != null && play.mediaUrl.isNotBlank() &&
+            !hasRenderedFrame && !playing &&
+            (state.playLoading || buffering)
+        if (showFullscreenLoader) {
+            Box(
+                Modifier.fillMaxSize().background(Color(0x99000000)),
+                Alignment.Center,
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    LoadingPulse()
+                    // Channel/title so user knows exactly what's opening.
+                    // Kept concise — long titles wrap and eat the loader.
+                    Text(
+                        play.title.take(60),
+                        color = Color.White,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    // Sub-status when we have one (Reconnecting…, etc).
+                    stabilising?.let { msg ->
+                        Text(msg, color = Color(0xFFE8B341), fontSize = 12.sp)
+                    }
+                }
+            }
         }
 
         // Stabilising pill — only on live streams when the resilience tracker
@@ -981,7 +1034,15 @@ private const val BEHIND_LIVE_WINDOW_MS: Long = 3 * 60 * 1000L
  *  "video hitches, audio fine". 18s in the 24s window still leaves 6s
  *  of back-edge margin. Paired with a gentle 1.06 max speed so the
  *  player doesn't burn the cushion racing back to the live edge. */
-private const val LIVE_TARGET_OFFSET_MS: Long = 18_000L
+// 25 s (was 18 s): live-edge distance the proactive-seek snaps to. When
+// the CDN inner-playlist hiccups for 3-4 s (observed in the FOX USA
+// World Cup session on Kenyan ISPs), the buffer drains and the player
+// drifts back. A larger target offset means we can accumulate more
+// cushion before the drift crosses the "snap forward" threshold — so
+// the codec-flushing seek fires less often. Trade-off is ~7 s more
+// latency behind absolute live, which is invisible on continuous
+// content like a football broadcast.
+private const val LIVE_TARGET_OFFSET_MS: Long = 25_000L
 
 /** Proactive drift prevention. When the player's position drops to
  *  within [DRIFT_DANGER_MS] of the back edge of the live manifest
@@ -1357,6 +1418,12 @@ private fun VideoPlayer(
     onControlsVisible: (Boolean) -> Unit,
     onBuffering: (Boolean) -> Unit,
     onPlayingChanged: (Boolean) -> Unit,
+    /** Fires exactly once per prepare cycle when ExoPlayer has decoded and
+     *  drawn the first video frame. Used by the parent to dismiss the
+     *  fullscreen "Loading…" overlay — we don't dismiss on STATE_READY alone
+     *  because that fires before any pixel is on the surface; the user
+     *  briefly sees "Loading" text over a video that's actually playing. */
+    onFirstFrame: () -> Unit = {},
     /** Hand the underlying ExoPlayer back to PlayerScreen so the custom
      *  controls overlay can read currentPosition for the scrubber and seek. */
     onExoReady: (androidx.media3.common.Player) -> Unit = {},
@@ -1416,6 +1483,7 @@ private fun VideoPlayer(
     val visibilityState = rememberUpdatedState(onControlsVisible)
     val bufferingState = rememberUpdatedState(onBuffering)
     val playingState = rememberUpdatedState(onPlayingChanged)
+    val firstFrameState = rememberUpdatedState(onFirstFrame)
     val downgradeState = rememberUpdatedState(tryDowngrade)
     val progressState = rememberUpdatedState(onProgress)
     val liveErrorState = rememberUpdatedState(onLiveError)
@@ -1586,7 +1654,29 @@ private fun VideoPlayer(
             // they don't immediately re-starve. minBuffer is capped in
             // practice by the 18s live offset.
             DefaultLoadControl.Builder()
-                .setBufferDurationsMs(15_000, 24_000, 3_000, 3_000)
+                // args = (minBuffer, maxBuffer, bufferForPlayback, bufferAfterRebuffer)
+                //   minBuffer 22 s          — steady-state cushion. Bumped
+                //                             from 15 s after logs showed
+                //                             xameleon inner-playlist fetches
+                //                             occasionally take 3-4 s (vs
+                //                             typical 180-500 ms). A 15 s
+                //                             cushion would drain during
+                //                             those stalls; 22 s absorbs
+                //                             the worst-observed hiccup with
+                //                             headroom. Live-edge target is
+                //                             also bumped in lockstep (see
+                //                             LIVE_TARGET_OFFSET_MS).
+                //   maxBuffer 30 s          — matched to the live-edge
+                //                             window we can actually hold.
+                //   bufferForPlayback 1.5 s — start decoding after ~half a
+                //                             segment. Cuts tap → picture.
+                //   bufferAfterRebuffer 5 s — after a starve, wait 5 s of
+                //                             video before resuming. Was
+                //                             3 s but the CDN's 3-4 s stalls
+                //                             kept re-triggering rebuffer
+                //                             before the buffer had actually
+                //                             recovered.
+                .setBufferDurationsMs(22_000, 30_000, 1_500, 5_000)
                 .setBackBuffer(0, false)
                 .build()
         } else {
@@ -1621,6 +1711,28 @@ private fun VideoPlayer(
                             // don't sit on a single dead chunk forever.
                             return (1000L shl (attempts - 1).coerceAtMost(3))
                                 .coerceAtMost(8_000L)
+                        }
+                        override fun isEligibleForFallback(
+                            exception: java.io.IOException,
+                        ): Boolean {
+                            // Media3's default treats 404/410 as fallback-eligible,
+                            // which for a single-source live stream means the source
+                            // dies immediately instead of using the 6-retry budget
+                            // above. On DADDY LIVE CDNs a 404 on a manifest-advertised
+                            // segment is almost always a transient edge-desync
+                            // (the manifest was refreshed before the segment
+                            // propagated to this edge). Force the retry path — by
+                            // the time attempt 2 fires (1 s later) the segment
+                            // usually resolves. Keep default fallback behavior
+                            // for 403 (rate-limit / geo-block — sibling really
+                            // does help) and 5xx / timeouts (upstream degraded
+                            // — LiveStreamProxy rotates to a sibling).
+                            if (exception is androidx.media3.datasource
+                                    .HttpDataSource.InvalidResponseCodeException) {
+                                val code = exception.responseCode
+                                if (code == 404 || code == 410) return false
+                            }
+                            return super.isEligibleForFallback(exception)
                         }
                     }
                 )
@@ -2142,6 +2254,17 @@ private fun VideoPlayer(
                         // exactly the "channel pausing by itself" behaviour
                         // the user reported.
                         stabilisingState.value("Reconnecting…")
+                        // Log to LiveDiag as well as Telemetry — Telemetry
+                        // notes are internal, but LiveDiag is what shows up
+                        // when we're tailing logcat during a freeze. Without
+                        // this line, the FOX USA World Cup freezes on
+                        // 2026-07-09 looked like the app had gone completely
+                        // silent (no LiveDiag lines for minutes), when in
+                        // fact this handler was firing every ~5s.
+                        android.util.Log.w(
+                            "LiveDiag",
+                            "PLAYER STATE_ENDED (live) — seek+prepare",
+                        )
                         com.moviebox.tv.debug.Telemetry.note(
                             com.moviebox.tv.debug.Telemetry.Severity.WARN,
                             "Live STATE_ENDED — seeking to live edge",
@@ -2181,6 +2304,9 @@ private fun VideoPlayer(
             }
             override fun onIsPlayingChanged(isPlayingNow: Boolean) {
                 playingState.value(isPlayingNow)
+            }
+            override fun onRenderedFirstFrame() {
+                firstFrameState.value()
             }
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                 com.moviebox.tv.debug.Telemetry.onPlayFailed(

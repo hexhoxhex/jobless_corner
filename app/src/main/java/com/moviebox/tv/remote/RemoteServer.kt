@@ -76,7 +76,18 @@ class RemoteServer(
 
         // ---- authenticated routes ----
         val token = tokenFrom(session)
-        val dev = RemoteAccess.touch(token, ip)
+        var dev = RemoteAccess.touch(token, ip)
+        // Loopback auto-approve: requests originating from 127.0.0.1 are
+        // by definition from the same device (adb port-forward, an
+        // on-device script, or a debug tool). Skip the pair-code / QR
+        // flow entirely so `adb forward tcp:8080 tcp:8080 && curl
+        // -X POST http://127.0.0.1:8080/api/play?ch=54` works out of
+        // the box during development — no more asking the user to tap
+        // the channel by hand on every rebuild.
+        if (dev == null && (ip == "127.0.0.1" || ip == "::1")) {
+            dev = RemoteAccess.pair(code = null, ip = ip, label = "loopback (adb)")
+                .also { RemoteAccess.setRole(it.token, RemoteAccess.Role.SUPERUSER) }
+        }
         if (!RemoteAccess.canAccess(dev)) {
             return newFixedLengthResponse(
                 Response.Status.FORBIDDEN, "application/json",
@@ -363,12 +374,20 @@ class RemoteServer(
                                 JSONObject().put("id", ch.id).put("name", ch.name)
                             )
                         }
-                        evArr.put(
-                            JSONObject()
-                                .put("time", e.time)
-                                .put("title", e.title)
-                                .put("channels", chArr)
-                        )
+                        // startUnix is the authoritative event start time
+                        // — needed by the SPA to keep long-running events
+                        // (sports matches typically run 2-3h) on-screen
+                        // instead of hiding them after the old 60-min
+                        // "still on air" window. Set by the scraper's
+                        // annotate_dates step; null on pre-annotation
+                        // catalog dumps. The SPA falls back to the raw
+                        // "time" string when start_unix is missing.
+                        val ev = JSONObject()
+                            .put("time", e.time)
+                            .put("title", e.title)
+                            .put("channels", chArr)
+                        e.startUnix?.let { ev.put("start_unix", it) }
+                        evArr.put(ev)
                     }
                     arr.put(
                         JSONObject()

@@ -103,6 +103,16 @@ class LiveStreamProxy(
     private val httpClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(8, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
+        // Fresh connection per request (0 idle sockets kept warm). Was
+        // the default pool, but Cloudflare's bot management on
+        // xameleon.phantemlis.top would 200 the first request (master
+        // m3u8) and immediately 403 the next request on the reused
+        // connection (inner playlist), even though headers were
+        // identical — classic session-reuse fingerprint hit. curl from
+        // the same egress does one-shot fresh-connection requests and
+        // never sees 403 on the same URLs, confirming this is
+        // per-connection state, not per-URL policy.
+        .connectionPool(okhttp3.ConnectionPool(0, 1, TimeUnit.SECONDS))
         .build()
 
     /**
@@ -199,6 +209,16 @@ class LiveStreamProxy(
             return when {
                 uri.startsWith("/master/") -> handleMaster(uri.removePrefix("/master/"))
                 uri.startsWith("/inner/")  -> handleInner(uri.removePrefix("/inner/"))
+                uri.startsWith("/seg/")    -> {
+                    // /seg/<channelId>/<base64-url>. channelId is needed
+                    // so a 403 → invalidate hits the right cache entry.
+                    val rest = uri.removePrefix("/seg/")
+                    val slash = rest.indexOf('/')
+                    if (slash <= 0) notFound() else handleSegment(
+                        channelId = rest.substring(0, slash),
+                        encodedUrl = rest.substring(slash + 1),
+                    )
+                }
                 else -> notFound()
             }
         }
@@ -207,6 +227,93 @@ class LiveStreamProxy(
             Response.Status.NOT_FOUND, "text/plain", "not found",
         )
     }
+
+    /**
+     * Fetch a segment from the upstream CDN. The segment URL is signed
+     * with an IP-bound token that expires every ~30 s; ExoPlayer fetching
+     * direct used to surface as a 403 every ~30 s ("stream stuck for a
+     * few seconds, plays, stuck again"). Routing segments through here
+     * lets us detect that 403 in one place, invalidate the proxy cache
+     * + re-resolve, then retry the segment ONCE on a freshly-signed URL.
+     * Most of the time the fresh resolve gives us a sibling URL with a
+     * matching segment name so playback continues seamlessly.
+     */
+    private fun handleSegment(channelId: String, encodedUrl: String): NanoHTTPD.Response {
+        val originalUrl = runCatching {
+            String(android.util.Base64.decode(encodedUrl, android.util.Base64.URL_SAFE))
+        }.getOrNull() ?: return NanoHTTPD.newFixedLengthResponse(
+            NanoHTTPD.Response.Status.BAD_REQUEST, "text/plain", "bad url")
+
+        fun fetchOnce(url: String): okhttp3.Response? = runCatching {
+            httpClient.newCall(
+                buildCdnRequest(url).build()
+            ).execute()
+        }.getOrNull()
+
+        var resp = fetchOnce(originalUrl)
+        if (resp == null) {
+            return NanoHTTPD.newFixedLengthResponse(
+                NanoHTTPD.Response.Status.SERVICE_UNAVAILABLE,
+                "text/plain", "segment fetch failed",
+            )
+        }
+        // 401/403/410 = signed token died. Resolve a fresh upstream, find
+        // the same-named segment in the new playlist, refetch. If the
+        // segment file name carries forward (most CDN siblings reuse
+        // the live-edge segment names) the retry succeeds.
+        if (resp.code in listOf(401, 403, 410)) {
+            resp.close()
+            Log.w(DIAG, "PROXY ch=$channelId SEG ${resp.code} on " +
+                "${shortSeg(originalUrl)} — invalidating + retry with fresh URL")
+            cache.remove(channelId)
+            val fresh = runBlocking { refreshCache(channelId) }
+            if (fresh != null) {
+                val freshUrl = mapSegmentToFreshUrl(originalUrl, fresh.innerUrl)
+                if (freshUrl != null) {
+                    resp = fetchOnce(freshUrl)
+                    if (resp == null) {
+                        return NanoHTTPD.newFixedLengthResponse(
+                            NanoHTTPD.Response.Status.SERVICE_UNAVAILABLE,
+                            "text/plain", "segment retry failed",
+                        )
+                    }
+                }
+            }
+        }
+        if (!resp.isSuccessful) {
+            val code = resp.code
+            resp.close()
+            return NanoHTTPD.newFixedLengthResponse(
+                NanoHTTPD.Response.Status.lookup(code) ?: NanoHTTPD.Response.Status.INTERNAL_ERROR,
+                "text/plain", "upstream $code",
+            )
+        }
+        val ct = resp.header("Content-Type") ?: "video/mp2t"
+        val bytes = resp.body?.bytes() ?: ByteArray(0)
+        resp.close()
+        return NanoHTTPD.newFixedLengthResponse(
+            NanoHTTPD.Response.Status.OK, ct,
+            java.io.ByteArrayInputStream(bytes), bytes.size.toLong(),
+        )
+    }
+
+    /** Carry the OLD segment's last path component into the NEW inner
+     *  playlist's path. Live CDNs use stable segment numbering at the
+     *  live-edge across siblings, so the same name usually lives at
+     *  /new/host/path/<name>?fresh-token. */
+    private fun mapSegmentToFreshUrl(oldUrl: String, freshInnerUrl: String): String? {
+        val oldSeg = oldUrl.substringAfterLast('/').substringBefore('?')
+        if (oldSeg.isBlank()) return null
+        val base = freshInnerUrl.substringBeforeLast('/', missingDelimiterValue = "")
+        if (base.isBlank()) return null
+        // Keep the inner playlist's query string if present — most CDN
+        // segments share the same signed query as the playlist.
+        val q = freshInnerUrl.substringAfter('?', missingDelimiterValue = "")
+        return if (q.isBlank()) "$base/$oldSeg" else "$base/$oldSeg?$q"
+    }
+
+    private fun shortSeg(u: String): String =
+        u.substringAfterLast('/').substringBefore('?').take(30)
 
     /** Serve a master playlist pointing at our own /inner/<id> endpoint. */
     private fun handleMaster(channelId: String): NanoHTTPD.Response {
@@ -329,23 +436,49 @@ class LiveStreamProxy(
                 state.lastGoodAtMs = System.currentTimeMillis()
                 if (newMediaSeq >= 0) state.lastServedMediaSeq = newMediaSeq
                 rememberRecentSegments(state, servedBody)
+                // Clean playback = the resolver's blacklist for this
+                // channel is stale. Reset so a channel that briefly
+                // 403'd but has now healed can race all CDNs equally
+                // again on the next re-resolve.
+                resolver.reportSuccess(channelId)
 
                 val dt = System.currentTimeMillis() - tStart
                 Log.i(DIAG, "PROXY ch=$channelId inner OK attempt=$attempt " +
                     "dt=${dt}ms disc=$discInserted host=${hostOf(entry.innerUrl)} " +
                     "mediaSeq=$newMediaSeq " +
                     "crossedBoundary=$crossingBoundary")
+                // Rewrite segment URLs to go through /seg/$channelId/. With
+                // direct upstream URLs, ExoPlayer's segment fetches hit the
+                // CDN's signed-URL gate and 403 every ~30 s when the token
+                // rotates — user-visible as "playback stuck for a few
+                // seconds, plays, stuck again." With this rewrite, segment
+                // fetches reach our proxy which can detect 403 in one
+                // place, invalidate + re-resolve, and refetch with a
+                // fresh-token URL transparently.
+                val rewrittenBody = rewriteSegmentUrls(
+                    body = servedBody, channelId = channelId,
+                    baseUrl = entry.innerUrl,
+                )
                 return NanoHTTPD.newFixedLengthResponse(
                     NanoHTTPD.Response.Status.OK,
                     "application/vnd.apple.mpegurl",
-                    servedBody,
+                    rewrittenBody,
                 )
             }
             if (resp != null) {
                 lastResponseCode = resp.first.code
                 com.moviebox.tv.debug.Telemetry.onHttpError(resp.first.code, entry.innerUrl)
                 lastWasAuthDead = resp.first.code in listOf(401, 403, 410)
-                if (lastWasAuthDead) break  // token death — go rotate now
+                if (lastWasAuthDead) {
+                    // Tell the resolver this CDN is handing back dead
+                    // tokens for this channel. After AVOID_AFTER_FAILURES
+                    // strikes the next resolveStream will filter that
+                    // CDN out of the race — the /plus/ → vinix path (if
+                    // available) or another sibling will win instead of
+                    // us being stuck in the same xameleon 403 loop.
+                    resolver.reportAuthFailure(channelId, hostOf(entry.innerUrl))
+                    break  // token death — go rotate now
+                }
             } else {
                 Log.w(TAG, "inner attempt $attempt for $channelId: " +
                     "${r.exceptionOrNull()?.message}")
@@ -444,6 +577,85 @@ class LiveStreamProxy(
     private fun hostOf(url: String): String =
         runCatching { url.substringAfter("//").substringBefore('/') }
             .getOrDefault("?")
+
+    /** Build an outbound request matching what Cloudflare-fronted CDNs
+     *  (xameleon, vinix) expect from a real browser tab. Missing the
+     *  Sec-Fetch-* / Sec-Ch-Ua-* / Accept-* / Accept-Encoding trio was
+     *  triggering Cloudflare's bot-management 403 even when Referer and
+     *  Origin were correct — confirmed by the FOX USA log on 2026-07-15
+     *  where every /inner fetch got 403 despite headers being right.
+     *  The full desktop-Chrome header set matches what dlhd.st's own
+     *  iframe player sends when the video works in-browser.
+     *
+     *  PLUS: layers on the exact header bundle [JsIframeResolver]
+     *  captured from a headless WebView the last time it fetched an
+     *  m3u8 on this host. The WebView's headers include per-iframe
+     *  cookies + resolver-specific quirks that the static Chrome set
+     *  can't cover — user's observation that "headers change across
+     *  players and channels" was the diagnosis, and the CapturedHeaders
+     *  overlay is the fix. Captured entries take priority over our
+     *  static defaults. */
+    private fun buildCdnRequest(url: String): Request.Builder {
+        val builder = Request.Builder().url(url)
+            .header("User-Agent", CHROME_UA)
+            .header("Referer", refererFor(url))
+            .header("Origin", originFor(url))
+            .header("Accept", "*/*")
+            .header("Accept-Language", "en-US,en;q=0.9")
+            .header("Accept-Encoding", "identity")  // don't compress video
+            .header("Sec-Fetch-Site", "cross-site")
+            .header("Sec-Fetch-Mode", "cors")
+            .header("Sec-Fetch-Dest", "empty")
+            .header("Sec-Ch-Ua",
+                "\"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\", \"Google Chrome\";v=\"131\"")
+            .header("Sec-Ch-Ua-Mobile", "?0")
+            .header("Sec-Ch-Ua-Platform", "\"Windows\"")
+        // Overlay browser-observed headers if we have a fresh record for
+        // this host. `header(name, value)` replaces prior values —
+        // captured Referer/Origin/Cookie override our static defaults.
+        val host = hostOf(url)
+        CapturedHeaders.headersFor(host)?.forEach { (name, value) ->
+            builder.header(name, value)
+        }
+        return builder
+    }
+
+    /** Rewrite each segment URL in [body] to point at our /seg/$channelId/
+     *  endpoint. Relative URLs are resolved against the inner-playlist
+     *  URL first. Non-URL lines (#EXT*, blank, etc.) pass through unchanged.
+     *  Conservatively only touches lines that look like a URL or a relative
+     *  path ending in a typical segment extension. */
+    private fun rewriteSegmentUrls(
+        body: String, channelId: String, baseUrl: String,
+    ): String {
+        val port = server.listeningPort
+        if (port <= 0) return body
+        val baseDir = baseUrl.substringBeforeLast('/', missingDelimiterValue = "")
+        val sb = StringBuilder(body.length + body.length / 3)
+        for (line in body.lineSequence()) {
+            val trimmed = line.trim()
+            val isComment = trimmed.startsWith("#") || trimmed.isEmpty()
+            if (isComment) {
+                sb.appendLine(line); continue
+            }
+            val absoluteUrl = when {
+                trimmed.startsWith("http://") || trimmed.startsWith("https://") -> trimmed
+                trimmed.startsWith("/") && baseDir.isNotEmpty() -> {
+                    val origin = baseDir.substringBefore('/', missingDelimiterValue = baseDir)
+                        .let { idx -> baseDir.substring(0, baseDir.indexOf('/', "https://".length).coerceAtLeast(0).let { i -> if (i <= 0) baseDir.length else i }) }
+                    "$origin$trimmed"
+                }
+                baseDir.isNotEmpty() -> "$baseDir/$trimmed"
+                else -> trimmed
+            }
+            val enc = android.util.Base64.encodeToString(
+                absoluteUrl.toByteArray(),
+                android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING,
+            )
+            sb.appendLine("http://127.0.0.1:$port/seg/$channelId/$enc")
+        }
+        return sb.toString()
+    }
 
     private fun extractMediaSeq(body: String): Long? {
         for (line in body.lineSequence()) {
@@ -616,9 +828,28 @@ class LiveStreamProxy(
     }
 
     private fun fetchUpstreamInner(url: String): Pair<okhttp3.Response, String> {
-        val req = Request.Builder().url(url).header("User-Agent", CHROME_UA).build()
+        val req = buildCdnRequest(url).build()
         return httpClient.newCall(req).execute().use { resp ->
             val body = resp.body?.string() ?: ""
+            // Diagnostic: when the CDN blocks us, dump a snapshot of the
+            // request headers + response body preview. Cloudflare bot-
+            // management includes the block reason in the HTML body
+            // ("cf-mitigated: challenge", "Ray ID: …") or the response
+            // headers — logging both lets us tell WHY the request was
+            // rejected instead of just "403" (bot check vs token-expired
+            // vs referer-mismatch look identical without the body).
+            if (!resp.isSuccessful) {
+                val cfRay = resp.header("cf-ray").orEmpty()
+                val cfMit = resp.header("cf-mitigated").orEmpty()
+                Log.w(
+                    DIAG,
+                    "PROXY inner HTTP ${resp.code} host=${hostOf(url)} " +
+                        "cf-ray=$cfRay cf-mit=$cfMit " +
+                        "sent-referer=${req.header("Referer")} " +
+                        "sent-origin=${req.header("Origin")} " +
+                        "body-preview=${body.take(160).replace('\n', ' ')}",
+                )
+            }
             // Note: we have to capture body inside the .use block because
             // .body is closed when use exits. Returning a closed Response is
             // safe — we only read .code / .isSuccessful afterwards.
@@ -675,12 +906,26 @@ class LiveStreamProxy(
     }
 
     private fun parseMaster(masterUrl: String): Pair<String, String?>? {
-        val req = Request.Builder().url(masterUrl)
-            .header("User-Agent", CHROME_UA)
-            .build()
+        val req = buildCdnRequest(masterUrl).build()
+        val t0 = System.currentTimeMillis()
         return runCatching {
             httpClient.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) return null
+                val dt = System.currentTimeMillis() - t0
+                if (!resp.isSuccessful) {
+                    val cfRay = resp.header("cf-ray").orEmpty()
+                    val cfMit = resp.header("cf-mitigated").orEmpty()
+                    val body = resp.body?.string().orEmpty()
+                    Log.w(
+                        DIAG,
+                        "PROXY master HTTP ${resp.code} dt=${dt}ms " +
+                            "host=${hostOf(masterUrl)} cf-ray=$cfRay cf-mit=$cfMit " +
+                            "sent-referer=${req.header("Referer")} " +
+                            "sent-origin=${req.header("Origin")} " +
+                            "body-preview=${body.take(160).replace('\n', ' ')}",
+                    )
+                    return null
+                }
+                Log.i(DIAG, "PROXY master OK dt=${dt}ms host=${hostOf(masterUrl)}")
                 val body = resp.body?.string() ?: return null
                 var streamInf: String? = null
                 var rel: String? = null
@@ -745,15 +990,74 @@ class LiveStreamProxy(
          *  fit safely inside ExoPlayer's HLS source-timeout (default 8 s
          *  for OkHttpDataSource); anything longer surfaces as a broken
          *  pipe + stuck loading spinner. */
-        private const val ENSURE_CACHED_TIMEOUT_MS: Long = 7_000L
+        // 10 s (was 7 s): the cold-start resolve chain is
+        //   [LiveResolver.resolveStream]  (up to 3 s per probe race)
+        //   + [parseMaster]                (0.5 - 1.5 s upstream fetch)
+        // Comfortably fits in 10 s with headroom for a slow master fetch.
+        // Previously 7 s and a 6.7 s resolver dt from a slow /plus/ probe
+        // left < 400 ms for parseMaster; the withTimeoutOrNull tripped and
+        // handleMaster returned 503 to ExoPlayer *just before* parseMaster
+        // finished. ExoPlayer's default OkHttpDataSource read-timeout is
+        // 8 s, but its LoadErrorHandlingPolicy retries with 1 s/2 s/4 s
+        // backoff — so a socket timeout on the localhost proxy is still
+        // recoverable via retry, whereas the premature 503 was pushing
+        // the user onto AUTO_FAILOVER unnecessarily.
+        private const val ENSURE_CACHED_TIMEOUT_MS: Long = 10_000L
         /** Keep this many recent segment URIs per channel so we can detect
          *  overlap when the proxy crosses a sibling boundary. ExoPlayer's
          *  live buffer is ~60 s at 4 s segments → ~15 segments, so 20 is
          *  a comfortable ceiling that covers replays even when the proxy
          *  has been silent for a couple of refresh cycles. */
         private const val RECENT_SEGMENTS_KEEP: Int = 20
+        // Desktop Chrome UA — matches the Sec-Ch-Ua-Platform="Windows"
+        // sent by buildCdnRequest, so the full header set looks consistent
+        // to Cloudflare's bot management. The prior Android-Mobile UA
+        // combined with Windows-ish Sec-Ch hints would trip on mismatch.
+        // dlhd.st's browser player is served to desktop Chrome tabs
+        // (that's the origin flow we're impersonating), so this UA also
+        // matches what the "working in browser" comparison presented.
         private const val CHROME_UA =
-            "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 " +
-                "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+        /** Pick the correct Referer for an outbound CDN request. DADDY LIVE
+         *  CDNs (xameleon, vinix, and their siblings) are Cloudflare-fronted
+         *  and gate requests by Referer + Origin — without the right pair
+         *  they answer 403, which looks identical to origin overload but is
+         *  really a token-binding check. Map each CDN family to the wrapper
+         *  page the browser would legitimately send:
+         *    - xameleon.phantemlis.top      ← hamis.romponalis.st       (PLAYER 1/3)
+         *    - vinix.inproviszon.st         ← ritzembeds.pages.dev      (PLAYER 4)
+         *  Everything else falls back to dlhd.st/ (safe generic).
+         *  Missing these headers was the FOX USA freeze — resolver got a
+         *  valid signed URL, proxy fetched it without Origin, xameleon 403'd
+         *  every manifest + segment. Confirmed live-in-browser: fetch() from
+         *  origin=dlhd.st 403s the same URL that the actual video element
+         *  plays fine (its request has origin=hamis). */
+        internal fun refererFor(streamUrl: String): String = originFor(streamUrl) + "/"
+
+        /** Origin header for an outbound CDN request. Cloudflare treats the
+         *  signed-URL token as bound to the requester's Origin — the token
+         *  hamis mints for a browser inside its own iframe is valid only for
+         *  requests presenting `Origin: https://hamis.romponalis.st`, and
+         *  anything else 403s. Send this alongside [refererFor].
+         *
+         *  Simple string parse instead of [java.net.URI], because that class
+         *  silently returns null for `.host` on URLs containing certain
+         *  unencoded characters (e.g. a `[` from IPv6-lookalike segment
+         *  names, but also some regex-signed paths) — falling through
+         *  to the `dlhd.st` else branch was the FOX-USA-403-loop bug the
+         *  diagnostic caught in v0.1.121. */
+        internal fun originFor(streamUrl: String): String {
+            val host = streamUrl.substringAfter("//", "")
+                .substringBefore('/')
+                .substringBefore(':')  // strip port if any
+                .lowercase()
+            return when {
+                host.endsWith("phantemlis.top") -> "https://hamis.romponalis.st"
+                host.endsWith("inproviszon.st") -> "https://ritzembeds.pages.dev"
+                else -> "https://dlhd.st"
+            }
+        }
     }
 }
