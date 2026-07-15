@@ -625,11 +625,25 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
             }
         }
 
-        // Stabilising pill — only on live streams when the resilience tracker
-        // takes an action (drops bitrate / re-prepares the manifest). Sits
-        // slightly above the transient status pill so they don't collide.
+        // Status pill: shows what's happening across BOTH the initial-load
+        // window and mid-play re-buffers/failovers. Sources merged in priority:
+        //   1. resilience-tracker stabilising message (VOD downgrade,
+        //      BEHIND_LIVE_WINDOW recovery — the pre-existing signal)
+        //   2. LiveStatus pipeline (resolver → proxy → VM notes:
+        //      "Fetching streams…", "Reconnecting…", "Switching to X",
+        //      "All streams offline") — this now stays visible after the
+        //      first-frame loader has dismissed, so users see WHY
+        //      playback stopped mid-stream instead of just a black
+        //      screen with a spinner.
+        // Auto-hides once neither source has anything to say AND the
+        // player has been playing cleanly again for a moment (buffering
+        // false + first-frame rendered) — that's when [LiveStatus.clear]
+        // was called on the last successful segment fetch.
+        val liveMsgTop by com.moviebox.tv.data.live.LiveStatus.message
+            .collectAsState()
+        val pillMsg = stabilising ?: liveMsgTop
         AnimatedVisibility(
-            visible = stabilising != null,
+            visible = pillMsg != null,
             modifier = Modifier.align(Alignment.TopCenter)
                 .statusBarsPadding().padding(top = 18.dp),
         ) {
@@ -639,7 +653,7 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                     .padding(horizontal = 14.dp, vertical = 8.dp),
             ) {
                 Text(
-                    "↻  ${stabilising ?: ""}",
+                    pillMsg ?: "",
                     color = Color.Black, fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
                 )
