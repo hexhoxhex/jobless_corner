@@ -546,11 +546,24 @@ class Repository(
         if (play.streams.isEmpty()) {
             throw ApiException("This title isn't available right now.")
         }
-        // Pick the best stream the user asked for. "best" → highest resolution.
+        // Pick the best stream the user asked for. If [resolution] is
+        // unspecified, cap default at 1080p — 2160p H.264 masters on the
+        // aoneroom pipeline routinely exceed decoder profiles on mid-tier
+        // Android TVs (Realtek G10 says NoSupport on 3840×1640@24), AND
+        // when the API only returns a single 4K variant it's usually a
+        // decoy master with broken audio (channelCount=0 in the MP4 esds).
+        // 1080p is the sweet spot: universally decodable, plenty of quality,
+        // and when the catalog has proper 1080p files their audio track is
+        // well-formed. If the user explicitly picks 2160p from the quality
+        // menu we honour it; otherwise 1080p (or the highest available
+        // under 1080p) wins.
         val targetRes = resolution.filter { it.isDigit() }.toIntOrNull()
         val sorted = play.streams.sortedByDescending { it.resolution }
-        val selectedStream = (targetRes?.let { t -> sorted.firstOrNull { it.resolution == t } })
-            ?: sorted.first()
+        val selectedStream = targetRes?.let { t ->
+            sorted.firstOrNull { it.resolution == t }
+        }
+            ?: sorted.firstOrNull { it.resolution in 1..DEFAULT_MAX_RESOLUTION }
+            ?: sorted.first()  // last resort — only super-high-res streams available
         val qualities = sorted.map { s ->
             Quality(
                 label = if (s.resolution > 0) "${s.resolution}P" else s.format,
@@ -662,6 +675,15 @@ class Repository(
     }
 
     companion object {
+        /** Default cap on picked stream resolution when the caller doesn't
+         *  ask for a specific quality. Excludes 4K (2160p) because most
+         *  Android TV chipsets in the target market can't hardware-decode
+         *  4K H.264, AND because when the catalog serves a 4K-only variant
+         *  it's usually a decoy master with a broken audio track (verified
+         *  on Scary Movie subject 3994122036112146904). Users can still
+         *  pick 2160p explicitly via the quality menu. */
+        private const val DEFAULT_MAX_RESOLUTION = 1080
+
         private const val PER_PAGE = 20
 
         // --- Episode enumeration (enumerateEpisodes) ---

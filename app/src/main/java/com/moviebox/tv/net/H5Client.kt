@@ -29,7 +29,24 @@ import java.util.concurrent.TimeUnit
 object H5Client {
 
     const val H5_BASE = "https://h5-api.aoneroom.com"
+    // Both moviebox.ph AND themoviebox.org front the same wefeed-h5api-bff
+    // backend but with different auth policies:
+    //   - moviebox.ph (canonical main domain per user, 2026-07-15) enforces
+    //     VIP-lock for premium titles — anonymous responses come back with
+    //     url:"" and vipLocked:true. Only paid accounts unlock the URL.
+    //   - themoviebox.org is an unauthorized mirror that ignores VIP-lock
+    //     and hands anonymous users the raw signed URL. Downside: for some
+    //     titles (Scary Movie 2160p) it serves a broken/oversized file with
+    //     unusable audio (channelCount=0 in the MP4 esds) that no AAC
+    //     decoder can play.
+    // Strategy: keep [PROXY_BASE] = themoviebox.org as the primary (its
+    // anonymous-unlock is what keeps free playback working across the
+    // whole catalog), and use [PROXY_FALLBACK_BASE] = moviebox.ph as a
+    // last-resort try when the org path returns no usable stream. If a
+    // channel returns url:"" via .org, try .ph — for movies the user has
+    // access to via cookies/auth pushed from the WebView it may unlock.
     const val PROXY_BASE = "https://themoviebox.org"
+    const val PROXY_FALLBACK_BASE = "https://moviebox.ph"
 
     /** Detail-path slugs in our catalog don't exist, so we synthesise one. The
      *  proxy's `/subject/play` ignores it as long as it's present and matches

@@ -89,7 +89,13 @@ object H5PlayResolver {
                 // the WebView (slow, defeats the cache).
                 runCatching {
                     val cm = android.webkit.CookieManager.getInstance()
-                    for (host in listOf("themoviebox.org", "h5-api.aoneroom.com")) {
+                    // Include both moviebox.ph (the new main domain) and
+                    // themoviebox.org (legacy fallback) so any cookies the
+                    // WebView picked up from either origin get pushed into
+                    // OkHttp's jar for subsequent direct-play calls.
+                    for (host in listOf(
+                        "moviebox.ph", "themoviebox.org", "h5-api.aoneroom.com",
+                    )) {
                         val raw = cm.getCookie("https://$host/") ?: continue
                         H5Client.pushCookies(host, raw)
                     }
@@ -129,7 +135,12 @@ object H5PlayResolver {
                 // to read (WebView doesn't expose response bodies via this
                 // hook — we re-issue the same GET, which the proxy answers
                 // identically while the session state is fresh).
-                if ("themoviebox.org/wefeed-h5api-bff/subject/play" in url) {
+                // Match the play call regardless of which mirror the
+                // WebView happens to be on (moviebox.ph is canonical but
+                // themoviebox.org still works as a legacy fallback).
+                if ("/wefeed-h5api-bff/subject/play" in url && (
+                        "moviebox.ph" in url || "themoviebox.org" in url
+                    )) {
                     Thread {
                         runCatching {
                             val refetch = Request.Builder()
@@ -145,6 +156,17 @@ object H5PlayResolver {
                                 val data = JSONObject(raw).optJSONObject("data")
                                 val streams = parseStreams(data)
                                 Log.i(TAG, "play intercept $subjectId -> ${streams.size} streams")
+                                // Dump the raw streams array once so we can
+                                // see whether the API is offering multiple
+                                // resolutions (720/1080/2160) or a single URL
+                                // — the current parseStreams only reads the
+                                // top-level url per stream, which loses lower
+                                // resolutions that would be a viable fallback
+                                // when the top-quality file has a
+                                // channelCount=0 track the TV can't decode.
+                                Log.i(TAG, "raw streams JSON: " +
+                                    (data?.optJSONArray("streams")?.toString()?.take(800)
+                                        ?: "(no streams array)"))
                                 if (streams.isNotEmpty()) finish(streams)
                             }
                         }.onFailure { Log.w(TAG, "refetch failed: ${it.message}") }
@@ -195,13 +217,17 @@ object H5PlayResolver {
     private fun PAGE_URL(
         detailPath: String, subjectId: String, season: Int = 0, episode: Int = 0,
     ): String {
-        // themoviebox.org serves BOTH movies and series under /movies/ — series
-        // pages use the same URL shape with type=/movie/detail. The se/ep params
-        // are passed as `detailSe`/`detailEp` and the page's JS picks them up to
-        // auto-play the right episode. Verified from captured curls.
+        // moviebox.ph is the canonical main domain (was themoviebox.org until
+        // 2026-07-15 when the user reported themoviebox.org's play proxy was
+        // handing back a 4K master with broken audio for Scary Movie while
+        // moviebox.ph served the correct file with working audio). BOTH
+        // domains serve movies and series under /movies/ with the same URL
+        // shape (type=/movie/detail, detailSe/detailEp for episode selection);
+        // only the file-mirror routing differs behind the /wefeed-h5api-bff
+        // play proxy. See H5Client.PROXY_BASE for the full rationale.
         val seParam = "&detailSe=${if (season > 0) season else ""}" +
             "&detailEp=${if (episode > 0) episode else ""}"
-        return "https://themoviebox.org/movies/$detailPath?id=$subjectId&type=/movie/detail$seParam&lang=en"
+        return "${H5Client.PROXY_BASE}/movies/$detailPath?id=$subjectId&type=/movie/detail$seParam&lang=en"
     }
 
     private fun parseStreams(data: JSONObject?): List<H5Api.PlayStream> {

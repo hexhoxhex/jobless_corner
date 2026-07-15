@@ -1552,6 +1552,15 @@ private fun VideoPlayer(
     // LaunchedEffect(contentKey) further down.
     val vodDrops = remember(isLive) { VodFrameDropTracker() }
     // Track selector shared between the player and the resilience logic —
+    // Set true after we've retried a VOD prepare with the audio renderer
+    // disabled, in response to a decoder failure on the audio track
+    // (broken AAC container metadata, unsupported multichannel format,
+    // etc.). Guards against a decoder-fail retry loop — we only attempt
+    // the video-only fallback once per play. Reset on mediaUrl change so
+    // a movie switch gets a fresh chance at audio.
+    val audioDisabled = remember { mutableStateOf(false) }
+    LaunchedEffect(mediaUrl) { audioDisabled.value = false }
+
     // resilience uses it to cap max bitrate after repeated stalls.
     val trackSelector = remember(isLive, noTunneling) {
         androidx.media3.exoplayer.trackselection.DefaultTrackSelector(context).apply {
@@ -1915,7 +1924,30 @@ private fun VideoPlayer(
                     .EXTENSION_RENDERER_MODE_PREFER,
             )
         } else {
-            androidx.media3.exoplayer.DefaultRenderersFactory(context)
+            // VOD path — use the SAME nextlib renderers factory the live
+            // path uses, so a movie whose audio track blows up the platform
+            // AAC decoder (c2.android.aac) can fall through to ffmpeg's
+            // AAC. Previously we constructed a bare DefaultRenderersFactory
+            // here, which meant no fallback at all: Scary Movie (subject
+            // 3994122036112146904) crashed with
+            //   MediaCodecDecoderException: Decoder failed: c2.android.aac.decoder
+            //   → ExoPlayer IllegalStateException in doSomeWork
+            // and playback died before a single frame.
+            //
+            // setEnableDecoderFallback(true) tells ExoPlayer to try the
+            // next matching decoder when the primary throws at runtime —
+            // essential for the c2.android.aac → ffmpeg AAC transition
+            // above. EXTENSION_RENDERER_MODE_PREFER makes ffmpeg the
+            // preferred renderer only for formats the platform can't
+            // reliably handle; well-behaved MP4/AAC content still plays
+            // on the hardware path.
+            io.github.anilbeesetti.nextlib.media3ext.ffdecoder
+                .NextRenderersFactory(context)
+                .setEnableDecoderFallback(true)
+                .setExtensionRendererMode(
+                    androidx.media3.exoplayer.DefaultRenderersFactory
+                        .EXTENSION_RENDERER_MODE_PREFER,
+                )
         }
         // (Live audio is now handled by the custom buildAudioSink above,
         // which resamples everything to 48 kHz — the float-output tweak
@@ -2525,6 +2557,52 @@ private fun VideoPlayer(
                     // bounce back to channel grid). Re-preparing would just
                     // start a new BUFFERING cycle on a player that's about
                     // to be disposed.
+                    return
+                }
+                // VOD audio-decoder failure (broken audio track in the MP4
+                // container — Scary Movie 2160p mp4a.40.2 394kbps with
+                // channelCount=0 was the trigger). Both platform AAC and
+                // ffmpeg AAC choke on it, and there's no way to demux
+                // around a container-level metadata bug in-app. Retry with
+                // the audio renderer disabled entirely — user gets
+                // video-only playback (better than "stuck loading" forever)
+                // and can enable subtitles for dialogue.
+                val cause2 = error.cause
+                val isAudioDecoderFail =
+                    error.errorCode == androidx.media3.common.PlaybackException
+                        .ERROR_CODE_DECODING_FAILED &&
+                        cause2?.stackTrace?.any {
+                            it.className.contains("Audio", ignoreCase = true) ||
+                                it.className.contains("DecoderAudio")
+                        } == true
+                if (isAudioDecoderFail && !audioDisabled.value) {
+                    audioDisabled.value = true
+                    android.util.Log.w(
+                        "LiveDiag",
+                        "VOD audio-decoder failure — retrying video-only " +
+                            "(cause=${cause2?.javaClass?.simpleName})",
+                    )
+                    stabilisingState.value(
+                        "Audio track unsupported — playing video-only",
+                    )
+                    // Disable audio track selection at the trackSelector,
+                    // then rebuild the media pipeline from scratch. Just
+                    // prepare() alone doesn't clear the ERROR state — the
+                    // player stays broken. stop() + setMediaItem() +
+                    // prepare() is the reset dance ExoPlayer expects
+                    // after an unrecoverable renderer error.
+                    val params = trackSelector.buildUponParameters()
+                        .setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_AUDIO, true)
+                        .build()
+                    trackSelector.setParameters(params)
+                    runCatching {
+                        val resumeMs = exo.currentPosition
+                        exo.stop()
+                        val item = androidx.media3.common.MediaItem.fromUri(mediaUrl)
+                        exo.setMediaItem(item, resumeMs.coerceAtLeast(0L))
+                        exo.prepare()
+                        exo.play()
+                    }
                     return
                 }
                 // VOD: try one notch lower (e.g. 1080P HEVC → 720P / 480P H.264).

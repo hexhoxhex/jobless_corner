@@ -268,6 +268,10 @@ object H5Api {
         val ckey = cacheKey(subjectId, season, episode)
         streamCache[ckey]?.takeIf { it.expiresAt > System.currentTimeMillis() }?.let {
             android.util.Log.i("H5Api", "stream cache HIT $ckey (${it.streams.size} streams)")
+            it.streams.forEachIndexed { i, s ->
+                android.util.Log.i("H5Api", "  stream[$i] ${s.resolution}p ${s.format} " +
+                    "${s.durationSec}s -> ${s.url.take(200)}")
+            }
             return@withContext PlayResult(it.streams, hasResource = true)
         }
         // Prime the proxy with a movie-page hit: this is what mints a
@@ -300,6 +304,10 @@ object H5Api {
         )
         if (viaWebView.isNotEmpty()) {
             streamCache[ckey] = CachedStreams(viaWebView, System.currentTimeMillis() + 30 * 60_000L)
+            viaWebView.forEachIndexed { i, s ->
+                android.util.Log.i("H5Api", "  webview[$i] ${s.resolution}p ${s.format} " +
+                    "${s.durationSec}s -> ${s.url.take(200)}")
+            }
         } else {
             // Both paths failed. Wipe the session so the next play starts
             // clean — the cached cookies/JWT are likely the reason the proxy

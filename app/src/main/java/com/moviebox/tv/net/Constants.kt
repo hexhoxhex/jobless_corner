@@ -34,10 +34,12 @@ object Constants {
      * Headers the CDN requires for media + subtitle playback. ExoPlayer injects
      * these on its HTTP data source, which is why no proxy is needed.
      */
-    // Signed mp4 URLs from the H5 play proxy are issued for themoviebox.org —
-    // bcdnxw.hakunaymatata.com rejects requests without this Referer. Matches
-    // the exact header set captured from a working browser play.
-    const val MEDIA_REFERER = "https://themoviebox.org/"
+    // Signed mp4 URLs from the H5 play proxy are issued for the SAME domain
+    // that issued the play call (moviebox.ph now, was themoviebox.org). The
+    // CDN (bcdnxw.hakunaymatata.com + siblings) rejects requests without a
+    // matching Referer + Origin. Track [H5Client.PROXY_BASE] so a future
+    // domain rotation only requires one edit.
+    val MEDIA_REFERER get() = "${H5Client.PROXY_BASE}/"
     const val MEDIA_USER_AGENT =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
@@ -46,7 +48,7 @@ object Constants {
         get() = mapOf(
             "User-Agent" to MEDIA_USER_AGENT,
             "Referer" to MEDIA_REFERER,
-            "Origin" to "https://themoviebox.org",
+            "Origin" to H5Client.PROXY_BASE,
             "Accept" to "*/*",
         )
 
