@@ -97,6 +97,13 @@ class LiveStreamProxy(
          *  actually older than what it already has). Reject such
          *  rotations and force a re-rotation to a different sibling. */
         var lastServedMediaSeq: Long = -1L,
+        /** Wall-clock ms the most recent inner-playlist fetch took. Feeds
+         *  the stale-while-revalidate check at the top of the inner
+         *  handler — if the previous fetch was slow, serve the cached
+         *  body immediately on the next request so ExoPlayer's buffer
+         *  doesn't drain waiting through another 8-second CDN stall.
+         *  Reset to 0 once we've served stale, so we don't loop on it. */
+        var lastInnerFetchDurationMs: Long = 0L,
     )
     private val innerState = ConcurrentHashMap<String, InnerState>()
 
@@ -378,10 +385,42 @@ class LiveStreamProxy(
         //     EXT-X-MEDIA-SEQUENCE numbering — surfaced as "the stream
         //     plays then jumps backward and repeats some content," which
         //     is what the user has been reporting.
+        // Stale-while-revalidate check: if we have a fresh last-good
+        // playlist body AND the previous fetch just took a long time
+        // (upstream is slow), serve the cached body FIRST — the segment
+        // list inside is still valid (each segment URL points at the
+        // same CDN node with its own retry budget) and ExoPlayer keeps
+        // pulling segments while we refresh the playlist in-line
+        // afterwards. Without this, a single 8-second inner fetch
+        // drains ExoPlayer's 22 s buffer to zero and the user sees a
+        // pause icon over a black frame. With it, the buffer stays full
+        // through the CDN hiccup.
+        val cachedForFast = state.lastGoodBody
+        val cacheAgeForFast = System.currentTimeMillis() - state.lastGoodAtMs
+        if (cachedForFast != null &&
+            cacheAgeForFast < FRESH_CACHE_STALE_SERVE_MS &&
+            state.lastInnerFetchDurationMs >= SLOW_INNER_FETCH_MS
+        ) {
+            Log.i(DIAG, "PROXY ch=$channelId STALE_SERVE age=${cacheAgeForFast}ms " +
+                "prev-dt=${state.lastInnerFetchDurationMs}ms")
+            LiveStatus.note("⚠  CDN slow — serving cached playlist…")
+            // Reset the slow flag so we don't stale-serve forever; the
+            // next fetch attempt (kicked off by the ExoPlayer poll ~5 s
+            // from now) gets a real try before we consider this route
+            // again.
+            state.lastInnerFetchDurationMs = 0L
+            return NanoHTTPD.newFixedLengthResponse(
+                NanoHTTPD.Response.Status.OK,
+                "application/vnd.apple.mpegurl", cachedForFast,
+            )
+        }
+
         var lastResponseCode: Int? = null
         var lastWasAuthDead = false
         for (attempt in 1..MAX_INNER_RETRIES) {
+            val tAttempt = System.currentTimeMillis()
             val r = runCatching { fetchUpstreamInner(entry.innerUrl) }
+            state.lastInnerFetchDurationMs = System.currentTimeMillis() - tAttempt
             val resp = r.getOrNull()
             if (resp != null && resp.first.isSuccessful) {
                 state.consecutive5xx = 0
@@ -975,6 +1014,21 @@ class LiveStreamProxy(
          *  given the upstream three chances. Stops a single Wi-Fi blip from
          *  cascading into a Source error on ExoPlayer's side. */
         private const val MAX_INNER_RETRIES: Int = 5
+
+        /** Previous inner-fetch dt over this threshold flags the CDN as
+         *  slow and enables stale-while-revalidate on the NEXT request.
+         *  4 s picks up genuine hiccups (normal fetches are 200-800 ms)
+         *  without triggering on transient jitter. */
+        private const val SLOW_INNER_FETCH_MS: Long = 4_000L
+
+        /** Cache age ceiling for the stale-while-revalidate stale-serve.
+         *  Distinct from [LAST_GOOD_TTL_MS] (the GIVE_UP fallback) because
+         *  we're intentionally serving BEFORE a fresh fetch runs. 6 s
+         *  keeps us within the live-edge window — an HLS playlist advertises
+         *  6 segments at ~4 s each = 24 s of content, and a 6 s stale body
+         *  overlaps enough with the fresh one for ExoPlayer's segment
+         *  loader to walk forward without seeing time reverse. */
+        private const val FRESH_CACHE_STALE_SERVE_MS: Long = 6_000L
         /** Number of consecutive **request-level** 5xx failures before we
          *  commit to swapping to a different sibling. Each individual request
          *  already burns up to [MAX_INNER_RETRIES] attempts internally, so a
