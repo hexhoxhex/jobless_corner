@@ -106,6 +106,7 @@ class LiveResolver(
      */
     suspend fun resolveStream(channelId: String): String? = withContext(Dispatchers.IO) {
         val t0 = System.currentTimeMillis()
+        LiveStatus.note("▶  Fetching streams…")
         // Race every known resolver strategy IN PARALLEL and take the FIRST
         // one that hands back a validated master manifest — the health check
         // inside each probe (GET + `#EXTM3U` prefix) means only URLs the
@@ -181,7 +182,47 @@ class LiveResolver(
                 },
             )
             probes.forEach { if (it.isActive) it.cancel() }
-            first
+            if (first != null || avoid.isEmpty()) {
+                first
+            } else {
+                // Blacklist-hit dead end: we filtered every candidate and
+                // ended up with nothing. Without this escape hatch the
+                // channel stays stuck for the full FAILURE_TTL_MS window
+                // (5 min) even though a xameleon URL — flawed as it may be
+                // — would at least give ExoPlayer something to try. Clear
+                // the per-channel blacklist and race one more time with
+                // everything on the table. LiveStreamProxy's own auth-fail
+                // detection will re-populate the blacklist on the next
+                // real 403 if the CDN is genuinely broken, but at least
+                // we get out of the "resolver returns null forever" loop.
+                android.util.Log.w(
+                    "LiveDiag",
+                    "RESOLVER ch=$channelId first pass FAILED with avoid=$avoid " +
+                        "— clearing blacklist and racing everything as last resort",
+                )
+                reportSuccess(channelId)  // clears the per-channel blacklist
+                val second = coroutineScope {
+                    val fallbackProbes = mutableListOf<Deferred<Pair<String, String>?>>()
+                    for (host in resolverHosts(channelId)) {
+                        for (suffix in DADDY_ENDPOINTS) {
+                            fallbackProbes += async {
+                                runCatching { tryEndpoint(host, channelId, suffix) }
+                                    .getOrNull()?.let { it to "donis@$host" }
+                            }
+                        }
+                    }
+                    for (path in PLAYER_PATHS) {
+                        fallbackProbes += async {
+                            runCatching { tryPlayerPath(channelId, path) }
+                                .getOrNull()?.let { it to "dlhd:$path" }
+                        }
+                    }
+                    val r = awaitFirstNonNull(fallbackProbes)
+                    fallbackProbes.forEach { if (it.isActive) it.cancel() }
+                    r
+                }
+                second
+            }
         }
         if (winner != null) {
             com.moviebox.tv.debug.ProviderHealth.success(winner.second)
@@ -199,6 +240,7 @@ class LiveResolver(
                 "RESOLVER ch=$channelId won=${winner.second} cdn=$cdn " +
                     "dt=${System.currentTimeMillis() - t0}ms",
             )
+            LiveStatus.note("▶  Preparing player…")
             if (winner.second.startsWith("donis@")) {
                 rememberWorkingHost(winner.second.removePrefix("donis@"))
             }
@@ -208,6 +250,7 @@ class LiveResolver(
             "LiveDiag",
             "RESOLVER ch=$channelId FAILED — all daddy × all player paths",
         )
+        LiveStatus.note("✗  All streams offline — try another channel")
         com.moviebox.tv.debug.ProviderHealth.failure(
             "donis", "resolve failed (all daddy endpoints × all player paths)")
         null
@@ -499,10 +542,16 @@ class LiveResolver(
 
         /** After this many 4xx failures on a given (channel, cdn) pair,
          *  future [resolveStream] calls for that channel filter that CDN
-         *  out of the race. Set to 2 so a single flaky-then-recovered
-         *  edge doesn't get permanently blacklisted but a sustained
-         *  problem shifts us to alternates fast. */
-        private const val AVOID_AFTER_FAILURES: Int = 2
+         *  out of the race. Was 2 (too aggressive — FOX USA hit 2 real
+         *  403s on a channel where the ONLY working path IS xameleon and
+         *  got permanently blacklisted for the full 5-min TTL, stalling
+         *  every retry). At 3 a transient burst of 403s doesn't push us
+         *  into a dead end while a sustained problem still routes to the
+         *  ritzembeds/vinix alternates when available. Combined with the
+         *  clear-blacklist-on-empty-race safety net inside resolveStream,
+         *  a channel with no usable alternate degrades to "just keep
+         *  trying xameleon" instead of "return null forever." */
+        private const val AVOID_AFTER_FAILURES: Int = 3
 
         /** Per-channel failure records age out after this window. Prevents
          *  stale blacklist entries from following a channel around after

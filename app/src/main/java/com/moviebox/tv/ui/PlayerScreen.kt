@@ -178,6 +178,21 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
     // — a channel switch is a fresh prepare with a fresh first-frame event.
     var hasRenderedFrame by remember { mutableStateOf(false) }
     LaunchedEffect(play?.mediaUrl) { hasRenderedFrame = false }
+    // Observe the live-TV status pipe. Any note from resolver / proxy /
+    // ViewModel / auto-failover shows up under the channel title in the
+    // fullscreen loader so the user knows what's happening during
+    // "boring loadings". Cleared automatically when video actually
+    // starts (first-frame render or isPlaying=true, see below).
+    val liveStatusMsg by com.moviebox.tv.data.live.LiveStatus.message
+        .collectAsState()
+    LaunchedEffect(hasRenderedFrame) {
+        if (hasRenderedFrame) com.moviebox.tv.data.live.LiveStatus.clear()
+    }
+    // Don't clear on mediaUrl change — the resolver posts "Fetching
+    // streams…" milliseconds after mediaUrl is set, and clearing here
+    // races the post and hides the message. The resolver overwrites
+    // the pipe on every fresh call so stale text from a previous
+    // channel gets replaced as soon as the new resolve starts.
     var resizeMode by remember {
         mutableStateOf(AspectRatioFrameLayout.RESIZE_MODE_FIT)
     }
@@ -597,8 +612,13 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                         fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold,
                     )
-                    // Sub-status when we have one (Reconnecting…, etc).
-                    stabilising?.let { msg ->
+                    // Sub-status: prefer the live-TV pipeline note
+                    // (Fetching streams… / Reconnecting… / All streams
+                    // offline) — falls back to the resilience-tracker
+                    // stabilising message for VOD paths that don't
+                    // publish to LiveStatus. Both are short one-liners.
+                    val sub = liveStatusMsg ?: stabilising
+                    sub?.let { msg ->
                         Text(msg, color = Color(0xFFE8B341), fontSize = 12.sp)
                     }
                 }
@@ -1342,6 +1362,13 @@ private fun LoadingPulse() {
         ),
         label = "alpha",
     )
+    // Pick the most-informative label available:
+    //   1. LiveStatus.message  → "Fetching streams…", "Reconnecting… (3/25)",
+    //                            "Switching to Foxny Usa for this event…", etc.
+    //   2. plain "Starting…"    → fallback for VOD paths and the very-first
+    //                            frames before any stage has posted.
+    val liveMsg by com.moviebox.tv.data.live.LiveStatus.message.collectAsState()
+    val label = liveMsg ?: "Starting…"
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(14.dp),
@@ -1350,10 +1377,11 @@ private fun LoadingPulse() {
         // matches the smooth feel of MovieWay's player loader.
         com.moviebox.tv.ui.components.LottieLoader(size = 72.dp)
         Text(
-            "Starting…",
+            label,
             color = Color.White.copy(alpha = alpha),
             fontSize = 13.sp,
             fontWeight = FontWeight.Medium,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
         )
     }
 }

@@ -870,6 +870,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 "/${MAX_RESOLVE_FAILURES_BEFORE_WEBVIEW} " +
                 "windowSinceLastFailMs=$window",
         )
+        // User-visible: show which attempt we're on so a long loader
+        // doesn't feel indefinite. Split the message by phase so the
+        // most-likely-informative text wins:
+        //   attempts 1-2:      still recovering, be optimistic
+        //   attempts 3+:       we're about to auto-failover to a sibling
+        //   near MAX:          about to fall to WebView (last resort)
+        val statusMsg = when {
+            liveResolveFailures >= MAX_RESOLVE_FAILURES_BEFORE_WEBVIEW - 2 ->
+                "⚠  Native player struggling — falling back to browser…"
+            liveResolveFailures >= AUTO_FAILOVER_AFTER ->
+                "↻  Trying another channel for this event…"
+            else ->
+                "↻  Reconnecting… (attempt $liveResolveFailures/" +
+                    "${MAX_RESOLVE_FAILURES_BEFORE_WEBVIEW})"
+        }
+        com.moviebox.tv.data.live.LiveStatus.note(statusMsg)
         // Drop the proxy's cached resolution + the resolver's cached host so
         // the next /master fetch from ExoPlayer is forced to re-resolve from
         // scratch. Closes the death loop the user described as
@@ -922,6 +938,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 "AUTO_FAILOVER ch=$failingChannelId exhausted — " +
                     "${alternates.size} sibling(s) tried; giving up",
             )
+            com.moviebox.tv.data.live.LiveStatus.note(
+                "✗  All ${alternates.size} channels for this event are offline",
+            )
             _state.update { it.copy(
                 error = "This channel and every alternate feed are offline right now.",
             ) }
@@ -932,6 +951,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             "LiveDiag",
             "AUTO_FAILOVER ch=$failingChannelId → ch=${next.id} (${next.displayName}) — " +
                 "same event, ${triedFailoverAlternates.size}/${alternates.size} tried",
+        )
+        com.moviebox.tv.data.live.LiveStatus.note(
+            "↻  Switching to ${next.displayName} for this event…",
         )
         // Surface a small info toast via the existing error field. Not an
         // error — but the same top-of-screen banner is fine for now.

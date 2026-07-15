@@ -477,6 +477,7 @@ class LiveStreamProxy(
                     // available) or another sibling will win instead of
                     // us being stuck in the same xameleon 403 loop.
                     resolver.reportAuthFailure(channelId, hostOf(entry.innerUrl))
+                    LiveStatus.note("⚠  Stream blocked — trying alternate…")
                     break  // token death — go rotate now
                 }
             } else {
@@ -926,6 +927,7 @@ class LiveStreamProxy(
                     return null
                 }
                 Log.i(DIAG, "PROXY master OK dt=${dt}ms host=${hostOf(masterUrl)}")
+                LiveStatus.note("▶  Buffering…")
                 val body = resp.body?.string() ?: return null
                 var streamInf: String? = null
                 var rel: String? = null
