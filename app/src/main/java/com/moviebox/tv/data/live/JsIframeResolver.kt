@@ -51,11 +51,44 @@ object JsIframeResolver {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
+    /** Per-host recent-timeout memory. A JS iframe host that failed to
+     *  emit any m3u8 within [MAX_WAIT_MS] is recorded here; subsequent
+     *  [resolve] calls for the same host return null IMMEDIATELY (no
+     *  WebView) until the record ages out. This is the live-TV bottleneck
+     *  fix: FOX USA's resolver race includes JS hosts (wikisport.info,
+     *  ksohls.ru, dollardescent.net) that never resolve for that channel,
+     *  and without this each resolve cycle spawned a fresh ~10 MB WebView
+     *  per host that just burned 10 s + CPU before timing out. During a
+     *  403-storm (repeated re-resolves) that piled up dozens of concurrent
+     *  WebViews and starved the video decoder (erratic QIB). Keyed by
+     *  host, not full URL, because the URL's signed token rotates every
+     *  resolve while the host stays constant. */
+    private val deadHosts =
+        java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    private const val DEAD_HOST_TTL_MS = 120_000L  // 2 min, then retry
+
+    private fun hostRecentlyDead(host: String): Boolean {
+        val at = deadHosts[host] ?: return false
+        if (System.currentTimeMillis() - at > DEAD_HOST_TTL_MS) {
+            deadHosts.remove(host)
+            return false
+        }
+        return true
+    }
+
     /** Load [iframeUrl] in a headless WebView with the given [referer]
      *  and return the first `.m3u8` URL its JS requests. Null if nothing
-     *  m3u8-like was requested inside [MAX_WAIT_MS]. */
-    suspend fun resolve(iframeUrl: String, referer: String): String? =
-        suspendCancellableCoroutine { cont ->
+     *  m3u8-like was requested inside [MAX_WAIT_MS], or if this host timed
+     *  out recently (fast-skip, no WebView spawned). */
+    suspend fun resolve(iframeUrl: String, referer: String): String? {
+        val host = hostOf(iframeUrl)
+        if (host.isNotEmpty() && hostRecentlyDead(host)) {
+            // Fast-skip — don't spawn a WebView for a host we know is
+            // dead for now. Saves ~10 s + ~10 MB per skipped host.
+            return null
+        }
+        return suspendCancellableCoroutine { cont ->
             Handler(Looper.getMainLooper()).post {
                 try {
                     runResolve(iframeUrl, referer) { m3u8 ->
@@ -67,6 +100,7 @@ object JsIframeResolver {
                 }
             }
         }
+    }
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun runResolve(
@@ -91,9 +125,14 @@ object JsIframeResolver {
             }
         }
 
-        // Timeout safety net.
+        // Timeout safety net. On timeout, mark this host dead so the next
+        // resolve cycle fast-skips it instead of spawning another WebView.
         main.postDelayed({
-            if (!finished) Log.w(TAG, "timeout: no m3u8 seen from $iframeUrl")
+            if (!finished) {
+                Log.w(TAG, "timeout: no m3u8 seen from $iframeUrl")
+                val host = hostOf(iframeUrl)
+                if (host.isNotEmpty()) deadHosts[host] = System.currentTimeMillis()
+            }
             finish(null)
         }, MAX_WAIT_MS)
 
@@ -145,6 +184,9 @@ object JsIframeResolver {
                             ?.let { enriched["Cookie"] = it }
                         CapturedHeaders.record(hostKey, enriched)
                     }
+                    // This iframe host resolved — clear any stale
+                    // dead-mark so we keep using it.
+                    deadHosts.remove(hostOf(iframeUrl))
                     finish(url)
                 }
                 return null  // let the request proceed normally
