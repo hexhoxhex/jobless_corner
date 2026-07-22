@@ -182,6 +182,25 @@ object H5PlayResolver {
                 Log.w(TAG, "page error: ${error?.errorCode} ${error?.description}")
                 super.onReceivedError(view, request, error)
             }
+
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                if (finished) return
+                // Fast-fail a dead subjectId. When the id has rotated out
+                // of the catalog the SPA redirects to /404 (or renders a
+                // 404 title) and NO subject/play call ever fires — so
+                // without this we'd sit through the full MAX_WAIT_MS
+                // timeout for nothing. Detecting the 404 lets resolvePlay's
+                // title-re-resolve kick in ~2 s after load instead of 25 s.
+                val landed = url ?: view?.url ?: ""
+                val title = view?.title.orEmpty()
+                if ("/404" in landed || title.endsWith("/404") ||
+                    title.equals("404", ignoreCase = true)
+                ) {
+                    Log.w(TAG, "page is 404 ($landed) — dead subjectId, bailing early")
+                    finish(emptyList())
+                }
+            }
         }
 
         val pageUrl = PAGE_URL(detailPath, subjectId, season, episode)

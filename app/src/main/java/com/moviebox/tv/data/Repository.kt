@@ -445,6 +445,10 @@ class Repository(
         episode: Int? = null,
         dub: String = "Original",
         titleHint: String? = null,
+        // Internal guard: allow ONE title-based re-resolution when the
+        // given subjectId is dead (404 / 0 streams). Prevents infinite
+        // recursion — the retry passes false.
+        allowReresolve: Boolean = true,
     ): PlayInfo {
         // Get the real title + dubs from the H5 detail endpoint. The legacy
         // mobile itemDetails returns 441 now, so without this the player
@@ -544,6 +548,44 @@ class Repository(
             firstAttempt.getOrThrow()
         }
         if (play.streams.isEmpty()) {
+            // Stale-subjectId self-heal. aoneroom rotates subjectIds over
+            // time, so a Continue-Watching / history entry (or a deep link)
+            // can point at a subjectId that now 404s — the detail lookup
+            // returns null, both the episode-specific AND subject-level
+            // play calls return 0 streams, and the app just loops the
+            // WebView resolver forever ("stuck loading"). Verified on
+            // Family Guy: history held 256827366285135664 (dead) while the
+            // live catalog serves the same show as 2066092575169151304.
+            //
+            // Recover by re-searching the catalog for the title we have on
+            // hand and retrying ONCE with the fresh subjectId. Generic —
+            // fixes every stale-history title, not just Family Guy. Guarded
+            // by allowReresolve so the retry can't recurse, and by a title
+            // + fresh-id check so we never silently swap to a different
+            // show.
+            val hint = titleHint?.takeIf { it.isNotBlank() }
+            if (allowReresolve && hint != null) {
+                val looksSeries = (season ?: 0) > 0 || (episode ?: 0) > 0
+                val fresh = runCatching {
+                    resolveByTitle(hint, year = null, isSeries = looksSeries)
+                }.getOrNull()
+                if (fresh != null && fresh.subjectId != subjectId) {
+                    android.util.Log.w(
+                        "H5",
+                        "resolvePlay stale subjectId=$subjectId 404'd — " +
+                            "re-resolved '$hint' to ${fresh.subjectId}; retrying",
+                    )
+                    return resolvePlay(
+                        subjectId = fresh.subjectId,
+                        resolution = resolution,
+                        season = season,
+                        episode = episode,
+                        dub = dub,
+                        titleHint = hint,
+                        allowReresolve = false,
+                    )
+                }
+            }
             throw ApiException("This title isn't available right now.")
         }
         // Pick the best stream the user asked for. If [resolution] is
