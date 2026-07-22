@@ -204,6 +204,12 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
     var scrubbing by remember { mutableStateOf(false) }
     var scrubTo by remember { mutableLongStateOf(0L) }
     var exoRef by remember { mutableStateOf<androidx.media3.common.Player?>(null) }
+    // Currently-selected subtitle language code, or null = subtitles off.
+    // Drives the Subtitles dropdown in the VOD control overlay; applied to
+    // the player via trackSelectionParameters (no DefaultTrackSelector
+    // reference needed). Reset to off when the played item changes.
+    var subtitleLang by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(play?.mediaUrl) { subtitleLang = null }
     // True once the player fires STATE_ENDED for THIS movie/episode — the
     // definitive "content actually finished" signal. The movie / end-of-
     // series auto-advance keys off this instead of a duration estimate,
@@ -746,6 +752,38 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                             play.qualities.map { it.label to it.label },
                             onInteract = bumpControls) {
                             vm.changeQuality(it)
+                        }
+                        // Subtitles selector. Shows whenever the H5 caption
+                        // fetch returned any tracks. "Off" + one entry per
+                        // caption language. Applies via the player's
+                        // trackSelectionParameters so no DefaultTrackSelector
+                        // handle is needed here.
+                        if (play.captions.isNotEmpty()) {
+                            val current = play.captions
+                                .firstOrNull { it.code == subtitleLang }?.name
+                                ?: "Off"
+                            val options = listOf("Off" to "") +
+                                play.captions.map { it.name to it.code }
+                            Dropdown(
+                                "CC: $current", options,
+                                onInteract = bumpControls,
+                            ) { picked ->
+                                val exo = exoRef
+                                if (exo != null) {
+                                    subtitleLang = picked.ifBlank { null }
+                                    exo.trackSelectionParameters =
+                                        exo.trackSelectionParameters.buildUpon()
+                                            .setTrackTypeDisabled(
+                                                C.TRACK_TYPE_TEXT,
+                                                picked.isBlank(),  // "Off" → disable text
+                                            )
+                                            .apply {
+                                                if (picked.isNotBlank())
+                                                    setPreferredTextLanguage(picked)
+                                            }
+                                            .build()
+                                }
+                            }
                         }
                     }
                     CircleBtn(Icons.Filled.AspectRatio, onInteract = bumpControls) {
@@ -1620,11 +1658,22 @@ private fun VideoPlayer(
             // The noTunneling param disables it even on live for channels
             // whose audio sample rate (24 kHz football) crashes
             // AudioTrack under tunneling — see VideoPlayer's docstring.
-            if (isLive && !noTunneling) {
-                parameters = buildUponParameters()
-                    .setTunnelingEnabled(true)
-                    .build()
-            }
+            // Default audio to English. aoneroom VOD files are often
+            // MULTI-audio (they bundle English + a regional dub — Spanish,
+            // Portuguese — in one MP4), and without a language preference
+            // ExoPlayer's DefaultTrackSelector picks whichever track the
+            // container lists first. That order varies per file, which is
+            // exactly the "episode 1 English, episode 2 Spanish" shift the
+            // user reported. Preferring English (+ common variants) makes
+            // the selector lock onto the English track when one exists,
+            // and degrade gracefully (pick whatever's available) when it
+            // doesn't — setPreferredAudioLanguages is a preference, not a
+            // hard filter. Applied to live too; live streams are almost
+            // always single-audio so it's a harmless no-op there.
+            parameters = buildUponParameters()
+                .setPreferredAudioLanguages("en", "eng", "en-US")
+                .setTunnelingEnabled(isLive && !noTunneling)
+                .build()
         }
     }
 
@@ -2124,17 +2173,19 @@ private fun VideoPlayer(
                 )
                 .build()
         } else {
-            // Prefer the device language; fall back to English if unavailable.
-            val codes = captions.map { it.code }
-            val defaultCode = if (defaultSubtitleLang in codes) defaultSubtitleLang
-            else "en"
+            // Attach every caption track as a selectable subtitle, but do
+            // NOT flag any as DEFAULT — subtitles are opt-in via the "CC"
+            // dropdown in the control overlay. Auto-forcing subs based on
+            // device locale surprised users who just wanted English audio
+            // (the primary complaint); making them opt-in keeps the screen
+            // clean until the user asks for them. The dropdown enables a
+            // track via setPreferredTextLanguage + re-enabling TEXT type.
             val subs = captions.map { c ->
                 val mime = if (c.url.endsWith(".vtt", true)) MimeTypes.TEXT_VTT
                 else MimeTypes.APPLICATION_SUBRIP
-                val b = MediaItem.SubtitleConfiguration.Builder(Uri.parse(c.url))
+                MediaItem.SubtitleConfiguration.Builder(Uri.parse(c.url))
                     .setMimeType(mime).setLanguage(c.code).setLabel(c.name)
-                if (c.code == defaultCode) b.setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
-                b.build()
+                    .build()
             }
             MediaItem.Builder().setUri(mediaUrl)
                 .setSubtitleConfigurations(subs).build()
@@ -2381,6 +2432,29 @@ private fun VideoPlayer(
             }
             override fun onRenderedFirstFrame() {
                 firstFrameState.value()
+            }
+            override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+                // Log every audio + text track and whether it's selected.
+                // Diagnostic for the "language shifts between episodes"
+                // report — tells us if a file is multi-audio (our
+                // preferred-language pick applies) or single-track (the
+                // dub selector is the only lever).
+                val sb = StringBuilder("TRACKS ")
+                for (g in tracks.groups) {
+                    val t = g.type
+                    if (t != androidx.media3.common.C.TRACK_TYPE_AUDIO &&
+                        t != androidx.media3.common.C.TRACK_TYPE_TEXT
+                    ) continue
+                    val kind = if (t == androidx.media3.common.C.TRACK_TYPE_AUDIO)
+                        "AUD" else "TXT"
+                    for (i in 0 until g.length) {
+                        val f = g.getTrackFormat(i)
+                        val sel = if (g.isTrackSelected(i)) "*" else " "
+                        sb.append("[$kind$sel lang=${f.language} " +
+                            "label=${f.label} codec=${f.sampleMimeType}] ")
+                    }
+                }
+                android.util.Log.i("VodDiag", sb.toString())
             }
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                 com.moviebox.tv.debug.Telemetry.onPlayFailed(
