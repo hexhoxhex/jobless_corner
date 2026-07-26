@@ -892,6 +892,19 @@ async function refresh() {
   try {
     const s = await get("/api/state");
     lastState = s;
+    // Empty vs playing: when the TV isn't playing anything, show the clean
+    // "Nothing playing" state and hide the transport/volume cards so the
+    // page isn't a stack of dead controls. Continue Watching stays visible.
+    const active = !!(s.title && s.title.trim());
+    $("#npEmpty").hidden = active;
+    $("#npCard").hidden = !active;
+    $("#volCard").hidden = !active;
+    // Cover art in the hero.
+    const cover = $("#npCover");
+    if (cover) {
+      if (s.cover) { cover.src = s.cover; cover.style.visibility = "visible"; }
+      else { cover.removeAttribute("src"); cover.style.visibility = "hidden"; }
+    }
     $("#npTitle").textContent = s.title || "Nothing playing";
     // Episode badge under the title — kept in sync with TV state so the
     // remote shows the same episode the user is actually watching, even

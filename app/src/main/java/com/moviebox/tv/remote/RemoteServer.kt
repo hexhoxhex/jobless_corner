@@ -608,6 +608,7 @@ class RemoteServer(
         .put("subjectId", RemoteController.nowPlayingSubjectId ?: JSONObject.NULL)
         .put("type", RemoteController.nowPlayingType)
         .put("year", RemoteController.nowPlayingYear ?: JSONObject.NULL)
+        .put("cover", RemoteController.nowPlayingCover ?: "")
         .toString()
 
     private fun ok() = json("{\"ok\":true}")

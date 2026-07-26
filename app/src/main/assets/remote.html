@@ -271,9 +271,23 @@
 
   <!-- NOW PLAYING -->
   <section id="pane-np" class="pane">
-    <div class="card np-card">
-      <div class="np-title" id="npTitle">Nothing playing</div>
-      <div class="np-ep" id="npEp" hidden></div>
+    <!-- Empty state — shown when the TV isn't playing anything. Keeps the
+         controls hidden so the page doesn't look like a pile of dead
+         buttons. -->
+    <div id="npEmpty" class="np-empty">
+      <div class="np-empty-icon">▶</div>
+      <div class="np-empty-title">Nothing playing</div>
+      <div class="np-empty-sub muted">Pick a movie, show, or channel to start</div>
+    </div>
+    <div class="card np-card" id="npCard" hidden>
+      <!-- Hero: poster + title/episode side by side. -->
+      <div class="np-hero">
+        <img id="npCover" class="np-cover" alt="" onerror="this.style.visibility='hidden'"/>
+        <div class="np-hero-meta">
+          <div class="np-title" id="npTitle">Nothing playing</div>
+          <div class="np-ep" id="npEp" hidden></div>
+        </div>
+      </div>
       <!-- Scrubber: drag to seek the TV's playback. Pattern mirrors the
            volume slider below — input drives a live preview, the actual
            seek fires on `change` (mouse/touch up) so we don't spam the
@@ -306,7 +320,7 @@
         <button id="npClose" class="ghost">✕ Stop</button>
       </div>
     </div>
-    <div class="card">
+    <div class="card" id="volCard" hidden>
       <div class="row label-row">
         <span class="muted">Volume</span>
         <span id="volPct" class="muted num-fixed">—</span>

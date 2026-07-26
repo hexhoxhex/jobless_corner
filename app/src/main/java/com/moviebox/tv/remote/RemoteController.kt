@@ -125,6 +125,13 @@ object RemoteController {
     val nowPlayingSubjectId: String? get() = vm?.state?.value?.detailItem?.subjectId
     val nowPlayingType: Int get() = vm?.state?.value?.detailItem?.type?.code ?: 0
     val nowPlayingYear: Int? get() = vm?.state?.value?.detailItem?.year
+    /** Poster of what's playing, so the remote's Now Playing screen can show
+     *  cover art instead of a bare title. Falls back to the in-process
+     *  cover map (for a Continue-Watching resume that went straight to the
+     *  player without a detail load). */
+    val nowPlayingCover: String? get() =
+        vm?.state?.value?.detailItem?.coverUrl?.takeIf { it.isNotBlank() }
+            ?: nowPlayingSubjectId?.let { knownCover(it) }
 
     private val vm: MainViewModel? get() = vmRef?.get()
 
