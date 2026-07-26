@@ -612,10 +612,35 @@ class Repository(
                 mediaUrl = s.url,
             )
         }
-        val captions = runCatching {
+        val aoneroomCaptions = runCatching {
             api.extCaptions(effectiveId, selectedStream.id).unwrap()
                 .extCaptions.map { CaptionTrack(it.lan, it.lanName, it.url) }
         }.getOrDefault(emptyList())
+        // External English subtitles from OpenSubtitles, fetched ONLY when
+        // the catalog gave us no English caption — the common case for
+        // foreign-dubbed single-audio files (Family Guy S8E1 = Spanish
+        // audio, zero aoneroom captions). Cached to disk keyed by
+        // title+SxEx, so only the first watch of an episode pays the fetch;
+        // gated on an API key (no key → instant no-op) and bounded by an
+        // 8 s timeout so a slow/quota-exhausted OpenSubtitles never blocks
+        // playback start. See [OpenSubtitlesClient].
+        val hasEnglishCaption = aoneroomCaptions.any {
+            it.code.startsWith("en", ignoreCase = true)
+        }
+        val externalCaptions = if (!hasEnglishCaption) {
+            val subTitle = titleHint?.takeIf { it.isNotBlank() }
+                ?: h5Detail?.title
+            val uri = subTitle?.let { t ->
+                kotlinx.coroutines.withTimeoutOrNull(8_000) {
+                    com.moviebox.tv.net.OpenSubtitlesClient.findEnglish(
+                        title = t, season = season ?: 0, episode = episode ?: 0,
+                    )
+                }
+            }
+            if (uri != null) listOf(CaptionTrack("en", "English", uri))
+            else emptyList()
+        } else emptyList()
+        val captions = aoneroomCaptions + externalCaptions
 
         // Real movie / series name from H5 detail; falls back to the subjectId
         // only as a last resort if the detail endpoint had nothing.
