@@ -854,6 +854,14 @@ button.icon-btn { flex: 0 0 auto; padding: 8px 10px; }
 .livecard .logo-wrap .ph-letters {
   color: var(--muted); font-weight: 700; font-size: 1.1rem;
 }
+/* Monogram tile — fills the logo box with a colored gradient + initials.
+   Replaces the plain grey letters so no-logo channels look intentional. */
+.livecard .logo-wrap .ph-mono {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; font-weight: 800; font-size: 1.35rem; letter-spacing: .04em;
+  text-shadow: 0 1px 3px rgba(0,0,0,.4);
+}
 .livecard .live-pill {
   position: absolute; top: 4px; right: 4px;
   background: #e5484d; color: #fff;
@@ -873,8 +881,12 @@ button.icon-btn { flex: 0 0 auto; padding: 8px 10px; }
   display: flex; align-items: center; justify-content: center; }
 .trailer-modal.hidden { display: none; }
 .trailer-backdrop { position: absolute; inset: 0; background: rgba(0,0,0,.85); }
-.trailer-box { position: relative; width: min(92vw, 900px);
-  aspect-ratio: 16 / 9; background: #000; border-radius: 12px;
+/* Explicit width AND height (16:9). aspect-ratio alone computed to
+   height:auto inside the flex-centered modal, giving the iframe 0 height
+   → a white screen. min() keeps it responsive; 900px→506px is 16:9. */
+.trailer-box { position: relative;
+  width: min(92vw, 900px); height: min(51.75vw, 506px);
+  background: #000; border-radius: 12px;
   overflow: hidden; box-shadow: 0 12px 48px rgba(0,0,0,.6); }
 .trailer-frame, .trailer-frame iframe { width: 100%; height: 100%; border: 0; }
 .trailer-close { position: absolute; top: 8px; right: 8px; z-index: 2;

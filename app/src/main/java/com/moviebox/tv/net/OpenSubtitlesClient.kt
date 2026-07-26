@@ -71,36 +71,63 @@ object OpenSubtitlesClient {
     }
 
     private fun imdbId(title: String, isSeries: Boolean): String? {
-        val key = "${title.lowercase()}|$isSeries"
+        val key = title.lowercase()
         imdbCache[key]?.let { return it }
-        val type = if (isSeries) "series" else "movie"
-        val q = java.net.URLEncoder.encode(title, "UTF-8")
-        val req = Request.Builder()
-            .url("$CINEMETA/$type/top/search=$q.json")
-            .header("User-Agent", UA).header("Accept", "application/json")
-            .get().build()
-        http.newCall(req).execute().use { r ->
-            if (!r.isSuccessful) return null
-            val metas = JSONObject(r.body?.string().orEmpty())
-                .optJSONArray("metas") ?: return null
-            var fallback: String? = null
-            for (i in 0 until metas.length()) {
-                val m = metas.getJSONObject(i)
-                val id = m.optString("id").takeIf { it.startsWith("tt") } ?: continue
-                if (fallback == null) fallback = id
-                if (m.optString("name").equals(title, ignoreCase = true)) {
-                    imdbCache[key] = id
-                    Log.i(TAG, "imdb '$title' -> $id (exact)")
-                    return id
+        val want = normalizeName(title)
+        if (want.isBlank()) return null
+        // Search BOTH catalogs (the requested type first) — aoneroom's
+        // isSeries flag is sometimes wrong (seasons=[] on a real series), so
+        // trusting it alone matched a same-named MOVIE for a SERIES (the
+        // "Stranger Things shows a wrong movie trailer" bug). Collect
+        // candidates from both, then require an EXACT normalized-name match.
+        // NO loose "top result" fallback — a near-miss title (e.g. "Affinity"
+        // matching a different Asian film) was pulling wrong-language subs and
+        // wrong trailers. Better to show nothing than the wrong thing.
+        val primary = if (isSeries) "series" else "movie"
+        val secondary = if (isSeries) "movie" else "series"
+        data class Cand(val id: String, val name: String, val type: String)
+        val cands = mutableListOf<Cand>()
+        for (type in listOf(primary, secondary)) {
+            val q = java.net.URLEncoder.encode(title, "UTF-8")
+            val req = Request.Builder()
+                .url("$CINEMETA/$type/top/search=$q.json")
+                .header("User-Agent", UA).header("Accept", "application/json")
+                .get().build()
+            runCatching {
+                http.newCall(req).execute().use { r ->
+                    if (!r.isSuccessful) return@use
+                    val metas = JSONObject(r.body?.string().orEmpty())
+                        .optJSONArray("metas") ?: return@use
+                    for (i in 0 until metas.length()) {
+                        val m = metas.getJSONObject(i)
+                        val id = m.optString("id").takeIf { it.startsWith("tt") }
+                            ?: continue
+                        cands.add(Cand(id, m.optString("name"), type))
+                    }
                 }
             }
-            if (fallback != null) {
-                imdbCache[key] = fallback
-                Log.i(TAG, "imdb '$title' -> $fallback (top)")
-            }
-            return fallback
         }
+        // Exact normalized-name match, preferring the requested type.
+        val match = cands.firstOrNull {
+            normalizeName(it.name) == want && it.type == primary
+        } ?: cands.firstOrNull { normalizeName(it.name) == want }
+        if (match != null) {
+            imdbCache[key] = match.id
+            Log.i(TAG, "imdb '$title' -> ${match.id} (${match.type}, exact)")
+            return match.id
+        }
+        Log.w(TAG, "imdb '$title' -> no exact match (${cands.size} candidates)")
+        return null
     }
+
+    /** Lowercase, strip punctuation + edition/year noise, collapse spaces —
+     *  so "Marvel's Agents of S.H.I.E.L.D." and "Marvel Agents of SHIELD"
+     *  compare equal, but "Affinity" and "Affinity: Chapter 2" don't. */
+    private fun normalizeName(s: String): String =
+        s.lowercase()
+            .replace(Regex("\\(\\d{4}\\)"), "")
+            .replace(Regex("[^a-z0-9]+"), " ")
+            .trim()
 
     /** Query the addon and return one Sub per language (top file per lang). */
     private fun subtitlesFor(imdb: String, season: Int, episode: Int): List<Sub> {

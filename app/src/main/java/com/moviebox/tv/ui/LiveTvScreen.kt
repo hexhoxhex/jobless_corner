@@ -275,19 +275,26 @@ private fun ChannelCard(
             .padding(8.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
+        // Track whether the logo URL failed to load (404 / decode error) so
+        // we fall back to the initials monogram — some of the 247 channels
+        // that DO carry a logo URL point at tv-logos paths that have since
+        // 404'd. Without this the card would show an empty dark box.
+        var logoFailed by remember(ch.logo) { mutableStateOf(false) }
+        val showMonogram = ch.logo.isNullOrBlank() || logoFailed
         Box(
             Modifier.fillMaxWidth().aspectRatio(1.5f)
                 .clip(RoundedCornerShape(8.dp))
                 .then(
-                    if (!ch.logo.isNullOrBlank()) Modifier.background(Color(0xFF0A0C12))
+                    if (!showMonogram) Modifier.background(Color(0xFF0A0C12))
                     else Modifier.background(initialsGradient(ch.displayName))
                 ),
             contentAlignment = Alignment.Center,
         ) {
-            if (!ch.logo.isNullOrBlank()) {
+            if (!showMonogram) {
                 AsyncImage(
                     model = ch.logo, contentDescription = ch.name,
                     contentScale = ContentScale.Fit,
+                    onError = { logoFailed = true },
                     modifier = Modifier.fillMaxSize().padding(10.dp),
                 )
             } else {

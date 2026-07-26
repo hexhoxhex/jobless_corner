@@ -651,6 +651,28 @@ function escapeHtml(s) {
   }[c]));
 }
 
+// Colored initials tile for a channel with no (or a broken) logo. Hue is
+// hashed from the name so the same channel always gets the same color, and
+// distinct channels spread across the wheel. Up to 3 letters from the
+// significant words (e.g. "SuperSport 2" -> "SS2", "beIN Sports" -> "BS").
+function channelMonogram(name) {
+  const raw = (name || "").trim();
+  const words = raw.replace(/[^a-zA-Z0-9 ]/g, "").split(/\s+/).filter(Boolean);
+  let letters;
+  if (words.length >= 2) {
+    letters = words.slice(0, 3).map(w => w[0]).join("");
+  } else {
+    letters = (words[0] || raw || "?").slice(0, 3);
+  }
+  letters = (letters || "?").toUpperCase();
+  let h = 0;
+  for (const c of raw) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  const hue = h % 360;
+  return `<span class="ph-mono" style="background:linear-gradient(135deg,` +
+    `hsl(${hue} 52% 34%),hsl(${(hue + 40) % 360} 52% 22%))">` +
+    `${escapeHtml(letters)}</span>`;
+}
+
 /* ---------- details ---------- */
 function openDetails(it) {
   pushView("details", it);
@@ -1344,9 +1366,16 @@ function renderLiveChannels() {
   liveChannelsAll.forEach(ch => {
     const card = document.createElement("div");
     card.className = "livecard";
+    // Monogram fallback for channels with no logo — 505 of 752 channels
+    // don't match the tv-logos repo the scraper pulls from. A colored
+    // initials tile (deterministic hue per channel name) so the grid
+    // never shows empty boxes, matching the APK's ChannelCard. Also used
+    // when a logo URL is present but 404s (onerror swaps in the mono).
+    const mono = channelMonogram(ch.name);
     const logoHtml = ch.logo
-      ? `<img src="${escapeHtml(ch.logo)}" alt="" onerror="this.remove()"/>`
-      : `<span class="ph-letters">${escapeHtml((ch.name||"").slice(0,3).toUpperCase())}</span>`;
+      ? `<img src="${escapeHtml(ch.logo)}" alt="" data-mono="${encodeURIComponent(mono)}"` +
+        ` onerror="this.outerHTML=decodeURIComponent(this.dataset.mono)"/>`
+      : mono;
     const isCurrent = nowPlaying && (ch.name || "").trim().toLowerCase() === nowPlaying;
     if (isCurrent) card.classList.add("now-playing");
     // ch.sweep === "down" means the CI deep-probe (data/health.json) saw
