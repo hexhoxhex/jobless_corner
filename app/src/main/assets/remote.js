@@ -983,25 +983,55 @@ async function refresh() {
   } catch (e) { /* ignore */ }
 }
 
-/** Render the quality + audio pickers when there's an active stream. */
+/** Render the quality + audio + subtitle pickers when there's an active
+ *  stream. */
 function syncTracks(s) {
   const qs = s.qualities || [], ds = s.dubs || [];
+  const subs = s.subtitles || [];
   const card = $("#trackCard");
   // Use the `hidden` attribute (boolean) rather than toggling style.display.
   // Together with the layout-stability rules in CSS, this avoids the brief
   // reflow the user saw every time playback state ticked.
-  const show = qs.length > 0 || ds.length > 0;
-  if (card.hidden === !show) { /* no-op when state is unchanged */ }
-  else card.hidden = !show;
+  const hasQa = qs.length > 0 || ds.length > 0;
+  const hasCc = subs.length > 0;
+  const show = hasQa || hasCc;
+  card.hidden = !show;
   if (!show) return;
-  fillSelect($("#qualitySel"), qs, s.quality, async (v) => {
-    await post("/api/quality?label=" + encodeURIComponent(v));
-    toast("Quality: " + v);
-  });
-  fillSelect($("#dubSel"), ds, s.dub, async (v) => {
-    await post("/api/dub?name=" + encodeURIComponent(v));
-    toast("Audio: " + v);
-  });
+  // Quality/Audio row only when those exist.
+  $("#qaLabels").hidden = !hasQa;
+  $("#qaRow").hidden = !hasQa;
+  if (hasQa) {
+    fillSelect($("#qualitySel"), qs, s.quality, async (v) => {
+      await post("/api/quality?label=" + encodeURIComponent(v));
+      toast("Quality: " + v);
+    });
+    fillSelect($("#dubSel"), ds, s.dub, async (v) => {
+      await post("/api/dub?name=" + encodeURIComponent(v));
+      toast("Audio: " + v);
+    });
+  }
+  // Subtitles (CC): "Off" + one option per available language. Value is the
+  // language code; label is the display name. Sets the track on the TV.
+  $("#ccRow").hidden = !hasCc;
+  if (hasCc) {
+    const ccSel = $("#ccSel");
+    const sig = "OFF|" + subs.map(x => x.code).join("|") + "::" + (s.subtitle || "");
+    if (ccSel.dataset.sig !== sig) {
+      ccSel.dataset.sig = sig;
+      ccSel.innerHTML = "";
+      const off = document.createElement("option");
+      off.value = ""; off.textContent = "Off"; ccSel.appendChild(off);
+      subs.forEach(x => {
+        const o = document.createElement("option");
+        o.value = x.code; o.textContent = x.name; ccSel.appendChild(o);
+      });
+      ccSel.value = s.subtitle || "";
+      ccSel.onchange = async () => {
+        await post("/api/subtitle?lang=" + encodeURIComponent(ccSel.value));
+        toast(ccSel.value ? "Subtitles: " + (ccSel.selectedOptions[0]?.textContent || ccSel.value) : "Subtitles off");
+      };
+    }
+  }
 }
 
 function fillSelect(sel, options, current, onPick) {

@@ -127,6 +127,12 @@ class RemoteServer(
             uri == "/api/quality" && method == Method.POST -> {
                 p("label")?.let { RemoteController.pickQuality(it) }; ok()
             }
+            // Subtitle (CC) selection from the phone. lang="" (or absent)
+            // turns subtitles off; any other value enables that language's
+            // track on the TV player.
+            uri == "/api/subtitle" && method == Method.POST -> {
+                RemoteController.setSubtitle(p("lang")); ok()
+            }
             uri == "/api/dub" && method == Method.POST -> {
                 p("name")?.let { RemoteController.pickDub(it) }; ok()
             }
@@ -609,6 +615,19 @@ class RemoteServer(
         .put("type", RemoteController.nowPlayingType)
         .put("year", RemoteController.nowPlayingYear ?: JSONObject.NULL)
         .put("cover", RemoteController.nowPlayingCover ?: "")
+        // Subtitle tracks + current selection for the phone's CC menu.
+        .put("subtitles", JSONArray().apply {
+            RemoteController.availableSubtitles.forEach { (code, name) ->
+                put(JSONObject().put("code", code).put("name", name))
+            }
+        })
+        .put("subtitle", run {
+            // Report the current selection only if it's still valid for
+            // what's playing — content switches invalidate a stale pick.
+            val cur = RemoteController.currentSubtitleLang
+            if (cur != null && RemoteController.availableSubtitles.any { it.first == cur })
+                cur else ""
+        })
         .toString()
 
     private fun ok() = json("{\"ok\":true}")

@@ -133,6 +133,34 @@ object RemoteController {
         vm?.state?.value?.detailItem?.coverUrl?.takeIf { it.isNotBlank() }
             ?: nowPlayingSubjectId?.let { knownCover(it) }
 
+    // ---- Subtitles (CC) for the phone remote ----
+    /** Available subtitle tracks for what's playing, as (code, name) pairs.
+     *  Sourced from the play resolution's caption list (aoneroom captions +
+     *  OpenSubtitles languages). Empty for live TV / titles with no subs. */
+    val availableSubtitles: List<Pair<String, String>>
+        get() = vm?.state?.value?.play?.captions?.map { it.code to it.name }
+            ?: emptyList()
+
+    /** Currently-selected subtitle language code on the TV player, or null =
+     *  off. Tracked here (set by [setSubtitle]) and reset when the played
+     *  item changes so the remote's CC menu reflects the live state. */
+    @Volatile var currentSubtitleLang: String? = null
+        private set
+
+    /** Enable a subtitle language on the TV player (null/blank = turn off).
+     *  Mirrors the APK player's CC dropdown: toggles the TEXT track type
+     *  and sets the preferred text language on the player's
+     *  trackSelectionParameters. Must run on the player's thread. */
+    fun setSubtitle(code: String?) = main.post {
+        val p = player ?: return@post
+        val lang = code?.takeIf { it.isNotBlank() }
+        currentSubtitleLang = lang
+        val params = p.trackSelectionParameters.buildUpon()
+            .setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_TEXT, lang == null)
+        if (lang != null) params.setPreferredTextLanguage(lang)
+        p.trackSelectionParameters = params.build()
+    }
+
     private val vm: MainViewModel? get() = vmRef?.get()
 
     fun bind(viewModel: MainViewModel, am: AudioManager) {

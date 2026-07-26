@@ -342,13 +342,22 @@
       </div>
     </div>
     <div class="card" id="trackCard" hidden>
-      <div class="row label-row">
+      <div class="row label-row" id="qaLabels">
         <span class="muted">Quality</span>
         <span class="muted">Audio</span>
       </div>
-      <div class="row">
+      <div class="row" id="qaRow">
         <select id="qualitySel" class="select-pill"></select>
         <select id="dubSel" class="select-pill"></select>
+      </div>
+      <!-- Subtitles (CC). Populated from /api/state.subtitles; changing it
+           enables that language's track on the TV. Hidden when the title
+           has no subtitle tracks. -->
+      <div id="ccRow" hidden>
+        <div class="row label-row"><span class="muted">Subtitles</span></div>
+        <div class="row">
+          <select id="ccSel" class="select-pill"></select>
+        </div>
       </div>
     </div>
     <div class="card">

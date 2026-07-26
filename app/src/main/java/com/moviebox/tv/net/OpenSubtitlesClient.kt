@@ -247,6 +247,11 @@ object OpenSubtitlesClient {
         "nld" to "nl", "spn" to "es", "sp" to "es", "hbs-srp" to "sr",
         "hbs" to "sr", "scc" to "sr", "scr" to "hr", "cze-ces" to "cs",
         "ge" to "de", "chs" to "zh", "cht" to "zh",
+        "bos" to "bs", "mac" to "mk", "mkd" to "mk", "alb" to "sq",
+        "sqi" to "sq", "lav" to "lv", "lit" to "lt", "geo" to "ka",
+        "arm" to "hy", "aze" to "az", "kaz" to "kk", "tam" to "ta",
+        "tel" to "te", "mal" to "ml", "urd" to "ur", "sin" to "si",
+        "mya" to "my", "khm" to "km", "lao" to "lo", "nep" to "ne",
     )
     private val LANG_NAMES = mapOf(
         "eng" to "English", "spa" to "Spanish", "fre" to "French",
@@ -268,5 +273,12 @@ object OpenSubtitlesClient {
         "hbs-srp" to "Serbian", "hbs" to "Serbian", "scc" to "Serbian",
         "scr" to "Croatian", "ge" to "German", "chs" to "Chinese",
         "cht" to "Chinese (Trad)",
+        "bos" to "Bosnian", "mac" to "Macedonian", "mkd" to "Macedonian",
+        "alb" to "Albanian", "sqi" to "Albanian", "lav" to "Latvian",
+        "lit" to "Lithuanian", "geo" to "Georgian", "arm" to "Armenian",
+        "aze" to "Azerbaijani", "kaz" to "Kazakh", "tam" to "Tamil",
+        "tel" to "Telugu", "mal" to "Malayalam", "urd" to "Urdu",
+        "sin" to "Sinhala", "mya" to "Burmese", "khm" to "Khmer",
+        "lao" to "Lao", "nep" to "Nepali",
     )
 }
