@@ -913,3 +913,23 @@ button.icon-btn { flex: 0 0 auto; padding: 8px 10px; }
   display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
 .np-hero .np-ep { margin-top: 6px; font-size: .85rem;
   color: var(--accent, #e5484d); font-weight: 600; }
+
+/* ---- Continue Watching cards ---- */
+.list .cw-item { padding: 10px; align-items: center; gap: 12px; }
+.cw-poster {
+  position: relative; width: 56px; height: 80px; flex: 0 0 auto;
+  border-radius: 8px; overflow: hidden; background: var(--surface-3); }
+.cw-poster img { width: 100%; height: 100%; object-fit: cover; }
+.cw-play {
+  position: absolute; inset: 0; display: flex; align-items: center;
+  justify-content: center; color: #fff;
+  background: rgba(0,0,0,.28); opacity: .9; }
+.cw-play .icon { width: 22px; height: 22px;
+  filter: drop-shadow(0 1px 3px rgba(0,0,0,.6)); }
+.cw-bar {
+  position: absolute; left: 0; right: 0; bottom: 0; height: 4px;
+  background: rgba(255,255,255,.22); }
+.cw-bar > span { display: block; height: 100%; background: var(--accent); }
+.cw-item .body .t { font-size: .92rem; white-space: normal;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.cw-item .cw-pct { color: var(--accent); font-weight: 600; margin-top: 3px; }

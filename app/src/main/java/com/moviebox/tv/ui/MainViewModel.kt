@@ -242,8 +242,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         watchDao.continueWatching()
             .map { list ->
                 val deny = TastePrefs.denyLanguages()
+                // Live channel names, so a legacy live-TV row (the "Fox Usa"
+                // entry from an old subjectId mixup) never shows in Continue
+                // Watching — live has no resume position. Best-effort
+                // snapshot: empty until the live catalog loads, then it
+                // filters. New live saves are already blocked in saveProgress.
+                val liveNames = _state.value.liveChannels
+                    .asSequence().map { it.name.trim().lowercase() }.toSet()
                 list.asSequence()
                     .filter { Repository.keepByLanguage(it.title, deny) }
+                    .filter { it.title.trim().lowercase() !in liveNames }
                     // Drop subjectIds we've already learned are dead —
                     // a movie that surfaced once, was tapped, failed to
                     // resolve and got UnavailableCatalog.mark'd. Without
@@ -253,15 +261,23 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     // actually there"). Same filter Repository uses for
                     // home rows — keeps the two surfaces consistent.
                     .filter { !UnavailableCatalog.isUnavailable(it.subjectId) }
-                    // Collapse per-series: only the newest unfinished
-                    // episode per subjectId survives. Without this the
-                    // Continue Watching row shows every episode the user
-                    // ever touched — the "WHY are we showing all recent
-                    // episodes" complaint. Movies are unaffected (a movie
-                    // has exactly one row per subjectId anyway). Sequence
-                    // is already newest-first from the DAO, so distinctBy
-                    // keeps the freshest entry.
-                    .distinctBy { it.subjectId }
+                    // Hide near-finished items. The DAO already excludes
+                    // within-20s-of-end, but a movie stopped at 92%+ is
+                    // effectively watched — showing it as "continue" is
+                    // noise. Percentage catches long films the 20 s
+                    // absolute window misses. durationMs==0 (unknown) is
+                    // kept — we can't judge it.
+                    .filter { it.durationMs <= 0 || it.progress < 0.92f }
+                    // Collapse to ONE card per title. aoneroom rotates
+                    // subjectIds, so the same show/film can hold several
+                    // ids in history (the "two Family Guy / two Scary Movie
+                    // cards" bug). Deduping by normalized TITLE — not
+                    // subjectId — collapses those across id rotations while
+                    // still showing the newest episode of a series (rows
+                    // arrive newest-first from the DAO, so distinctBy keeps
+                    // the freshest). Distinct same-title-different-show
+                    // collisions are rare enough to accept.
+                    .distinctBy { it.title.trim().lowercase().replace(Regex("[^a-z0-9]+"), "") }
                     .take(30)
                     .toList()
             }
@@ -1919,6 +1935,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         ) return
         val s = _state.value
         val play = s.play ?: return
+        // Live TV never belongs in Continue Watching — there's no position
+        // to resume. The caller already guards on !play.isLive, but keep a
+        // defensive check here so a stray live save (like the legacy
+        // "Fox Usa" row) can never be written again.
+        if (play.isLive) return
         val item = s.detailItem
         // BUG FIX: use play.season/episode (what's actually playing) rather
         // than state.currentSe/Ep. When the user taps the next episode,

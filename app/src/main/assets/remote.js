@@ -1148,15 +1148,21 @@ async function loadHistory() {
     el.innerHTML = `<div class="muted small">Nothing watched yet.</div>`; return;
   }
   items.forEach(it => {
-    const label = it.season > 0 ? `S${it.season}E${it.episode}` : "Resume";
     const pct = Math.round((it.progress || 0) * 100);
-    const row = document.createElement("div"); row.className = "row-item";
+    const label = it.season > 0
+      ? `Season ${it.season}, Episode ${it.episode}`
+      : "Movie";
+    const row = document.createElement("div"); row.className = "row-item cw-item";
     row.innerHTML = `
-      <img loading="lazy" src="${it.cover}" onerror="this.style.opacity=.3" />
+      <div class="cw-poster">
+        <img loading="lazy" src="${it.cover}" onerror="this.style.opacity=.25" />
+        <span class="cw-play">${ic("play","sm")}</span>
+        <span class="cw-bar"><span style="width:${pct}%"></span></span>
+      </div>
       <div class="body">
         <div class="t">${escapeHtml(it.title)}</div>
-        <div class="s">${label} · ${pct}%</div>
-        <div class="minibar"><div style="width:${pct}%"></div></div>
+        <div class="s">${label}</div>
+        <div class="s cw-pct">${pct}% watched</div>
       </div>
       <div class="x" title="Remove">${ic("close","sm")}</div>`;
     row.querySelector(".body").onclick = async () => {
