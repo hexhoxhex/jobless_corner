@@ -616,29 +616,26 @@ class Repository(
             api.extCaptions(effectiveId, selectedStream.id).unwrap()
                 .extCaptions.map { CaptionTrack(it.lan, it.lanName, it.url) }
         }.getOrDefault(emptyList())
-        // External English subtitles from OpenSubtitles, fetched ONLY when
-        // the catalog gave us no English caption — the common case for
-        // foreign-dubbed single-audio files (Family Guy S8E1 = Spanish
-        // audio, zero aoneroom captions). Cached to disk keyed by
-        // title+SxEx, so only the first watch of an episode pays the fetch;
-        // gated on an API key (no key → instant no-op) and bounded by an
-        // 8 s timeout so a slow/quota-exhausted OpenSubtitles never blocks
-        // playback start. See [OpenSubtitlesClient].
-        val hasEnglishCaption = aoneroomCaptions.any {
-            it.code.startsWith("en", ignoreCase = true)
-        }
-        val externalCaptions = if (!hasEnglishCaption) {
-            val subTitle = titleHint?.takeIf { it.isNotBlank() }
-                ?: h5Detail?.title
-            val uri = subTitle?.let { t ->
-                kotlinx.coroutines.withTimeoutOrNull(8_000) {
-                    com.moviebox.tv.net.OpenSubtitlesClient.findEnglish(
-                        title = t, season = season ?: 0, episode = episode ?: 0,
-                    )
-                }
-            }
-            if (uri != null) listOf(CaptionTrack("en", "English", uri))
-            else emptyList()
+        // External subtitles from OpenSubtitles (keyless Stremio addons),
+        // in EVERY language the addon has — the fix for foreign-dubbed
+        // single-audio files aoneroom serves with no captions (Family Guy
+        // S8E1 = Spanish audio; K-dramas with only Korean audio; etc.).
+        // ONE cheap list call returns ~45 languages; each entry's URL is
+        // the addon's direct SRT link, so only the language the user
+        // actually selects from the CC menu gets downloaded, not all of
+        // them. Bounded by a 6 s timeout so a slow lookup never blocks
+        // playback. Languages aoneroom already provides are not
+        // duplicated. See [OpenSubtitlesClient].
+        val subTitle = titleHint?.takeIf { it.isNotBlank() } ?: h5Detail?.title
+        val externalCaptions = if (subTitle != null) {
+            val existing = aoneroomCaptions.map { it.code.take(2).lowercase() }.toSet()
+            kotlinx.coroutines.withTimeoutOrNull(6_000) {
+                com.moviebox.tv.net.OpenSubtitlesClient.list(
+                    title = subTitle, season = season ?: 0, episode = episode ?: 0,
+                )
+            }.orEmpty()
+                .filter { it.code.lowercase() !in existing }
+                .map { CaptionTrack(it.code, it.name, it.url) }
         } else emptyList()
         val captions = aoneroomCaptions + externalCaptions
 
