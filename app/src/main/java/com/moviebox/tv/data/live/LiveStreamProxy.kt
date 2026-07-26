@@ -970,12 +970,38 @@ class LiveStreamProxy(
                 val body = resp.body?.string() ?: return null
                 var streamInf: String? = null
                 var rel: String? = null
+                var sawSegmentTag = false
                 for (rawLine in body.lineSequence()) {
                     val line = rawLine.trim()
-                    if (line.startsWith("#EXT-X-STREAM-INF")) streamInf = line
-                    else if (line.isNotEmpty() && !line.startsWith("#")) {
-                        rel = line; break
+                    when {
+                        line.startsWith("#EXT-X-STREAM-INF") -> streamInf = line
+                        // Media-playlist markers: if the body carries these
+                        // AND no STREAM-INF, the resolved URL is itself the
+                        // media (variant) playlist, not a master.
+                        line.startsWith("#EXTINF") ||
+                            line.startsWith("#EXT-X-TARGETDURATION") ||
+                            line.startsWith("#EXT-X-MEDIA-SEQUENCE") -> sawSegmentTag = true
+                        line.isNotEmpty() && !line.startsWith("#") && rel == null -> rel = line
                     }
+                }
+                // MEDIA playlist (segments listed directly, no STREAM-INF):
+                // the resolved URL IS the inner playlist. Several CDNs in the
+                // dlhd-plus family (hiveatick.casadenoval.uk, icelanders,
+                // etc.) serve the rolling media playlist straight from
+                // `<channel>.m3u8` with no master indirection. The old
+                // "first non-# line = inner URL" logic grabbed the OLDEST
+                // SEGMENT (.ts) as the inner playlist; that segment 403/404s
+                // the instant it rolls off the ~30 s live window, so the
+                // proxy looped resolve → inner-403 → rotate → same CDN
+                // forever and the channel never played. Point innerUrl at
+                // the media playlist itself so every /inner/ poll re-fetches
+                // the current rolling segment window (verified 200 on repeat
+                // fetches). streamInf stays null → handleMaster supplies a
+                // default STREAM-INF line, which is all ExoPlayer needs.
+                if (streamInf == null && sawSegmentTag) {
+                    Log.i(DIAG, "PROXY master is MEDIA playlist host=" +
+                        "${hostOf(masterUrl)} — innerUrl=self")
+                    return masterUrl to null
                 }
                 if (rel == null) return null
                 val absolute = if (rel.startsWith("http")) rel

@@ -1,6 +1,8 @@
 package com.moviebox.tv.data.live
 
+import android.content.Context
 import android.util.Base64
+import com.moviebox.tv.App
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -53,6 +55,47 @@ class LiveResolver(
     private val cdnFailures =
         java.util.concurrent.ConcurrentHashMap<String, ChannelHealth>()
 
+    init {
+        // Seed the systemic-dead cooldown from persisted evidence so the
+        // FIRST channel played after an app restart also skips the dead
+        // family. Without this, cold start re-pays the discovery cost: the
+        // proxy tries the dead CDN, streams 503s at ExoPlayer for ~7-10 s
+        // while it rotates to a working CDN, and that startup 503 storm can
+        // exhaust the player's retry budget (→ WebView bounce / stuck
+        // "loading") before the good stream is ready. If the family has
+        // genuinely healed (no failures for [SYSTEMIC_DEAD_MEMORY_MS]) the
+        // seed lapses and it gets raced normally again.
+        runCatching {
+            val prefs = App.instance
+                .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val lastDead = prefs.getLong(KEY_PHANTEMLIS_DEAD, 0L)
+            val now = System.currentTimeMillis()
+            val seeded = lastDead > 0 &&
+                now - lastDead < SYSTEMIC_DEAD_MEMORY_MS &&
+                now >= systemicDeadUntilMs
+            if (seeded) {
+                systemicDeadUntilMs = now + SYSTEMIC_DEAD_COOLDOWN_MS
+            }
+            android.util.Log.w(
+                "LiveDiag",
+                "RESOLVER init seed: lastDead=$lastDead ageMs=" +
+                    "${if (lastDead > 0) now - lastDead else -1} seeded=$seeded",
+            )
+        }.onFailure {
+            android.util.Log.w("LiveDiag", "RESOLVER init seed FAILED: ${it.message}")
+        }
+    }
+
+    private fun persistSystemicDead(now: Long) {
+        runCatching {
+            App.instance.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit().putLong(KEY_PHANTEMLIS_DEAD, now).commit()
+            android.util.Log.w("LiveDiag", "RESOLVER persisted systemic-dead now=$now")
+        }.onFailure {
+            android.util.Log.w("LiveDiag", "RESOLVER persist FAILED: ${it.message}")
+        }
+    }
+
     private data class ChannelHealth(
         val host: String,
         var count: Int,
@@ -70,6 +113,16 @@ class LiveResolver(
             if (prev == null || stale) ChannelHealth(cdnHost, 1, now)
             else prev.also { it.count += 1; it.lastFailAtMs = now }
         }
+        // A 403 from the systemically-dead family arms a short GLOBAL
+        // cooldown so every other channel skips it on the next resolve,
+        // instead of each channel independently re-learning it's dead.
+        if (cdnHost.endsWith(SYSTEMIC_DEAD_SUFFIX)) {
+            val wasArmed = now < systemicDeadUntilMs
+            systemicDeadUntilMs = now + SYSTEMIC_DEAD_COOLDOWN_MS
+            // Persist only on a fresh arm (throttles writes to ~once per
+            // cooldown window) so the next cold start can seed from it.
+            if (!wasArmed) persistSystemicDead(now)
+        }
     }
 
     /** LiveStreamProxy calls this when a channel plays cleanly for more
@@ -84,7 +137,7 @@ class LiveResolver(
     private fun avoidCdnsFor(channelId: String): Set<String> {
         val now = System.currentTimeMillis()
         val prefix = "$channelId|"
-        return cdnFailures.entries
+        val perChannel = cdnFailures.entries
             .asSequence()
             .filter { (k, v) ->
                 k.startsWith(prefix) &&
@@ -93,6 +146,12 @@ class LiveResolver(
             }
             .map { it.value.host }
             .toSet()
+        // While the global cooldown is armed, avoid the systemic-dead
+        // family for THIS channel too — even with no per-channel strikes
+        // yet — so the first play after any channel hit the dead family
+        // goes straight to a working alternate.
+        return if (now < systemicDeadUntilMs) perChannel + SYSTEMIC_DEAD_SUFFIX
+        else perChannel
     }
 
     /**
@@ -552,6 +611,44 @@ class LiveResolver(
          *  a channel with no usable alternate degrades to "just keep
          *  trying xameleon" instead of "return null forever." */
         private const val AVOID_AFTER_FAILURES: Int = 3
+
+        /** CDN family that is systemically auth-dead for OUR proxy: the
+         *  master m3u8 200s but every inner-playlist / segment fetch comes
+         *  back as a bare origin 403 (no cf-ray — the block is at the
+         *  origin, not Cloudflare), on EVERY channel, in EVERY session.
+         *  The JS player inside the WebView plays it, but our OkHttp path
+         *  can't reproduce whatever per-session state the origin binds the
+         *  token to. Because the failure is proxy-wide rather than
+         *  channel-specific, a 403 from this family on ANY channel arms a
+         *  short GLOBAL cooldown (below) so cold starts on OTHER channels
+         *  skip it immediately instead of re-paying the 3-strike
+         *  per-channel discovery cost (~15 s of "trying to connect") every
+         *  time. Channels whose ONLY resolvable CDN is this family still
+         *  play via resolveStream's clear-blacklist-and-race-everything
+         *  dead-end escape. */
+        private const val SYSTEMIC_DEAD_SUFFIX: String = "phantemlis.top"
+
+        /** How long one systemic-dead 403 suppresses that family across all
+         *  channels. 2 min comfortably covers a channel-surfing session
+         *  without permanently blacklisting a family that might heal. */
+        private const val SYSTEMIC_DEAD_COOLDOWN_MS: Long = 2L * 60 * 1000
+
+        /** How long a persisted systemic-dead observation keeps seeding the
+         *  startup cooldown. 7 days: the family is dead for our proxy every
+         *  session in practice, but if it ever heals for a full week we
+         *  stop pre-avoiding it and let it race normally again. */
+        private const val SYSTEMIC_DEAD_MEMORY_MS: Long = 7L * 24 * 60 * 60 * 1000
+
+        private const val PREFS: String = "live_resolver"
+        private const val KEY_PHANTEMLIS_DEAD: String = "phantemlis_dead_ms"
+
+        /** Wall-clock until which [SYSTEMIC_DEAD_SUFFIX] is globally avoided.
+         *  Process-global + volatile: shared across channels, and (unlike
+         *  the per-channel [cdnFailures] map) NOT cleared by
+         *  [reportSuccess] — a different CDN playing cleanly says nothing
+         *  about whether the dead family has healed. */
+        @Volatile
+        private var systemicDeadUntilMs: Long = 0L
 
         /** Per-channel failure records age out after this window. Prevents
          *  stale blacklist entries from following a channel around after
