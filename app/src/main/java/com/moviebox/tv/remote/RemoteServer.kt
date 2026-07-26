@@ -173,10 +173,21 @@ class RemoteServer(
                                 .put("episodes", s.episodes)
                         )
                     }
+                    // Resolve the trailer here (Cinemeta, keyless, cached) so
+                    // the remote gets the same Trailer button the APK detail
+                    // page has. repo.details doesn't carry it (it's a VM-layer
+                    // add), so fetch directly. Title from the detail, falling
+                    // back to the ?title= param the remote passes.
+                    val trailerTitle = d.title.ifBlank { p("title").orEmpty() }
+                    val trailer = if (trailerTitle.isNotBlank()) runBlocking {
+                        com.moviebox.tv.net.OpenSubtitlesClient
+                            .trailerYouTubeId(trailerTitle, d.isSeries)
+                    } else null
                     json(
                         JSONObject()
                             .put("description", d.description ?: "")
                             .put("seasons", seasons)
+                            .put("trailer", trailer ?: "")
                             .toString()
                     )
                 }

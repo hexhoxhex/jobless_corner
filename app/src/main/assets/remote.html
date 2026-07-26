@@ -241,9 +241,20 @@
       <button id="dPlay" class="primary big">
         <svg class="icon"><use href="#i-play"/></svg> Play on TV
       </button>
+      <button id="dTrailer" class="ghost hidden">▶ Trailer</button>
       <button id="dDl" class="ghost">
         <svg class="icon"><use href="#i-download"/></svg> Download
       </button>
+    </div>
+
+    <!-- Trailer modal: a YouTube embed shown in-page when the user taps
+         Trailer. Closed by the ✕ or tapping the backdrop. -->
+    <div id="trailerModal" class="trailer-modal hidden">
+      <div class="trailer-backdrop"></div>
+      <div class="trailer-box">
+        <button id="trailerClose" class="trailer-close" aria-label="Close">✕</button>
+        <div id="trailerFrameWrap" class="trailer-frame"></div>
+      </div>
     </div>
   </section>
 

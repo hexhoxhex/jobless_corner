@@ -666,15 +666,25 @@ async function renderDetailsContent(it) {
   $("#dSub").textContent = subParts.join(" · ");
   $("#dEpisodes").classList.toggle("hidden", !it.isSeries);
 
+  // Reset the trailer button each time we open a detail; it re-appears
+  // below only if this title has a trailer.
+  $("#dTrailer").classList.add("hidden");
+
   // Description: TMDB picks carry their own overview; aoneroom records need a
   // details fetch.
   if (it.subjectId && it.subjectId.startsWith("tmdb:")) {
     $("#dDesc").textContent = it.overview || "";
+    // TMDB items still get a trailer via the details endpoint (keyed by
+    // title, so subjectId being a tmdb: id is fine).
+    loadTrailerButton(it);
   } else {
     $("#dDesc").textContent = "Loading…";
     try {
-      const d = await get("/api/details?subjectId=" + encodeURIComponent(it.subjectId));
+      const d = await get("/api/details?subjectId=" +
+        encodeURIComponent(it.subjectId) +
+        "&title=" + encodeURIComponent(it.title || ""));
       $("#dDesc").textContent = d.description || "";
+      if (d.trailer) showTrailerButton(d.trailer);
     } catch (e) { $("#dDesc").textContent = ""; }
   }
 
@@ -701,6 +711,37 @@ async function renderDetailsContent(it) {
     $("#dEpStatus").textContent = "";
   }
 }
+// ---- Trailer ----
+// For TMDB picks (no aoneroom details fetch), still resolve a trailer via
+// the details endpoint keyed by title.
+async function loadTrailerButton(it) {
+  try {
+    const d = await get("/api/details?subjectId=" +
+      encodeURIComponent(it.subjectId) +
+      "&title=" + encodeURIComponent(it.title || ""));
+    if (d.trailer) showTrailerButton(d.trailer);
+  } catch (e) { /* no trailer, no button */ }
+}
+function showTrailerButton(ytId) {
+  const btn = $("#dTrailer");
+  btn.classList.remove("hidden");
+  btn.onclick = () => openTrailer(ytId);
+}
+function openTrailer(ytId) {
+  const wrap = $("#trailerFrameWrap");
+  wrap.innerHTML =
+    '<iframe src="https://www.youtube.com/embed/' + ytId +
+    '?autoplay=1&playsinline=1&rel=0&modestbranding=1" ' +
+    'frameborder="0" allow="autoplay; encrypted-media" allowfullscreen></iframe>';
+  $("#trailerModal").classList.remove("hidden");
+}
+function closeTrailer() {
+  $("#trailerModal").classList.add("hidden");
+  $("#trailerFrameWrap").innerHTML = "";  // stop playback
+}
+$("#trailerClose").onclick = closeTrailer;
+$(".trailer-backdrop").onclick = closeTrailer;
+
 // Back returns to wherever you came from (Browse / Search / History / …)
 // via the history stack, not a hardcoded tab.
 $("#detailsBack").onclick = () => history.back();

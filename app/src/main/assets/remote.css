@@ -867,3 +867,16 @@ button.icon-btn { flex: 0 0 auto; padding: 8px 10px; }
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
   min-height: 2.2em;
 }
+
+/* ---- Trailer modal ---- */
+.trailer-modal { position: fixed; inset: 0; z-index: 1000;
+  display: flex; align-items: center; justify-content: center; }
+.trailer-modal.hidden { display: none; }
+.trailer-backdrop { position: absolute; inset: 0; background: rgba(0,0,0,.85); }
+.trailer-box { position: relative; width: min(92vw, 900px);
+  aspect-ratio: 16 / 9; background: #000; border-radius: 12px;
+  overflow: hidden; box-shadow: 0 12px 48px rgba(0,0,0,.6); }
+.trailer-frame, .trailer-frame iframe { width: 100%; height: 100%; border: 0; }
+.trailer-close { position: absolute; top: 8px; right: 8px; z-index: 2;
+  width: 40px; height: 40px; border-radius: 50%; border: 0; cursor: pointer;
+  background: rgba(0,0,0,.7); color: #fff; font-size: 18px; line-height: 40px; }

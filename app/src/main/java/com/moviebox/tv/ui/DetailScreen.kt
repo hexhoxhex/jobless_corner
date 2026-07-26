@@ -30,7 +30,9 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.PlayCircleOutline
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -79,6 +81,13 @@ fun DetailScreen(state: UiState, vm: MainViewModel) {
     // season data.
     val isSeries = state.details?.takeIf { it.seasons.isNotEmpty() }?.isSeries
         ?: item.isSeries
+
+    // Trailer overlay visibility. Toggled by the Trailer button; the
+    // overlay itself is a full-screen YouTube embed rendered at the end
+    // of this composable.
+    var showTrailer by androidx.compose.runtime.remember {
+        androidx.compose.runtime.mutableStateOf(false)
+    }
 
     // Self-heal: if the user landed here from the player's back arrow on a
     // Continue Watching resume (where details were never loaded — we went
@@ -192,6 +201,20 @@ fun DetailScreen(state: UiState, vm: MainViewModel) {
                         modifier = Modifier.height(50.dp),
                         shape = RoundedCornerShape(12.dp),
                     ) { Icon(Icons.Filled.Download, "Download") }
+                    // Trailer — appears once the background Cinemeta lookup
+                    // resolves a YouTube id for this title. Opens an inline
+                    // full-screen YouTube embed (see TrailerOverlay).
+                    val trailerId = state.details?.trailerYouTubeId
+                    if (trailerId != null) {
+                        OutlinedButton(
+                            onClick = { showTrailer = true },
+                            modifier = Modifier.height(50.dp),
+                            shape = RoundedCornerShape(12.dp),
+                        ) {
+                            Icon(Icons.Filled.PlayCircleOutline, "Trailer")
+                            Text("  Trailer")
+                        }
+                    }
                 }
             }
 
@@ -298,6 +321,14 @@ fun DetailScreen(state: UiState, vm: MainViewModel) {
             Text("  $label", fontWeight = FontWeight.Bold, fontSize = 16.sp)
         }
     }
+        // Full-screen trailer overlay — a YouTube embed in a WebView. Sits
+        // on top of the detail content; tapping Back or the close button
+        // dismisses it. Only mounted while showTrailer is true so the
+        // WebView (and its video) is fully torn down on close.
+        val trailerId = state.details?.trailerYouTubeId
+        if (showTrailer && trailerId != null) {
+            TrailerOverlay(youTubeId = trailerId, onClose = { showTrailer = false })
+        }
     }
 }
 
@@ -455,4 +486,69 @@ private fun CircleIcon(
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) { Icon(icon, null, tint = tint, modifier = Modifier.size(22.dp)) }
+}
+
+/**
+ * Full-screen trailer player: a WebView loading the YouTube IFrame embed
+ * for [youTubeId]. We use the embed rather than ExoPlayer because YouTube
+ * doesn't expose a direct stream URL, and the embed is the reliable
+ * no-API-key path on Android TV. Autoplays muted-capable, fills the
+ * screen, and is torn down completely when the overlay leaves composition.
+ * Back button and the ✕ both call [onClose].
+ */
+@androidx.compose.runtime.Composable
+private fun TrailerOverlay(youTubeId: String, onClose: () -> Unit) {
+    // Hardware Back closes the trailer instead of leaving the detail page.
+    androidx.activity.compose.BackHandler(enabled = true) { onClose() }
+    Box(
+        Modifier.fillMaxSize().background(Color.Black),
+        contentAlignment = Alignment.Center,
+    ) {
+        androidx.compose.ui.viewinterop.AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { ctx ->
+                android.webkit.WebView(ctx).apply {
+                    @Suppress("SetJavaScriptEnabled")
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    settings.mediaPlaybackRequiresUserGesture = false
+                    setBackgroundColor(android.graphics.Color.BLACK)
+                    // Minimal HTML wrapping the IFrame API so the video
+                    // fills the viewport and autoplays. `playsinline=1`
+                    // keeps it embedded rather than kicking to fullscreen
+                    // native, `rel=0` hides unrelated end-cards.
+                    val html = """
+                        <html><body style="margin:0;background:#000;">
+                        <iframe width="100%" height="100%"
+                          src="https://www.youtube.com/embed/$youTubeId?autoplay=1&playsinline=1&rel=0&modestbranding=1"
+                          frameborder="0" allow="autoplay; encrypted-media"
+                          allowfullscreen></iframe>
+                        </body></html>
+                    """.trimIndent()
+                    loadDataWithBaseURL(
+                        "https://www.youtube.com", html,
+                        "text/html", "utf-8", null,
+                    )
+                }
+            },
+            onRelease = { wv ->
+                runCatching {
+                    wv.stopLoading(); wv.loadUrl("about:blank"); wv.destroy()
+                }
+            },
+        )
+        // Close button, top-right.
+        Box(
+            Modifier.align(Alignment.TopEnd).padding(16.dp)
+                .size(44.dp).clip(CircleShape)
+                .background(Color(0xCC000000))
+                .clickable(onClick = onClose),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                Icons.Filled.Close, "Close",
+                tint = Color.White, modifier = Modifier.size(24.dp),
+            )
+        }
+    }
 }

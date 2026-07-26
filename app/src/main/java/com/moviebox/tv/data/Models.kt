@@ -69,6 +69,10 @@ data class Details(
     val isSeries: Boolean,
     val seasons: List<SeasonInfo>,
     val dubs: List<Dub>,
+    /** YouTube video id for the title's trailer (from Cinemeta), or null.
+     *  Fetched lazily after the detail loads so it never blocks the page;
+     *  drives the "Trailer" button on the APK detail screen + web remote. */
+    val trailerYouTubeId: String? = null,
 )
 
 /** A selectable quality. [mediaUrl] is null when it must be re-resolved. */

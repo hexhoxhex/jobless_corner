@@ -1179,6 +1179,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     // phantom trailing episodes are hidden before the user
                     // ever taps one.
                     enumerateEpisodesInBackground(resolvedId, d)
+                    fetchTrailerInBackground(resolvedId, item.title, d.isSeries)
                 }
                 .onFailure { e ->
                     _state.update {
@@ -1214,12 +1215,34 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     precheckPlayback(item.subjectId, d)
                     enumerateEpisodesInBackground(item.subjectId, d)
+                    fetchTrailerInBackground(item.subjectId, item.title, d.isSeries)
                 }
                 .onFailure { e ->
                     _state.update {
                         it.copy(detailLoading = false, error = e.message)
                     }
                 }
+        }
+    }
+
+    /** Look up the title's YouTube trailer (Cinemeta, keyless) off the hot
+     *  path and fold it into [UiState.details] so the Detail screen's
+     *  "Trailer" button appears once resolved. Never blocks the detail load;
+     *  a miss just means no trailer button. */
+    private fun fetchTrailerInBackground(
+        subjectId: String, title: String, isSeries: Boolean,
+    ) {
+        viewModelScope.launch {
+            val ytId = runCatching {
+                com.moviebox.tv.net.OpenSubtitlesClient
+                    .trailerYouTubeId(title, isSeries)
+            }.getOrNull() ?: return@launch
+            _state.update { s ->
+                val d = s.details
+                if (d != null && d.subjectId == subjectId) {
+                    s.copy(details = d.copy(trailerYouTubeId = ytId))
+                } else s
+            }
         }
     }
 

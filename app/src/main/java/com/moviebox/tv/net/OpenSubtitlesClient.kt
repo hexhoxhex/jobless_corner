@@ -134,6 +134,50 @@ object OpenSubtitlesClient {
         }
     }
 
+    /**
+     * YouTube video id for the title's trailer, via Cinemeta's meta endpoint
+     * (keyless): title → IMDB id → meta.trailerStreams[0].ytId. Null on any
+     * miss. Reuses the same IMDB resolution as [list] (cached). Lives here
+     * because this object already wraps the Stremio addons; the trailer meta
+     * and the subtitle lookup share the Cinemeta base + IMDB cache.
+     */
+    suspend fun trailerYouTubeId(
+        title: String, isSeries: Boolean,
+    ): String? = withContext(Dispatchers.IO) {
+        val cleanTitle = cleanTitle(title)
+        if (cleanTitle.isBlank()) return@withContext null
+        val imdb = runCatching { imdbId(cleanTitle, isSeries) }.getOrNull()
+            ?: return@withContext null
+        val type = if (isSeries) "series" else "movie"
+        val req = Request.Builder()
+            .url("https://v3-cinemeta.strem.io/meta/$type/$imdb.json")
+            .header("User-Agent", UA).header("Accept", "application/json")
+            .get().build()
+        runCatching {
+            http.newCall(req).execute().use { r ->
+                if (!r.isSuccessful) return@use null
+                val meta = JSONObject(r.body?.string().orEmpty())
+                    .optJSONObject("meta") ?: return@use null
+                // Prefer trailerStreams[].ytId; fall back to trailers[].source.
+                meta.optJSONArray("trailerStreams")?.let { arr ->
+                    for (i in 0 until arr.length()) {
+                        arr.getJSONObject(i).optString("ytId")
+                            .takeIf { it.isNotBlank() }?.let { return@use it }
+                    }
+                }
+                meta.optJSONArray("trailers")?.let { arr ->
+                    for (i in 0 until arr.length()) {
+                        arr.getJSONObject(i).optString("source")
+                            .takeIf { it.isNotBlank() }?.let { return@use it }
+                    }
+                }
+                null
+            }
+        }.getOrNull().also {
+            Log.i(TAG, "trailer '$title' -> ${it ?: "none"}")
+        }
+    }
+
     /** Optional download-and-cache — kept for callers that want a stable
      *  local file:// (e.g. offline). Not used by the direct-URL path. */
     suspend fun cache(sub: Sub, keyHint: String): String? =
