@@ -55,6 +55,20 @@ class LiveResolver(
     private val cdnFailures =
         java.util.concurrent.ConcurrentHashMap<String, ChannelHealth>()
 
+    /** Channels for which the systemic-dead avoid recently filtered out
+     *  EVERY candidate and no alternate CDN resolved — i.e. the channel is
+     *  reachable ONLY via the dead family (Sky Cinema Premiere UK is one:
+     *  xameleon-only upstream). For these, [avoidCdnsFor] stops applying the
+     *  global systemic-dead avoid, because doing so just burns a guaranteed-
+     *  to-fail first pass (~3-5 s) before the dead-end escape falls back to
+     *  the dead family anyway. During a 403 churn on such a channel that
+     *  wasted pass repeats on every rotation and stretches the buffering the
+     *  user sees; skipping it lets each re-resolve go straight to racing
+     *  everything. Keyed channelId → expiry ms; re-learned after the TTL in
+     *  case an alternate appears upstream. */
+    private val alternatelessUntil =
+        java.util.concurrent.ConcurrentHashMap<String, Long>()
+
     init {
         // Seed the systemic-dead cooldown from persisted evidence so the
         // FIRST channel played after an app restart also skips the dead
@@ -136,6 +150,12 @@ class LiveResolver(
      *  failures on record. */
     private fun avoidCdnsFor(channelId: String): Set<String> {
         val now = System.currentTimeMillis()
+        // Dead-family-only channel (e.g. Sky Cinema Premiere UK, xameleon-
+        // only): avoid NOTHING. Both the per-channel strike list AND the
+        // global systemic-dead cooldown would otherwise filter out its only
+        // reachable CDN, forcing a doomed first pass on every resolve — the
+        // exact ~3-5 s waste that stretches the buffering during a 403 churn.
+        if ((alternatelessUntil[channelId] ?: 0L) > now) return emptySet()
         val prefix = "$channelId|"
         val perChannel = cdnFailures.entries
             .asSequence()
@@ -149,7 +169,8 @@ class LiveResolver(
         // While the global cooldown is armed, avoid the systemic-dead
         // family for THIS channel too — even with no per-channel strikes
         // yet — so the first play after any channel hit the dead family
-        // goes straight to a working alternate.
+        // goes straight to a working alternate. (Dead-family-only channels
+        // already returned emptySet() above.)
         return if (now < systemicDeadUntilMs) perChannel + SYSTEMIC_DEAD_SUFFIX
         else perChannel
     }
@@ -259,6 +280,11 @@ class LiveResolver(
                     "RESOLVER ch=$channelId first pass FAILED with avoid=$avoid " +
                         "— clearing blacklist and racing everything as last resort",
                 )
+                // Remember this channel is (currently) reachable only via the
+                // avoided family, so the next resolve skips the doomed avoid
+                // pass entirely. See [alternatelessUntil].
+                alternatelessUntil[channelId] =
+                    System.currentTimeMillis() + ALTERNATELESS_TTL_MS
                 reportSuccess(channelId)  // clears the per-channel blacklist
                 val second = coroutineScope {
                     val fallbackProbes = mutableListOf<Deferred<Pair<String, String>?>>()
@@ -632,6 +658,12 @@ class LiveResolver(
          *  channels. 2 min comfortably covers a channel-surfing session
          *  without permanently blacklisting a family that might heal. */
         private const val SYSTEMIC_DEAD_COOLDOWN_MS: Long = 2L * 60 * 1000
+
+        /** How long a "reachable only via the dead family" observation stops
+         *  us from applying the systemic-dead avoid to that channel. Short
+         *  enough to re-check for a fresh alternate now and then; long enough
+         *  to smooth a whole watch session on a dead-family-only channel. */
+        private const val ALTERNATELESS_TTL_MS: Long = 3L * 60 * 1000
 
         /** How long a persisted systemic-dead observation keeps seeding the
          *  startup cooldown. 7 days: the family is dead for our proxy every
