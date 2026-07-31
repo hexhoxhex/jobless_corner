@@ -211,10 +211,61 @@ class Repository(
         android.util.Log.i("H5", "search($keyword) -> ${items.size} items")
         val deny = TastePrefs.denyLanguages()
         return items
+            // Drop non-content junk. aoneroom's search index is polluted
+            // with type-6 "shorts/music" rows (music mixes, "| Movieclips"
+            // scene clips, fan tributes) and type-5 education/trailer rows
+            // that aren't watchable titles — they crowd out the real movies
+            // and series and make the catalog feel emptier than it is. Keep
+            // only MOVIE + TV_SERIES (anime resolves to these too).
+            .filter { it.type == SubjectType.MOVIE || it.type == SubjectType.TV_SERIES }
             .filter { keepByLanguage(it.title, deny) }
             // Skip items previously marked unavailable so the user
             // doesn't keep tapping on dead-on-arrival results.
             .filter { !UnavailableCatalog.isUnavailable(it.subjectId) }
+    }
+
+    /** User-facing search that defeats the upstream's literal substring
+     *  matching. aoneroom indexes titles with their punctuation, so
+     *  "spider man", "spider-man" and "spiderman" each return a DIFFERENT
+     *  set (4 / 7 / 5 hits respectively — measured). Users shouldn't have to
+     *  guess the hyphenation. We fan out over the obvious spelling variants
+     *  in parallel and merge (dedup by subjectId, first-seen order kept) so
+     *  the title surfaces however it's typed. A plain single-word query has
+     *  one variant → one upstream call, so the extra cost is only paid where
+     *  it actually broadens the result set. */
+    suspend fun searchVariants(
+        keyword: String,
+        type: SubjectType = SubjectType.ALL,
+    ): List<Item> {
+        val variants = keywordVariants(keyword)
+        if (variants.size <= 1) return search(keyword, type)
+        val lists = coroutineScope {
+            variants
+                .map { v -> async { runCatching { search(v, type) }.getOrDefault(emptyList()) } }
+                .map { it.await() }
+        }
+        val merged = LinkedHashMap<String, Item>()
+        lists.forEach { list -> list.forEach { merged.putIfAbsent(it.subjectId, it) } }
+        return merged.values.toList()
+    }
+
+    /** Spelling variants to broaden a literal-match search. Toggles the
+     *  space⇄hyphen⇄concatenated forms of the query; capped at 4 to bound
+     *  the upstream fan-out. */
+    private fun keywordVariants(raw: String): List<String> {
+        val base = raw.trim()
+        if (base.isEmpty()) return listOf(base)
+        val out = LinkedHashSet<String>()
+        out.add(base)
+        if (' ' in base) {
+            out.add(base.replace(' ', '-'))
+            out.add(base.replace(" ", ""))
+        }
+        if ('-' in base) {
+            out.add(base.replace('-', ' '))
+            out.add(base.replace("-", ""))
+        }
+        return out.toList().take(4)
     }
 
     /**

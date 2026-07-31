@@ -1120,7 +1120,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (q.isEmpty()) return
         _state.update { it.copy(searchLoading = true, error = null) }
         viewModelScope.launch {
-            runCatching { repo.search(q, _state.value.searchType) }
+            runCatching { repo.searchVariants(q, _state.value.searchType) }
                 .onSuccess { r ->
                     _state.update { it.copy(searchResults = r, searchLoading = false) }
                 }

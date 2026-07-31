@@ -252,7 +252,7 @@ object RemoteController {
     // -- browse / play -----------------------------------------------------
 
     suspend fun search(query: String): List<Item> =
-        runCatching { repo.search(query) }.getOrDefault(emptyList())
+        runCatching { repo.searchVariants(query) }.getOrDefault(emptyList())
 
     suspend fun details(subjectId: String): com.moviebox.tv.data.Details? =
         runCatching { repo.details(subjectId) }.getOrNull()
