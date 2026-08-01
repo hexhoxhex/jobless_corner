@@ -26,6 +26,15 @@ class App : Application(), ImageLoaderFactory {
         // for connectivity changes immediately.
         com.moviebox.tv.debug.Telemetry.init(this)
         com.moviebox.tv.debug.NetworkMonitor.start(this)
+        // Mint the premium atp:3 session token at startup (off the first-frame
+        // path) so the FIRST search/detail already carries the bearer that
+        // unlocks full results — instead of running degraded ("nothing found"
+        // / "doesn't exist") until a play happens to warm it. See
+        // [H5PlayResolver.warmSession].
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(
+            { com.moviebox.tv.net.H5PlayResolver.warmSession() },
+            800,
+        )
     }
 
     companion object {

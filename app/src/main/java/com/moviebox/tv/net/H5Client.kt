@@ -115,11 +115,28 @@ object H5Client {
         }
         if (parsed.isNotEmpty()) {
             cookieJar.saveFromResponse(httpUrl, parsed)
+            // The premium bearer the SPA sends as `Authorization: Bearer` is
+            // the `mb_token` cookie (an atp:3 anonymous-premium JWT), NOT the
+            // lower-tier `token` cookie we used to grab — which is why the app
+            // ran degraded (empty seasons / partial search). Prefer mb_token;
+            // it arrives URL-encoded and wrapped in literal quotes
+            // (%22eyJ…%22), so decode + unquote to the raw JWT.
+            val mb = parsed.firstOrNull { it.name == "mb_token" }?.value?.let(::cleanBearer)
             val tok = parsed.firstOrNull { it.name == "token" }?.value
-            if (!tok.isNullOrBlank()) bearer = tok
-            android.util.Log.i("H5", "pushCookies($host) +${parsed.size} cookies, bearer=${if (bearer.isNullOrBlank()) "NO" else "YES"}")
+            val next = mb?.takeIf { it.isNotBlank() } ?: tok?.takeIf { it.isNotBlank() }
+            if (!next.isNullOrBlank()) bearer = next
+            android.util.Log.i("H5", "pushCookies($host) +${parsed.size} " +
+                "cookies=[${parsed.joinToString(",") { it.name }}] " +
+                "mb_token=${if (mb.isNullOrBlank()) "-" else "Y(atp)"} " +
+                "bearer=${if (bearer.isNullOrBlank()) "NO" else "YES"}")
         }
     }
+
+    /** Decode a cookie value into a usable Bearer JWT. `mb_token` is stored
+     *  URL-encoded and wrapped in quotes (`%22eyJ…%22`). */
+    private fun cleanBearer(raw: String): String =
+        runCatching { java.net.URLDecoder.decode(raw, "UTF-8") }.getOrDefault(raw)
+            .trim().trim('"')
 
     /** One-shot session warm. Two steps:
      *   1. `country-code` — establishes the H5 `token` cookie our cookie jar

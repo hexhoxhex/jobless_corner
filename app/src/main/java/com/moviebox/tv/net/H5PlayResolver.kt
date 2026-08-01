@@ -38,9 +38,64 @@ object H5PlayResolver {
     // resolves season/episode metadata first); movies typically fire it in
     // <4s. 25s covers both with headroom.
     private const val MAX_WAIT_MS = 25_000L
+    /** Startup warm: poll CookieManager every [WARM_POLL_MS] up to
+     *  [WARM_MAX_WAIT_MS] for the SPA to mint mb_token. */
+    private const val WARM_POLL_MS = 400L
+    private const val WARM_MAX_WAIT_MS = 12_000L
     private const val BROWSER_UA =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
+
+    /** Startup session warm. The premium `atp:3 mb_token` bearer — the one
+     *  that unlocks full search + a title's real season list — is minted only
+     *  by the themoviebox.org SPA's JS running in a real browser engine; no
+     *  raw HTTP warm can obtain it (the app's old `country-code` x-user path
+     *  is dead). Without this, the FIRST search/detail after a cold launch
+     *  runs bearer-less until a *play* happens to mint it — surfacing as
+     *  "search shows nothing / a show says it doesn't exist." Here we load the
+     *  SPA home off-screen once at startup, poll [CookieManager] until it
+     *  mints `mb_token`, then bridge the cookies into OkHttp via
+     *  [H5Client.pushCookies] (which now prefers mb_token). Best-effort and
+     *  idempotent-enough — a redundant call just re-harvests the same token. */
+    @SuppressLint("SetJavaScriptEnabled")
+    fun warmSession() {
+        val main = Handler(Looper.getMainLooper())
+        main.post {
+            runCatching {
+                val cm = android.webkit.CookieManager.getInstance()
+                cm.setAcceptCookie(true)
+                val wv = WebView(App.instance).apply {
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    settings.userAgentString = BROWSER_UA
+                    webViewClient = WebViewClient()
+                }
+                wv.loadUrl("https://themoviebox.org/")
+                fun harvest() {
+                    for (host in listOf("moviebox.ph", "themoviebox.org", "h5-api.aoneroom.com")) {
+                        cm.getCookie("https://$host/")?.let { H5Client.pushCookies(host, it) }
+                    }
+                    runCatching { wv.stopLoading(); wv.loadUrl("about:blank"); wv.destroy() }
+                }
+                var elapsed = 0L
+                val poll = object : Runnable {
+                    override fun run() {
+                        elapsed += WARM_POLL_MS
+                        val minted = cm.getCookie("https://themoviebox.org/")
+                            ?.contains("mb_token") == true
+                        if (minted) {
+                            Log.i(TAG, "warmSession: mb_token minted after ${elapsed}ms")
+                            harvest()
+                        } else if (elapsed >= WARM_MAX_WAIT_MS) {
+                            Log.w(TAG, "warmSession: no mb_token in ${elapsed}ms — harvesting anyway")
+                            harvest()
+                        } else main.postDelayed(this, WARM_POLL_MS)
+                    }
+                }
+                main.postDelayed(poll, WARM_POLL_MS)
+            }.onFailure { Log.w(TAG, "warmSession failed: ${it.message}") }
+        }
+    }
 
     /** Resolve playable streams for [subjectId] by driving a headless WebView
      *  through themoviebox.org's movie page. Returns the parsed streams from
