@@ -2032,8 +2032,48 @@ private fun VideoPlayer(
             // preferred renderer only for formats the platform can't
             // reliably handle; well-behaved MP4/AAC content still plays
             // on the hardware path.
-            io.github.anilbeesetti.nextlib.media3ext.ffdecoder
-                .NextRenderersFactory(context)
+            // VOD gets the SAME ffmpeg-video strip the live path above does.
+            // EXTENSION_RENDERER_MODE_PREFER makes ExoPlayer prefer ffmpeg's
+            // SOFTWARE video renderer over the hardware decoder, which caps a
+            // 1080p stream at a handful of fps — the "video plays in slow
+            // motion / images tail behind the audio" report. Audio sounds fine
+            // because only the video renderer falls behind. This was fixed for
+            // live in v0.1.62 but VOD kept the plain factory; it stayed hidden
+            // while movies were 720p MP4 and surfaced as soon as VOD served
+            // 1080p HLS (measured droppedRatio ~0.30). Keep PREFER so the
+            // ffmpeg AAC fallback still rescues c2.android.aac failures
+            // (Scary Movie), and drop only the ffmpeg VIDEO renderer.
+            object : io.github.anilbeesetti.nextlib.media3ext.ffdecoder
+                .NextRenderersFactory(context) {
+                override fun buildVideoRenderers(
+                    context: android.content.Context,
+                    extensionRendererMode: Int,
+                    mediaCodecSelector: androidx.media3.exoplayer.mediacodec
+                        .MediaCodecSelector,
+                    enableDecoderFallback: Boolean,
+                    eventHandler: android.os.Handler,
+                    eventListener: androidx.media3.exoplayer.video
+                        .VideoRendererEventListener,
+                    allowedVideoJoiningTimeMs: Long,
+                    out: ArrayList<androidx.media3.exoplayer.Renderer>,
+                ) {
+                    super.buildVideoRenderers(
+                        context, extensionRendererMode, mediaCodecSelector,
+                        enableDecoderFallback, eventHandler, eventListener,
+                        allowedVideoJoiningTimeMs, out,
+                    )
+                    val before = out.size
+                    out.removeAll {
+                        it is io.github.anilbeesetti.nextlib.media3ext
+                            .ffdecoder.FfmpegVideoRenderer
+                    }
+                    android.util.Log.i(
+                        "VodDiag",
+                        "RENDERERS removed ${before - out.size} ffmpeg video " +
+                            "renderer(s); ${out.size} left (hardware)",
+                    )
+                }
+            }
                 .setEnableDecoderFallback(true)
                 .setExtensionRendererMode(
                     androidx.media3.exoplayer.DefaultRenderersFactory
