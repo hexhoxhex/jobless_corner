@@ -179,7 +179,13 @@ object FourKHdHub {
         val mirrors: List<Mirror>,
     )
 
-    private val ITEM_SPLIT = Regex("class=\"(?:episode-download-item|download-item)\"")
+    // Match the download-item class TOKEN wherever it sits in the class list.
+    // Series items are class="episode-download-item" (exact); MOVIE items are
+    // class="download-item border rounded-lg overflow-hidden" (extra classes),
+    // so an exact-attr match missed every movie → "not available". `\b` before
+    // "download-item" also matches inside "episode-download-item", so one
+    // pattern splits both page shapes.
+    private val ITEM_SPLIT = Regex("class=\"[^\"]*\\bdownload-item\\b[^\"]*\"")
     private val TITLE_RE = Regex("(?:episode-)?file-title[^>]*>\\s*([^<]+?)\\s*<")
     private val SIZE_RE = Regex("badge-size[^>]*>\\s*([^<]+?)\\s*<")
     private val HREF_RE = Regex("href=\"(https://[^\"]+)\"")
@@ -293,6 +299,19 @@ object FourKHdHub {
                 val wrapped = it.request.url.queryParameter("link")
                     ?.takeIf { w -> w.startsWith("https://") } ?: return null
                 return preflight(wrapped)
+            }
+            // Reject Google-backed "video-downloads" CDN links: they're
+            // single-use / session-bound (HTTP 400 on ExoPlayer's follow-up
+            // request), so a movie whose mirror resolves here would hang on a
+            // black screen. Returning null makes resolvePlay fall through to
+            // the next candidate (Cloudflare workers.dev / pixeldrain, which
+            // stream fine); if none qualify it fails fast ("not available")
+            // instead of hanging. Series already resolve to pixeldrain, so
+            // they're unaffected.
+            if (finalUrl.contains("googleusercontent") ||
+                finalUrl.contains("video-downloads")
+            ) {
+                return null
             }
             return finalUrl
         }
