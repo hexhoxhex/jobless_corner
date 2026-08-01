@@ -2075,6 +2075,20 @@ private fun VideoPlayer(
             .setMediaSourceFactory(sourceFactory)
             .setLoadControl(loadControl)
             .setTrackSelector(trackSelector)
+            // Start ABR conservatively instead of trusting the LINK speed.
+            // Measured on the TV: the local link reports ~10 Mbps, so ExoPlayer
+            // opened an HLS ladder at the 720p rung — but provider CDNs that
+            // lazily pull from origin deliver only ~0.5-1.7 Mbps on a title's
+            // FIRST watch (warm segments then hit ~7.5). Starting high against
+            // a cold origin starves the buffer into the freeze/"something went
+            // wrong" failure. A low initial estimate makes the first rendition
+            // a safe one; ExoPlayer's own measurements ramp it up within
+            // seconds once segments start flowing.
+            .setBandwidthMeter(
+                androidx.media3.exoplayer.upstream.DefaultBandwidthMeter.Builder(context)
+                    .setInitialBitrateEstimate(1_200_000L)
+                    .build(),
+            )
             .setAudioAttributes(AudioAttributes.DEFAULT, true)
             .setHandleAudioBecomingNoisy(true)
             .setWakeMode(androidx.media3.common.C.WAKE_MODE_NETWORK)
@@ -2187,8 +2201,15 @@ private fun VideoPlayer(
                     .setMimeType(mime).setLanguage(c.code).setLabel(c.name)
                     .build()
             }
-            MediaItem.Builder().setUri(mediaUrl)
-                .setSubtitleConfigurations(subs).build()
+            // Declare HLS explicitly when the URL can't be sniffed by suffix.
+            // Provider playlists like vixsrc's "/playlist/693435?token=…" carry
+            // no .m3u8 extension, so ExoPlayer's extension-based inference fell
+            // back to a PROGRESSIVE source and died with
+            // UnrecognizedInputFormatException instead of using HlsMediaSource.
+            val b = MediaItem.Builder().setUri(mediaUrl)
+                .setSubtitleConfigurations(subs)
+            if (looksLikeHls(mediaUrl)) b.setMimeType(MimeTypes.APPLICATION_M3U8)
+            b.build()
         }
         // VOD: resume from saved position; quality/dub swap on same content keeps
         // the current position. Live: always go to (or near) the live edge.
@@ -2916,4 +2937,17 @@ private fun VideoPlayer(
             onRelease = playerOnRelease,
         )
     }
+}
+
+/** True when [url] is an HLS playlist ExoPlayer can't identify by suffix.
+ *  Direct .m3u8 links sniff fine; provider-minted playlist endpoints (e.g.
+ *  vixsrc's "/playlist/{id}?token=…") have no extension, so the MIME type has
+ *  to be declared or the player picks a progressive extractor and fails. */
+private fun looksLikeHls(url: String): Boolean {
+    val u = url.substringBefore('?').lowercase()
+    if (u.endsWith(".m3u8") || u.endsWith(".m3u")) return true
+    if (u.endsWith(".mp4") || u.endsWith(".mkv") || u.endsWith(".webm") ||
+        u.endsWith(".avi") || u.endsWith(".mpd")
+    ) return false
+    return url.contains("/playlist/") || url.contains("/hls/")
 }

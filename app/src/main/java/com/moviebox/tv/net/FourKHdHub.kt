@@ -177,6 +177,7 @@ object FourKHdHub {
         val label: String,      // user-facing quality label + stable key
         val streamScore: Int,   // lower = more streamable (default pick)
         val mirrors: List<Mirror>,
+        val sizeBytes: Long?,   // null when the page omits a size badge
     )
 
     // Match the download-item class TOKEN wherever it sits in the class list.
@@ -196,6 +197,7 @@ object FourKHdHub {
     private fun parseReleases(html: String, season: Int, episode: Int): List<ReleaseInfo> {
         val chunks = ITEM_SPLIT.split(html)
         val parsed = ArrayList<ReleaseInfo>()
+        val isEpisode = season > 0
         // chunks[0] is the pre-first-item preamble — skip it.
         for (i in 1 until chunks.size) {
             val chunk = chunks[i]
@@ -215,19 +217,44 @@ object FourKHdHub {
                 codec?.let { append(" ").append(it) }
                 sizeText?.let { append(" · ").append(it) }
             }
+            val sizeBytes = parseSizeBytes(sizeText ?: "")
             parsed.add(
                 ReleaseInfo(
                     filename, label,
-                    streamScore(res, codec, parseSizeBytes(sizeText ?: "")),
+                    streamScore(res, codec, sizeBytes),
                     mirrors,
+                    sizeBytes,
                 ),
             )
         }
-        // Drop REMUX unless it's the ONLY thing available.
-        val streamable = parsed.filter { !it.label.contains("REMUX", true) }
-        val pool = streamable.ifEmpty { parsed }
-        return pool.sortedBy { it.streamScore }.distinctBy { it.label }
+        // Keep only releases whose bitrate these mirrors can actually sustain.
+        // This provider hosts DOWNLOAD-oriented BluRay rips (10-50 GB) behind
+        // free Cloudflare workers measured at ~5-16 Mbps — a 2160p rip needs
+        // 25-50 Mbps, so it buffer-starves into a one-frame-at-a-time
+        // slideshow and then dies ("something went wrong"). Filtering here,
+        // rather than only scoring, is what stops an infeasible file from
+        // being picked when the good mirror fails to resolve.
+        val feasible = parsed.filter {
+            !it.label.contains("REMUX", true) && isStreamable(it.sizeBytes, isEpisode)
+        }
+        // Nothing streamable → return empty so resolvePlay fails FAST with
+        // "not available" instead of playing a file that can't keep up.
+        return feasible.sortedBy { it.streamScore }.distinctBy { it.label }
     }
+
+    /** True if a file of [sizeBytes] can stream over this provider's mirrors.
+     *  Budget is [SUSTAINABLE_BPS] against a typical runtime (movie ~2h,
+     *  episode ~30min); unknown size is allowed through (the preflight and
+     *  the player still guard it). Measured 2026-08-01: worker mirrors deliver
+     *  ~5-16 Mbps, so ~6 Mbps of video is the safe ceiling. */
+    private fun isStreamable(sizeBytes: Long?, isEpisode: Boolean): Boolean {
+        val size = sizeBytes ?: return true
+        val runtimeSec = if (isEpisode) 30 * 60L else 2 * 60 * 60L
+        return size <= SUSTAINABLE_BPS / 8 * runtimeSec
+    }
+
+    /** Video bitrate the 4KHDHub mirror chain can hold without starving. */
+    private const val SUSTAINABLE_BPS = 6_000_000L
 
     /** Lower = better default for streaming. Codec COMPATIBILITY dominates:
      *  H.264/x264 decodes on every TV (verified playing here), whereas
@@ -281,8 +308,11 @@ object FourKHdHub {
         return resolveHubcloud(hub)
     }
 
-    private fun preflight(url: String): String? {
-        if (!isValidPlayback(url)) return null
+    private fun preflight(rawUrl: String): String? {
+        if (!isValidPlayback(rawUrl)) return null
+        // Encode spaces/braces before the request — OkHttp's .url() throws on
+        // them, and ExoPlayer needs the encoded form to fetch the file too.
+        val url = canonicalize(rawUrl)
         val resp = runCatching {
             client.newCall(
                 Request.Builder().url(url).header("User-Agent", UA)
@@ -415,8 +445,21 @@ object FourKHdHub {
         return "https://pixeldrain.dev/api/file/$id?download"
     }
 
+    /** Percent-encode the RFC-3986 characters that appear UNescaped in
+     *  4KHDHub's scene filenames — spaces, braces, brackets, etc. Both
+     *  java.net.URI(raw) and OkHttp's HttpUrl THROW on these, so a worker
+     *  link like ".../Spider-Man 2 (2004) {Dual Audio} ByHammer.mkv" was
+     *  silently dropped by isValidPlayback — losing the one Cloudflare mirror
+     *  that actually streams (verified: that link returns HTTP 206). Idempotent:
+     *  never touches '%', so an already-encoded URL passes through unchanged. */
+    private fun canonicalize(raw: String): String =
+        raw.replace(" ", "%20").replace("{", "%7B").replace("}", "%7D")
+            .replace("[", "%5B").replace("]", "%5D").replace("|", "%7C")
+            .replace("`", "%60").replace("^", "%5E")
+            .replace("\"", "%22").replace("<", "%3C").replace(">", "%3E")
+
     private fun isValidPlayback(raw: String): Boolean {
-        val u = runCatching { java.net.URI(raw) }.getOrNull() ?: return false
+        val u = runCatching { java.net.URI(canonicalize(raw)) }.getOrNull() ?: return false
         if (u.scheme != "https" || u.host.isNullOrBlank()) return false
         val host = u.host.lowercase()
         val path = u.rawPath.orEmpty().lowercase()

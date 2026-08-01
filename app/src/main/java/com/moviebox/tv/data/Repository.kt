@@ -527,6 +527,38 @@ class Repository(
         // recursion — the retry passes false.
         allowReresolve: Boolean = true,
     ): PlayInfo {
+        // VixSrc provider: TMDB-keyed ADAPTIVE HLS. Tried first for tmdb-keyed
+        // picks because the manifest carries a 480p/720p/1080p H.264 ladder,
+        // so a thin pipe drops a rendition instead of buffer-starving the way
+        // a single fixed-bitrate file does. Falls through to the aoneroom
+        // bridge (by title) when this provider doesn't carry the title.
+        if (subjectId.startsWith(com.moviebox.tv.net.VixSrc.PREFIX)) {
+            val rest = subjectId.removePrefix(com.moviebox.tv.net.VixSrc.PREFIX)
+            val isSeries = rest.startsWith("tv:")
+            val tmdbId = rest.substringAfterLast(':').toIntOrNull()
+            if (tmdbId != null) {
+                val viaVix = runCatching {
+                    com.moviebox.tv.net.VixSrc.resolvePlay(
+                        tmdbId = tmdbId,
+                        season = if (isSeries) (season ?: 1) else 0,
+                        episode = if (isSeries) (episode ?: 1) else 0,
+                        title = titleHint.orEmpty(),
+                        resolution = resolution,
+                    )
+                }.getOrNull()
+                if (viaVix != null) return viaVix
+            }
+            // Not on VixSrc — bridge to aoneroom by title, then continue below
+            // with that subjectId (same path a tmdb: pick used to take).
+            val bridged = titleHint?.let {
+                runCatching { resolveByTitle(it, null, isSeries) }.getOrNull()
+            } ?: throw ApiException("This title isn't available right now.")
+            return resolvePlay(
+                subjectId = bridged.subjectId, resolution = resolution,
+                season = season, episode = episode, dub = dub,
+                titleHint = titleHint, allowReresolve = allowReresolve,
+            )
+        }
         // 4KHDHub provider: resolve the mirror chain to a direct file instead
         // of the aoneroom play pipeline. Movies use season/episode 0.
         if (subjectId.startsWith(com.moviebox.tv.net.FourKHdHub.PREFIX)) {

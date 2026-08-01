@@ -1741,12 +1741,31 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             pendingTmdbId =
                 if (subjectId.startsWith("tmdb:")) subjectId else null
             // TMDB-browsed picks need to be resolved to an aoneroom subjectId.
+            // aoneroom stays FIRST: its files are streaming-sized and measured
+            // smooth here, whereas the TMDB-keyed HLS providers sit on
+            // geo-distant CDNs. VixSrc is the fallback below — it fills the
+            // gaps aoneroom genuinely lacks (e.g. Spider-Man 2002) rather than
+            // displacing a provider that already works.
             val effectiveId = if (subjectId.startsWith("tmdb:")) {
                 val isSeries = subjectId.startsWith("tmdb:tv")
                 val match = runCatching {
                     repo.resolveByTitle(title, year, isSeries)
                 }.getOrNull()
                 if (match == null) {
+                    // aoneroom doesn't carry it — try the TMDB-keyed HLS
+                    // provider before giving up. This is exactly the gap case
+                    // (e.g. Spider-Man 2002): resolved BY tmdb id, so there's
+                    // no wrong-movie risk, and it serves an adaptive ladder.
+                    val tmdbNum = subjectId.substringAfterLast(':').toIntOrNull()
+                    if (tmdbNum != null) {
+                        val kind = if (subjectId.startsWith("tmdb:tv")) "tv" else "movie"
+                        this@MainViewModel.subjectId =
+                            "${com.moviebox.tv.net.VixSrc.PREFIX}$kind:$tmdbNum"
+                        dub = "Original"
+                        quality = DEFAULT_QUALITY
+                        resolve()
+                        return@launch
+                    }
                     // Mark this TMDB pick as un-bridgeable so the recommendations
                     // row stops surfacing it on the next refresh — the "Supergirl
                     // → couldn't auto-match" loop the user kept hitting was the
