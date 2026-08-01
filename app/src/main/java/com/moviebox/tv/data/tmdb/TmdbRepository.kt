@@ -77,11 +77,100 @@ class TmdbRepository(token: String = BuildConfig.TMDB_TOKEN) {
     suspend fun movieGenres(): List<TmdbGenre> = api.movieGenres().genres
     suspend fun tvGenres(): List<TmdbGenre> = api.tvGenres().genres
 
+    /** TMDB-accurate metadata for a source title (aoneroom/4KHDHub), matched
+     *  by title+year+type. Returns null when there's no confident match, so
+     *  callers keep the source's own metadata rather than showing a wrong one. */
+    data class TmdbMeta(
+        val posterUrl: String?,
+        val backdropUrl: String?,
+        val overview: String?,
+        val rating: Double?,
+        val trailerKey: String?,
+        val cast: List<com.moviebox.tv.data.CastMember>,
+    )
+
+    suspend fun enrich(title: String, year: Int?, isSeries: Boolean): TmdbMeta? {
+        val id = matchId(title, year, isSeries) ?: return null
+        val d = runCatching {
+            if (isSeries) api.tvDetail(id) else api.movieDetail(id)
+        }.getOrNull() ?: return null
+        val trailer = d.videos?.results
+            ?.filter { it.site.equals("YouTube", true) && it.type.equals("Trailer", true) }
+            ?.maxByOrNull { if (it.official) 1 else 0 }?.key
+            ?: d.videos?.results?.firstOrNull { it.site.equals("YouTube", true) }?.key
+        val cast = d.credits?.cast.orEmpty()
+            .sortedBy { it.order }
+            .take(18)
+            .map {
+                com.moviebox.tv.data.CastMember(
+                    name = it.name,
+                    character = it.character?.takeIf { c -> c.isNotBlank() },
+                    profileUrl = profile(it.profilePath),
+                )
+            }
+        return TmdbMeta(
+            posterUrl = poster(d.posterPath, "w500"),
+            backdropUrl = backdrop(d.backdropPath),
+            overview = d.overview?.takeIf { it.isNotBlank() },
+            rating = d.voteAverage?.takeIf { it > 0.0 },
+            trailerKey = trailer,
+            cast = cast,
+        )
+    }
+
+    /** Strict title→TMDB-id match: exact normalized title, right media type,
+     *  closest year. No loose/first-result fallback — a wrong match would show
+     *  the wrong poster/trailer/cast (the "Affinity → Avengers" failure class). */
+    private suspend fun matchId(title: String, year: Int?, isSeries: Boolean): Int? {
+        val clean = cleanTitle(title)
+        val want = normalize(clean)
+        if (want.isEmpty()) return null
+        val results = runCatching { api.searchMulti(clean).results }.getOrNull().orEmpty()
+        val wantType = if (isSeries) "tv" else "movie"
+        return results
+            .filter { mediaTypeOf(it) == wantType }
+            .filter { normalize(titleOf(it)) == want }
+            .minByOrNull { yearDistance(it, year) }
+            ?.id
+        // fall back to the opposite type only on exact title (aoneroom
+        // sometimes classifies a mini-series as a movie and vice-versa).
+            ?: results.filter { normalize(titleOf(it)) == want }
+                .minByOrNull { yearDistance(it, year) }?.id
+    }
+
+    private fun titleOf(d: TmdbItemDto): String = d.title ?: d.name ?: ""
+    private fun mediaTypeOf(d: TmdbItemDto): String =
+        d.mediaType ?: if (d.title != null) "movie" else "tv"
+
+    private fun normalize(s: String): String =
+        s.lowercase().replace(Regex("[^a-z0-9]+"), "")
+
+    /** Strip the decorations aoneroom & 4KHDHub bolt onto titles so they match
+     *  TMDB's clean title: bracket/paren language+edition tags ("[English]",
+     *  "(Version française)"), season ranges ("S5-S12", "Season 3"), and a
+     *  trailing year. Without this, "Bleach [English]" normalizes to
+     *  "bleachenglish" and never matches TMDB's "bleach". */
+    private fun cleanTitle(s: String): String = s
+        .replace(Regex("\\[[^\\]]*\\]"), " ")                 // [English], [Version française]
+        .replace(Regex("\\([^)]*\\)"), " ")                    // (Version française), (2004)
+        .replace(Regex("\\bS\\d{1,2}(\\s*-\\s*S?\\d{1,2})?\\b", RegexOption.IGNORE_CASE), " ")
+        .replace(Regex("\\bSeason\\s*\\d+\\b", RegexOption.IGNORE_CASE), " ")
+        .replace(Regex("\\s{2,}"), " ")
+        .trim()
+
+    private fun yearDistance(d: TmdbItemDto, year: Int?): Int {
+        if (year == null) return 0
+        val dy = (d.releaseDate ?: d.firstAirDate)?.take(4)?.toIntOrNull() ?: return 50
+        return kotlin.math.abs(dy - year)
+    }
+
     companion object {
         const val IMAGE_BASE = "https://image.tmdb.org/t/p/"
         fun poster(path: String?, size: String = "w342"): String? =
             path?.let { IMAGE_BASE + size + it }
         fun backdrop(path: String?, size: String = "w1280"): String? =
+            path?.let { IMAGE_BASE + size + it }
+        fun profile(path: String?, size: String = "w185"): String? =
             path?.let { IMAGE_BASE + size + it }
     }
 }

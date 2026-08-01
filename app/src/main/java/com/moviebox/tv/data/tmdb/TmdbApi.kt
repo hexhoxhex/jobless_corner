@@ -40,11 +40,28 @@ interface TmdbApi {
         @Query("language") language: String = "en-US",
     ): TmdbPage<TmdbItemDto>
 
+    /** Title search for matching an aoneroom/4KHDHub entry to a TMDB id.
+     *  multi returns mixed movie/tv/person — we filter to movie/tv. */
+    @GET("search/multi")
+    suspend fun searchMulti(
+        @Query("query") query: String,
+        @Query("page") page: Int = 1,
+        @Query("include_adult") includeAdult: Boolean = false,
+        @Query("language") language: String = "en-US",
+    ): TmdbPage<TmdbItemDto>
+
+    // append_to_response pulls trailers (videos) + cast (credits) in one call.
     @GET("movie/{id}")
-    suspend fun movieDetail(@Path("id") id: Int): TmdbDetailDto
+    suspend fun movieDetail(
+        @Path("id") id: Int,
+        @Query("append_to_response") append: String = "videos,credits",
+    ): TmdbDetailDto
 
     @GET("tv/{id}")
-    suspend fun tvDetail(@Path("id") id: Int): TmdbDetailDto
+    suspend fun tvDetail(
+        @Path("id") id: Int,
+        @Query("append_to_response") append: String = "videos,credits",
+    ): TmdbDetailDto
 
     @GET("genre/movie/list")
     suspend fun movieGenres(): TmdbGenres
@@ -89,6 +106,32 @@ data class TmdbDetailDto(
     @Json(name = "number_of_seasons") val numberOfSeasons: Int? = null,
     val genres: List<TmdbGenre> = emptyList(),
     val networks: List<TmdbNetwork> = emptyList(),
+    // Populated by append_to_response=videos,credits.
+    val videos: TmdbVideos? = null,
+    val credits: TmdbCredits? = null,
+)
+
+@JsonClass(generateAdapter = true)
+data class TmdbVideos(val results: List<TmdbVideo> = emptyList())
+
+@JsonClass(generateAdapter = true)
+data class TmdbVideo(
+    val key: String = "",
+    val site: String = "",
+    val type: String = "",
+    val official: Boolean = false,
+    val name: String = "",
+)
+
+@JsonClass(generateAdapter = true)
+data class TmdbCredits(val cast: List<TmdbCastMember> = emptyList())
+
+@JsonClass(generateAdapter = true)
+data class TmdbCastMember(
+    val name: String = "",
+    val character: String? = null,
+    @Json(name = "profile_path") val profilePath: String? = null,
+    val order: Int = 999,
 )
 
 @JsonClass(generateAdapter = true)

@@ -17,6 +17,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -110,7 +112,11 @@ fun DetailScreen(state: UiState, vm: MainViewModel) {
     ) {
         Box(Modifier.fillMaxWidth().height(360.dp)) {
             AsyncImage(
-                model = item.coverUrl,
+                // Prefer TMDB-accurate artwork (folded in by the background
+                // metadata fetch) over the source's often-wrong/low-res cover.
+                model = state.details?.backdropUrl
+                    ?: state.details?.posterUrl
+                    ?: item.coverUrl,
                 contentDescription = item.title,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(),
@@ -140,8 +146,10 @@ fun DetailScreen(state: UiState, vm: MainViewModel) {
                 Spacer(Modifier.height(6.dp))
                 Row(verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    item.year?.let { Text("$it", color = TextMuted, fontSize = 13.sp) }
-                    item.rating?.takeIf { it > 0 }?.let {
+                    (item.year ?: state.details?.year)?.let {
+                        Text("$it", color = TextMuted, fontSize = 13.sp)
+                    }
+                    (item.rating?.takeIf { it > 0 } ?: state.details?.rating)?.let {
                         Text("★ %.1f".format(it), color = Gold, fontSize = 13.sp,
                             fontWeight = FontWeight.SemiBold)
                     }
@@ -227,6 +235,41 @@ fun DetailScreen(state: UiState, vm: MainViewModel) {
             if (desc != null) {
                 Text("Summary", fontWeight = FontWeight.Bold, fontSize = 16.sp)
                 Text(desc, color = TextMuted, fontSize = 13.sp)
+            }
+
+            // Cast (TMDB credits, folded in by the background metadata fetch).
+            val cast = state.details?.cast.orEmpty()
+            if (cast.isNotEmpty()) {
+                Text("Cast", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                Row(
+                    Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    cast.forEach { member ->
+                        Column(
+                            Modifier.width(84.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            AsyncImage(
+                                model = member.profileUrl,
+                                contentDescription = member.name,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .size(72.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF1A1D24)),
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                member.name, fontSize = 11.sp, color = Color.White,
+                                maxLines = 1, fontWeight = FontWeight.Medium,
+                            )
+                            member.character?.let {
+                                Text(it, fontSize = 10.sp, color = TextMuted, maxLines = 1)
+                            }
+                        }
+                    }
+                }
             }
 
             if (isSeries) {

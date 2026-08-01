@@ -60,6 +60,13 @@ data class SeasonInfo(
 
 data class Dub(val name: String, val code: String, val original: Boolean)
 
+/** A cast member (from TMDB credits). [profileUrl] is a ready image URL. */
+data class CastMember(
+    val name: String,
+    val character: String?,
+    val profileUrl: String?,
+)
+
 data class Details(
     val subjectId: String,
     val title: String,
@@ -69,10 +76,18 @@ data class Details(
     val isSeries: Boolean,
     val seasons: List<SeasonInfo>,
     val dubs: List<Dub>,
-    /** YouTube video id for the title's trailer (from Cinemeta), or null.
-     *  Fetched lazily after the detail loads so it never blocks the page;
-     *  drives the "Trailer" button on the APK detail screen + web remote. */
+    /** YouTube video id for the title's trailer, or null. Prefer TMDB's
+     *  official trailer (matched to the exact title); drives the "Trailer"
+     *  button on the APK detail screen + web remote. */
     val trailerYouTubeId: String? = null,
+    /** TMDB-accurate metadata, filled by [com.moviebox.tv.data.tmdb.TmdbRepository.enrich]
+     *  when a confident title match exists — fixes wrong posters/overviews and
+     *  adds the cast the aoneroom/4KHDHub sources don't carry. Null/empty when
+     *  no match, so the base source metadata still shows. */
+    val posterUrl: String? = null,
+    val backdropUrl: String? = null,
+    val rating: Double? = null,
+    val cast: List<CastMember> = emptyList(),
 )
 
 /** A selectable quality. [mediaUrl] is null when it must be re-resolved. */

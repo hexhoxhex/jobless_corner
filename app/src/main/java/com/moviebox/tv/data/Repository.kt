@@ -507,6 +507,14 @@ class Repository(
         )
     }
 
+    /** TMDB-accurate metadata (poster, backdrop, overview, rating, trailer,
+     *  cast) for a title — used to enrich a detail page in the background so
+     *  the base source metadata renders instantly. Null on no confident match. */
+    suspend fun enrichMetadata(
+        title: String, year: Int?, isSeries: Boolean,
+    ): com.moviebox.tv.data.tmdb.TmdbRepository.TmdbMeta? =
+        runCatching { tmdb.enrich(title, year, isSeries) }.getOrNull()
+
     suspend fun resolvePlay(
         subjectId: String,
         resolution: String = "best",

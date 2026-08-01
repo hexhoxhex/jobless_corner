@@ -1195,7 +1195,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     // phantom trailing episodes are hidden before the user
                     // ever taps one.
                     enumerateEpisodesInBackground(resolvedId, d)
-                    fetchTrailerInBackground(resolvedId, item.title, d.isSeries)
+                    fetchMetadataInBackground(d)
                 }
                 .onFailure { e ->
                     _state.update {
@@ -1231,7 +1231,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     precheckPlayback(item.subjectId, d)
                     enumerateEpisodesInBackground(item.subjectId, d)
-                    fetchTrailerInBackground(item.subjectId, item.title, d.isSeries)
+                    fetchMetadataInBackground(d)
                 }
                 .onFailure { e ->
                     _state.update {
@@ -1245,18 +1245,37 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      *  path and fold it into [UiState.details] so the Detail screen's
      *  "Trailer" button appears once resolved. Never blocks the detail load;
      *  a miss just means no trailer button. */
-    private fun fetchTrailerInBackground(
-        subjectId: String, title: String, isSeries: Boolean,
-    ) {
+    /** Enrich the open detail page with TMDB-accurate metadata in the
+     *  background — correct poster/backdrop, overview, rating, official
+     *  trailer, and cast/actors the aoneroom/4KHDHub sources don't carry.
+     *  Non-blocking: the base detail renders instantly, then this folds in.
+     *  Falls back to Cinemeta for the trailer when TMDB has no match. */
+    private fun fetchMetadataInBackground(d: Details) {
+        val subjectId = d.subjectId
         viewModelScope.launch {
-            val ytId = runCatching {
-                com.moviebox.tv.net.OpenSubtitlesClient
-                    .trailerYouTubeId(title, isSeries)
-            }.getOrNull() ?: return@launch
+            val meta = runCatching {
+                repo.enrichMetadata(d.title, d.year, d.isSeries)
+            }.getOrNull()
+            val ytId = meta?.trailerKey
+                ?: runCatching {
+                    com.moviebox.tv.net.OpenSubtitlesClient
+                        .trailerYouTubeId(d.title, d.isSeries)
+                }.getOrNull()
+            if (meta == null && ytId == null) return@launch
             _state.update { s ->
-                val d = s.details
-                if (d != null && d.subjectId == subjectId) {
-                    s.copy(details = d.copy(trailerYouTubeId = ytId))
+                val cur = s.details
+                if (cur != null && cur.subjectId == subjectId) {
+                    s.copy(
+                        details = cur.copy(
+                            trailerYouTubeId = ytId ?: cur.trailerYouTubeId,
+                            posterUrl = meta?.posterUrl ?: cur.posterUrl,
+                            backdropUrl = meta?.backdropUrl ?: cur.backdropUrl,
+                            description = meta?.overview?.takeIf { it.isNotBlank() }
+                                ?: cur.description,
+                            rating = meta?.rating ?: cur.rating,
+                            cast = meta?.cast?.takeIf { it.isNotEmpty() } ?: cur.cast,
+                        ),
+                    )
                 } else s
             }
         }
