@@ -184,16 +184,38 @@ class RemoteServer(
                     // page has. repo.details doesn't carry it (it's a VM-layer
                     // add), so fetch directly. Title from the detail, falling
                     // back to the ?title= param the remote passes.
+                    // TMDB enrichment: accurate poster/backdrop/rating/cast +
+                    // the official trailer — the same data the APK detail page
+                    // now shows. Matched by title+year+type; null on no match,
+                    // so the base source metadata still renders.
                     val trailerTitle = d.title.ifBlank { p("title").orEmpty() }
-                    val trailer = if (trailerTitle.isNotBlank()) runBlocking {
-                        com.moviebox.tv.net.OpenSubtitlesClient
-                            .trailerYouTubeId(trailerTitle, d.isSeries)
+                    val meta = if (trailerTitle.isNotBlank()) runBlocking {
+                        RemoteController.enrichMetadata(trailerTitle, d.year, d.isSeries)
                     } else null
+                    val trailer = meta?.trailerKey
+                        ?: if (trailerTitle.isNotBlank()) runBlocking {
+                            com.moviebox.tv.net.OpenSubtitlesClient
+                                .trailerYouTubeId(trailerTitle, d.isSeries)
+                        } else null
+                    val cast = JSONArray()
+                    meta?.cast?.forEach { c ->
+                        cast.put(
+                            JSONObject()
+                                .put("name", c.name)
+                                .put("character", c.character ?: "")
+                                .put("profile", c.profileUrl ?: ""),
+                        )
+                    }
                     json(
                         JSONObject()
-                            .put("description", d.description ?: "")
+                            .put("title", d.title)
+                            .put("description", meta?.overview?.ifBlank { null } ?: d.description ?: "")
                             .put("seasons", seasons)
                             .put("trailer", trailer ?: "")
+                            .put("poster", meta?.posterUrl ?: "")
+                            .put("backdrop", meta?.backdropUrl ?: "")
+                            .put("rating", meta?.rating ?: JSONObject.NULL)
+                            .put("cast", cast)
                             .toString()
                     )
                 }
@@ -229,8 +251,11 @@ class RemoteServer(
                     title = p("title").orEmpty(),
                     coverUrl = p("cover"),
                     type = p("type")?.toIntOrNull() ?: 0,
-                    season = p("se")?.toIntOrNull(),
-                    episode = p("ep")?.toIntOrNull(),
+                    // Season/episode 0 is the movie convention — normalize to
+                    // null so movies don't render as "S0E0 · Title" and don't
+                    // show episode / up-next controls. Real seasons start at 1.
+                    season = p("se")?.toIntOrNull()?.takeIf { it > 0 },
+                    episode = p("ep")?.toIntOrNull()?.takeIf { it > 0 },
                     year = p("year")?.toIntOrNull(),
                 )
                 ok()

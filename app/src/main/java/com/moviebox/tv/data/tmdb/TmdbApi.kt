@@ -87,6 +87,7 @@ data class TmdbItemDto(
     @Json(name = "poster_path")   val posterPath: String? = null,
     @Json(name = "backdrop_path") val backdropPath: String? = null,
     @Json(name = "vote_average")  val voteAverage: Double? = null,
+    @Json(name = "vote_count")    val voteCount: Int? = null,
     @Json(name = "original_language") val originalLanguage: String? = null,
     val overview: String? = null,
     @Json(name = "genre_ids") val genreIds: List<Int>? = null,

@@ -90,9 +90,14 @@ class TmdbRepository(token: String = BuildConfig.TMDB_TOKEN) {
     )
 
     suspend fun enrich(title: String, year: Int?, isSeries: Boolean): TmdbMeta? {
-        val id = matchId(title, year, isSeries) ?: return null
+        val match = matchItem(title, year, isSeries) ?: return null
+        // Fetch the detail with the MATCHED item's real media type — NOT the
+        // source's isSeries. aoneroom can mislabel a series as a movie (The
+        // Office → 0 seasons → isSeries=false); the match still finds the TV
+        // id, and calling movieDetail() with a TV id returns a different work.
+        val matchIsTv = mediaTypeOf(match) == "tv"
         val d = runCatching {
-            if (isSeries) api.tvDetail(id) else api.movieDetail(id)
+            if (matchIsTv) api.tvDetail(match.id) else api.movieDetail(match.id)
         }.getOrNull() ?: return null
         val trailer = d.videos?.results
             ?.filter { it.site.equals("YouTube", true) && it.type.equals("Trailer", true) }
@@ -121,21 +126,35 @@ class TmdbRepository(token: String = BuildConfig.TMDB_TOKEN) {
     /** Strict title→TMDB-id match: exact normalized title, right media type,
      *  closest year. No loose/first-result fallback — a wrong match would show
      *  the wrong poster/trailer/cast (the "Affinity → Avengers" failure class). */
-    private suspend fun matchId(title: String, year: Int?, isSeries: Boolean): Int? {
+    private suspend fun matchItem(title: String, year: Int?, isSeries: Boolean): TmdbItemDto? {
         val clean = cleanTitle(title)
         val want = normalize(clean)
         if (want.isEmpty()) return null
         val results = runCatching { api.searchMulti(clean).results }.getOrNull().orEmpty()
         val wantType = if (isSeries) "tv" else "movie"
-        return results
-            .filter { mediaTypeOf(it) == wantType }
-            .filter { normalize(titleOf(it)) == want }
-            .minByOrNull { yearDistance(it, year) }
-            ?.id
-        // fall back to the opposite type only on exact title (aoneroom
-        // sometimes classifies a mini-series as a movie and vice-versa).
-            ?: results.filter { normalize(titleOf(it)) == want }
-                .minByOrNull { yearDistance(it, year) }?.id
+        // Consider BOTH media types with an exact normalized title. The
+        // requested type is only a tiebreak, NOT a filter — aoneroom's detail
+        // for a series can come back with 0 seasons (looks like a movie), and
+        // filtering to movies then matches an obscure "The Office" film
+        // instead of the famous series. Ranking by votes lets the canonical
+        // entry win regardless of that mislabel.
+        val pool = results.filter {
+            normalize(titleOf(it)) == want &&
+                (mediaTypeOf(it) == "movie" || mediaTypeOf(it) == "tv")
+        }
+        if (pool.isEmpty()) return null
+        // Rank by vote_count (the canonical show/film for a name is the
+        // most-voted), with a dominant boost for a well-voted close-year
+        // match, and a small nudge toward the requested type. This picks
+        // Spider-Man (2002) by year, and the US "The Office" (5338 votes) for
+        // an ambiguous name whose source year/type is unreliable — instead of
+        // an obscure same-named entry (the wrong-cast/poster failure).
+        return pool.maxByOrNull { c ->
+            val votes = (c.voteCount ?: 0).toLong()
+            val yearHit = year != null && yearDistance(c, year) <= 1 && votes >= 20
+            val typeHit = mediaTypeOf(c) == wantType
+            (if (yearHit) 1_000_000L else 0L) + votes + (if (typeHit) 500L else 0L)
+        }
     }
 
     private fun titleOf(d: TmdbItemDto): String = d.title ?: d.name ?: ""

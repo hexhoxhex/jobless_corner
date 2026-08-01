@@ -257,6 +257,12 @@ object RemoteController {
     suspend fun details(subjectId: String): com.moviebox.tv.data.Details? =
         runCatching { repo.details(subjectId) }.getOrNull()
 
+    /** TMDB-accurate poster/backdrop/rating/trailer/cast for the remote's
+     *  detail view (the APK folds this in via the VM; the remote fetches it
+     *  here). Null on no confident match. */
+    suspend fun enrichMetadata(title: String, year: Int?, isSeries: Boolean) =
+        runCatching { repo.enrichMetadata(title, year, isSeries) }.getOrNull()
+
     /** Real season → episode-numbers map for the phone's episode picker.
      *  Bridges a tmdb: id to its aoneroom record first (resolveByTitle), then
      *  returns the ENUMERATED episodes that actually exist — no phantom

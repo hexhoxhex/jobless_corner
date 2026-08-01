@@ -688,27 +688,31 @@ async function renderDetailsContent(it) {
   $("#dSub").textContent = subParts.join(" · ");
   $("#dEpisodes").classList.toggle("hidden", !it.isSeries);
 
-  // Reset the trailer button each time we open a detail; it re-appears
-  // below only if this title has a trailer.
+  // Reset per-open UI state (trailer + cast re-appear below if present).
   $("#dTrailer").classList.add("hidden");
+  renderCast([]);
 
-  // Description: TMDB picks carry their own overview; aoneroom records need a
-  // details fetch.
-  if (it.subjectId && it.subjectId.startsWith("tmdb:")) {
-    $("#dDesc").textContent = it.overview || "";
-    // TMDB items still get a trailer via the details endpoint (keyed by
-    // title, so subjectId being a tmdb: id is fine).
-    loadTrailerButton(it);
-  } else {
-    $("#dDesc").textContent = "Loading…";
-    try {
-      const d = await get("/api/details?subjectId=" +
-        encodeURIComponent(it.subjectId) +
-        "&title=" + encodeURIComponent(it.title || ""));
-      $("#dDesc").textContent = d.description || "";
-      if (d.trailer) showTrailerButton(d.trailer);
-    } catch (e) { $("#dDesc").textContent = ""; }
-  }
+  const isTmdb = it.subjectId && it.subjectId.startsWith("tmdb:");
+  $("#dDesc").textContent = it.overview || (isTmdb ? "" : "Loading…");
+
+  // Rich details — accurate poster/backdrop/rating/trailer/cast from TMDB
+  // (matched by title, so it works for tmdb:, aoneroom and 4k: items alike).
+  try {
+    const d = await get("/api/details?subjectId=" +
+      encodeURIComponent(it.subjectId) +
+      "&title=" + encodeURIComponent(it.title || ""));
+    if (d.description) $("#dDesc").textContent = d.description;
+    else if (!it.overview) $("#dDesc").textContent = "";
+    if (d.poster || d.backdrop) $("#dCover").src = d.poster || d.backdrop;
+    const rating = d.rating || it.rating;
+    $("#dSub").textContent = [
+      it.isSeries ? "TV" : "Movie",
+      it.year || null,
+      rating ? "★ " + Number(rating).toFixed(1) : null,
+    ].filter(Boolean).join(" · ");
+    if (d.trailer) showTrailerButton(d.trailer);
+    renderCast(d.cast || []);
+  } catch (e) { if (!it.overview) $("#dDesc").textContent = ""; }
 
   // Real seasons + episodes — /api/episodes bridges TMDB→aoneroom and returns
   // only what actually exists, so no hardcoded Seasons 1-8 and no typing an
@@ -748,6 +752,20 @@ function showTrailerButton(ytId) {
   const btn = $("#dTrailer");
   btn.classList.remove("hidden");
   btn.onclick = () => openTrailer(ytId);
+}
+// Cast row (TMDB credits from /api/details): photo + name + character.
+function renderCast(list) {
+  const wrap = $("#dCast");
+  if (!wrap) return;
+  if (!list || !list.length) { wrap.innerHTML = ""; wrap.classList.add("hidden"); return; }
+  wrap.classList.remove("hidden");
+  wrap.innerHTML = '<h3>Cast</h3><div class="cast-row">' + list.map(c =>
+    '<div class="cast-item">' +
+      '<div class="cast-pic"' +
+        (c.profile ? ' style="background-image:url(\'' + c.profile + '\')"' : '') + '></div>' +
+      '<div class="cast-name">' + escapeHtml(c.name || '') + '</div>' +
+      (c.character ? '<div class="cast-char">' + escapeHtml(c.character) + '</div>' : '') +
+    '</div>').join('') + '</div>';
 }
 function openTrailer(ytId) {
   const wrap = $("#trailerFrameWrap");
