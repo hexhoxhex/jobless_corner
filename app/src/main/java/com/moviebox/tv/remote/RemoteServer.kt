@@ -269,13 +269,32 @@ class RemoteServer(
             }
 
             uri == "/api/history" -> {
+                // Categorised + de-duplicated viewing history.
+                //
+                // Three problems this fixes: (1) movies, series and channels
+                // were one undifferentiated pile; (2) the same show appeared
+                // twice when watched from two sources or under two title
+                // spellings ("Big Bang Theory" from 4KHDHub vs "The Big Bang
+                // Theory" from MovieBox); (3) `type` is unreliable — some
+                // rows carry type 0, so the kind is derived from season/
+                // episode first and only falls back to the stored type.
                 val arr = JSONArray()
+                val seen = HashSet<String>()
                 RemoteController.history().forEach {
-                    // Fall back to the in-process cover map for entries
-                    // written before v0.1.83 where coverUrl was lost. The
-                    // startup backfill walks the DB and writes covers back,
-                    // but it runs async — this keeps Continue Watching
-                    // showing posters in the meantime.
+                    val isSeries = it.season > 0 || it.episode > 0 || it.type == 2
+                    // Collapse title variants: strip leading article, season
+                    // decorations ("S24", "S1-S5") and non-alphanumerics, so
+                    // the same show from different providers folds into one.
+                    val dedupeKey = buildString {
+                        append(if (isSeries) "s:" else "m:")
+                        append(
+                            it.title.lowercase()
+                                .replace(Regex("""\bs\d{1,2}(\s*-\s*s?\d{1,2})?\b"""), " ")
+                                .replace(Regex("""^(the|a|an)\s+"""), "")
+                                .replace(Regex("[^a-z0-9]+"), ""),
+                        )
+                    }
+                    if (!seen.add(dedupeKey)) return@forEach
                     val cover = it.coverUrl?.takeIf { url -> url.isNotBlank() }
                         ?: RemoteController.knownCover(it.subjectId)
                         ?: ""
@@ -289,6 +308,30 @@ class RemoteServer(
                             .put("subjectId", it.subjectId)
                             .put("type", it.type)
                             .put("progress", it.progress)
+                            .put("kind", if (isSeries) "series" else "movie")
+                            .put(
+                                "provider",
+                                com.moviebox.tv.data.Repository.Provider
+                                    .of(it.subjectId).label,
+                            ),
+                    )
+                }
+                // Live channels live in their own store (no resume position),
+                // surfaced here so the remote can show a "TV stations" group.
+                RemoteController.liveRecents().forEach {
+                    arr.put(
+                        JSONObject()
+                            .put("key", "live:" + it.id)
+                            .put("title", it.name)
+                            .put("cover", it.logo ?: "")
+                            .put("season", 0)
+                            .put("episode", 0)
+                            .put("subjectId", "live:" + it.id)
+                            .put("channelId", it.id)
+                            .put("type", 0)
+                            .put("progress", 0.0)
+                            .put("kind", "channel")
+                            .put("group", it.group ?: ""),
                     )
                 }
                 json(arr.toString())

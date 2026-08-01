@@ -1211,38 +1211,68 @@ async function loadHistory() {
   if (!items.length) {
     el.innerHTML = `<div class="muted small">Nothing watched yet.</div>`; return;
   }
-  items.forEach(it => {
-    const pct = Math.round((it.progress || 0) * 100);
-    const label = it.season > 0
-      ? `Season ${it.season}, Episode ${it.episode}`
-      : "Movie";
-    const row = document.createElement("div"); row.className = "row-item cw-item";
-    row.innerHTML = `
-      <div class="cw-poster">
-        <img loading="lazy" src="${it.cover}" onerror="this.style.opacity=.25" />
-        <span class="cw-play">${ic("play","sm")}</span>
-        <span class="cw-bar"><span style="width:${pct}%"></span></span>
-      </div>
-      <div class="body">
-        <div class="t">${escapeHtml(it.title)}</div>
-        <div class="s">${label}</div>
-        <div class="s cw-pct">${pct}% watched</div>
-      </div>
-      <div class="x" title="Remove">${ic("close","sm")}</div>`;
-    row.querySelector(".body").onclick = async () => {
+  // Group into Movies / Series / TV stations. Previously everything was one
+  // undifferentiated list, so a channel, a film and an episode all looked the
+  // same. `kind` comes from the server (derived from season/episode, since the
+  // stored type is unreliable).
+  const groups = [
+    ["series",  "Series"],
+    ["movie",   "Movies"],
+    ["channel", "TV stations"],
+  ];
+  groups.forEach(([kind, heading]) => {
+    const rows = items.filter(it => (it.kind || "movie") === kind);
+    if (!rows.length) return;
+    const h = document.createElement("div");
+    h.className = "hist-head";
+    h.innerHTML = `${escapeHtml(heading)} <span class="hist-count">${rows.length}</span>`;
+    el.appendChild(h);
+    rows.forEach(it => el.appendChild(historyRow(it)));
+  });
+}
+
+function historyRow(it) {
+  const isChannel = it.kind === "channel";
+  const pct = Math.round((it.progress || 0) * 100);
+  const label = isChannel
+    ? (it.group ? escapeHtml(it.group) : "Live channel")
+    : (it.season > 0 ? `Season ${it.season}, Episode ${it.episode}` : "Movie");
+  // Source badge, so it is obvious which provider a row came from.
+  const prov = !isChannel && it.provider && it.provider !== "MovieBox"
+    ? `<span class="badge src">${escapeHtml(it.provider)}</span>` : "";
+  const row = document.createElement("div");
+  row.className = "row-item cw-item";
+  row.innerHTML = `
+    <div class="cw-poster">
+      <img loading="lazy" src="${it.cover}" onerror="this.style.opacity=.25" />
+      <span class="cw-play">${ic("play","sm")}</span>
+      ${isChannel ? "" : `<span class="cw-bar"><span style="width:${pct}%"></span></span>`}
+    </div>
+    <div class="body">
+      <div class="t">${escapeHtml(it.title)} ${prov}</div>
+      <div class="s">${label}</div>
+      <div class="s cw-pct">${isChannel ? "Live TV" : pct + "% watched"}</div>
+    </div>
+    <div class="x" title="Remove">${ic("close","sm")}</div>`;
+  row.querySelector(".body").onclick = async () => {
+    if (isChannel) {
+      await post("/api/live/play?id=" + encodeURIComponent(it.channelId));
+      toast("Playing " + it.title);
+    } else {
       await post("/api/play?" + new URLSearchParams({
         subjectId: it.subjectId, title: it.title, cover: it.cover, type: it.type,
         se: it.season || "", ep: it.episode || "",
       }));
-      toast("Playing on TV…"); selectTab("np");
-    };
-    row.querySelector(".x").onclick = async (e) => {
-      e.stopPropagation();
-      await post("/api/history/delete?key=" + encodeURIComponent(it.key));
-      loadHistory();
-    };
-    el.appendChild(row);
-  });
+      toast("Playing on TV…");
+    }
+    selectTab("np");
+  };
+  row.querySelector(".x").onclick = async (e) => {
+    e.stopPropagation();
+    await post("/api/history/delete?key=" + encodeURIComponent(it.key));
+    loadHistory();
+  };
+  return row;
 }
 
 /* ---------- downloads ---------- */

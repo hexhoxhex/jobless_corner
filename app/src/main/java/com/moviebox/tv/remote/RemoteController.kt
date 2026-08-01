@@ -294,6 +294,17 @@ object RemoteController {
 
     // -- library -----------------------------------------------------------
 
+    /** Recently watched live channels, most recent first. */
+    fun liveRecents(): List<com.moviebox.tv.data.local.LiveRecents.Entry> {
+        val ctx = com.moviebox.tv.App.instance
+        return runCatching { com.moviebox.tv.data.local.LiveRecents.all(ctx) }
+            .getOrDefault(emptyList())
+    }
+
+    fun removeLiveRecent(id: String) = runCatching {
+        com.moviebox.tv.data.local.LiveRecents.remove(com.moviebox.tv.App.instance, id)
+    }
+
     /** Source serving the current stream (e.g. "MovieBox"/"VixSrc"/"4KHDHub"). */
     val currentProvider: String get() = vm?.state?.value?.play?.provider.orEmpty()
 

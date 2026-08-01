@@ -716,6 +716,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun playChannel(ch: Channel) {
+        // Record the view so live TV shows up in viewing history — channels
+        // were previously never recorded anywhere, leaving the "TV stations"
+        // side of history empty. Kept out of WatchHistory on purpose: a
+        // channel has no position to resume.
+        runCatching {
+            com.moviebox.tv.data.local.LiveRecents.record(
+                ctx = getApplication(), id = ch.id, name = ch.displayName,
+                logo = ch.logo, group = ch.group,
+                now = System.currentTimeMillis(),
+            )
+        }
         // Reset the auto-failover tried-set when the user manually picks
         // a channel. Auto-failover itself also calls playChannel, but that
         // path preserves the set — we only want to reset on a fresh

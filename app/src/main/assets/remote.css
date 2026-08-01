@@ -964,3 +964,16 @@ button.icon-btn { flex: 0 0 auto; padding: 8px 10px; }
   color: var(--accent);
   border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
 }
+
+/* Viewing-history group headings (Series / Movies / TV stations). */
+.hist-head {
+  font-size: 12px; font-weight: 700; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--muted);
+  margin: 14px 2px 6px; display: flex; align-items: center; gap: 8px;
+}
+.hist-head:first-child { margin-top: 2px; }
+.hist-count {
+  font-size: 11px; font-weight: 600; letter-spacing: 0;
+  padding: 1px 7px; border-radius: 999px;
+  background: var(--card); border: 1px solid var(--line); color: var(--muted);
+}

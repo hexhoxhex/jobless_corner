@@ -2473,7 +2473,14 @@ private fun VideoPlayer(
         }
     }
 
-    DisposableEffect(Unit) {
+    // Keyed on `exo`, NOT Unit: the player is recreated whenever isLive /
+    // preferSoftwareDecoder / noTunneling change (see the remember above).
+    // With DisposableEffect(Unit) the listener attached to the FIRST instance
+    // only, so after a swap (movie -> live -> movie) nothing ever called
+    // onPlaybackStateChanged again: `buffering` stayed frozen at its last
+    // value and the spinner sat on top of a perfectly healthy stream, while
+    // RemoteController.player also still pointed at the dead instance.
+    DisposableEffect(exo) {
         RemoteController.player = exo
         onExoReady(exo)
         val listener = object : Player.Listener {
