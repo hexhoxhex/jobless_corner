@@ -956,3 +956,11 @@ button.icon-btn { flex: 0 0 auto; padding: 8px 10px; }
   font-size: 10px; color: var(--muted); line-height: 1.2;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+
+/* Source (provider) badge on search/browse cards — distinguishes titles that
+   come from an alternate provider rather than the default catalogue. */
+.badge.src {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+}

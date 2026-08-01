@@ -124,6 +124,13 @@ class RemoteServer(
             uri == "/api/live/reset" && method == Method.POST -> {
                 RemoteController.resetLivePlayback(); ok()
             }
+            uri == "/api/provider" && method == Method.POST -> {
+                // Manual source switch for the playing title. An explicit pick
+                // pins that provider (failover won't override it).
+                RemoteController.pickProvider(p("label").orEmpty())
+                ok()
+            }
+
             uri == "/api/quality" && method == Method.POST -> {
                 p("label")?.let { RemoteController.pickQuality(it) }; ok()
             }
@@ -600,6 +607,10 @@ class RemoteServer(
             .put("rating", it.rating ?: 0.0)
             .put("isSeries", it.isSeries)
             .put("overview", it.overview ?: "")
+        // Which source this title comes from, so the SPA can badge it the way
+        // the APK does (it previously showed 4KHDHub rows indistinguishably
+        // from MovieBox ones).
+        .put("provider", com.moviebox.tv.data.Repository.Provider.of(it.subjectId).label)
 
     /** Drops titles whose language tag is in the deny list — e.g. "[Hindi]". */
     private fun keepByLanguage(title: String, deny: Set<String>): Boolean {
@@ -646,6 +657,10 @@ class RemoteServer(
                 put(JSONObject().put("code", code).put("name", name))
             }
         })
+        // Source the current stream came from + the sources selectable for
+        // it, so the remote can show the origin and switch it.
+        .put("provider", RemoteController.currentProvider)
+        .put("providers", JSONArray(RemoteController.providerOptions()))
         .put("subtitle", run {
             // Report the current selection only if it's still valid for
             // what's playing — content switches invalidate a stale pick.

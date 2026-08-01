@@ -107,6 +107,11 @@ data class PlayInfo(
     val episode: Int,
     val episodeTitle: String,
     val durationSec: Int,
+    /** Which source served this stream ("MovieBox"/"VixSrc"/"4KHDHub") and the
+     *  subjectId it was served under. Surfaced so the UI and remote can show
+     *  the origin and let the user switch sources for the same title. */
+    val provider: String = "",
+    val providerSubjectId: String = "",
     /** Live HLS stream — disables resume/quality/dub/autoplay/progress UI. */
     val isLive: Boolean = false,
     /** Optional subtitle row under the title for live streams (e.g. group). */

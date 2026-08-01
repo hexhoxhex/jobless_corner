@@ -634,13 +634,17 @@ function searchCard(it) {
   const badge = it.isSeries
     ? `<span class="badge tv">TV</span>`
     : `<span class="badge movie">Movie</span>`;
+  // Source badge — the APK shows this; the remote used to render 4KHDHub and
+  // MovieBox rows identically, so you could not tell where a title came from.
+  const prov = it.provider && it.provider !== "MovieBox"
+    ? `<span class="badge src">${it.provider}</span>` : "";
   const rating = it.rating
     ? `<span class="rating">${ic("star","sm")}${it.rating.toFixed(1)}</span>` : "";
   el.innerHTML = `
     <img class="poster" loading="lazy" src="${it.cover}" onerror="this.style.opacity=.3" />
     <div class="meta">
       <div class="t">${escapeHtml(it.title)}</div>
-      <div class="s">${badge}${it.year ? `<span>${it.year}</span>` : ""}${rating}</div>
+      <div class="s">${badge}${prov}${it.year ? `<span>${it.year}</span>` : ""}${rating}</div>
     </div>`;
   el.onclick = () => openDetails(it);
   return el;
@@ -1026,6 +1030,18 @@ function syncTracks(s) {
     fillSelect($("#dubSel"), ds, s.dub, async (v) => {
       await post("/api/dub?name=" + encodeURIComponent(v));
       toast("Audio: " + v);
+    });
+  }
+  // Source picker: switch the playing title to another provider. Shown only
+  // when the TV reported more than one selectable source.
+  const provs = s.providers || [];
+  const hasSrc = show && provs.length > 1;
+  $("#srcLabels").hidden = !hasSrc;
+  $("#srcRow").hidden = !hasSrc;
+  if (hasSrc) {
+    fillSelect($("#srcSel"), provs, s.provider || provs[0], async (v) => {
+      await post("/api/provider?label=" + encodeURIComponent(v));
+      toast("Source: " + v);
     });
   }
   // Subtitles (CC): "Off" + one option per available language. Value is the

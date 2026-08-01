@@ -235,7 +235,15 @@ object FourKHdHub {
         // rather than only scoring, is what stops an infeasible file from
         // being picked when the good mirror fails to resolve.
         val feasible = parsed.filter {
-            !it.label.contains("REMUX", true) && isStreamable(it.sizeBytes, isEpisode)
+            !it.label.contains("REMUX", true) &&
+                // 2160p/4K is never streamable over these mirrors: a UHD rip
+                // wants 25-50 Mbps and they sustain ~5-16. Filter on the
+                // RESOLUTION, which is always in the release name — the
+                // size-badge check below is inert when the page omits a size
+                // (sizeBytes null), which is how a 4K file still got picked
+                // and froze playback.
+                !it.label.contains("2160p", true) &&
+                isStreamable(it.sizeBytes, isEpisode)
         }
         // Nothing streamable → return empty so resolvePlay fails FAST with
         // "not available" instead of playing a file that can't keep up.

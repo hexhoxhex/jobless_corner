@@ -515,6 +515,94 @@ class Repository(
     ): com.moviebox.tv.data.tmdb.TmdbRepository.TmdbMeta? =
         runCatching { tmdb.enrich(title, year, isSeries) }.getOrNull()
 
+    /** Which source served a stream — surfaced to the UI/remote so a title's
+     *  origin is visible and switchable. */
+    enum class Provider(val label: String) {
+        AONEROOM("MovieBox"), VIXSRC("VixSrc"), FOURKHDHUB("4KHDHub");
+
+        companion object {
+            fun of(subjectId: String): Provider = when {
+                subjectId.startsWith(com.moviebox.tv.net.VixSrc.PREFIX) -> VIXSRC
+                subjectId.startsWith(com.moviebox.tv.net.FourKHdHub.PREFIX) -> FOURKHDHUB
+                else -> AONEROOM
+            }
+        }
+    }
+
+    /** Resolve a stream, FAILING OVER to other providers when the picked one
+     *  can't serve it. Previously a dead aoneroom stream was terminal ("not
+     *  available") even though 4KHDHub or VixSrc carried the same title — the
+     *  user's "why doesn't it try another provider?". Order puts the requested
+     *  provider first, then the rest by how well they stream here.
+     *
+     *  [only] pins a single provider (the remote's manual source picker) and
+     *  disables failover, so an explicit choice is never silently overridden.
+     */
+    suspend fun resolvePlayAnyProvider(
+        subjectId: String,
+        title: String,
+        year: Int?,
+        isSeries: Boolean,
+        resolution: String = "best",
+        season: Int? = null,
+        episode: Int? = null,
+        dub: String = "Original",
+        only: Provider? = null,
+    ): PlayInfo {
+        val first = only ?: Provider.of(subjectId)
+        val order = if (only != null) listOf(only) else
+            listOf(first) + Provider.entries.filter { it != first }
+        var lastError: Throwable? = null
+        for (p in order) {
+            val id = runCatching { idForProvider(p, subjectId, title, year, isSeries) }
+                .getOrNull() ?: continue
+            val attempt = runCatching {
+                resolvePlay(
+                    subjectId = id, resolution = resolution, season = season,
+                    episode = episode, dub = dub, titleHint = title,
+                )
+            }
+            attempt.onSuccess {
+                android.util.Log.i("Failover", "served '$title' via ${p.label}")
+                return it.copy(provider = p.label, providerSubjectId = id)
+            }
+            lastError = attempt.exceptionOrNull()
+            android.util.Log.w(
+                "Failover",
+                "${p.label} failed for '$title': ${lastError?.message} — trying next",
+            )
+        }
+        throw ApiException(
+            lastError?.message ?: "This title isn't available right now.",
+        )
+    }
+
+    /** The subjectId [p] needs for [title]. Returns the given id untouched when
+     *  it already belongs to that provider; otherwise looks the title up on
+     *  that provider (TMDB id for VixSrc, catalogue search for the others). */
+    private suspend fun idForProvider(
+        p: Provider, subjectId: String, title: String, year: Int?, isSeries: Boolean,
+    ): String? {
+        if (Provider.of(subjectId) == p) return subjectId
+        if (title.isBlank()) return null
+        return when (p) {
+            Provider.VIXSRC -> tmdb.matchId(title, year, isSeries)?.let { (id, isTv) ->
+                "${com.moviebox.tv.net.VixSrc.PREFIX}${if (isTv) "tv" else "movie"}:$id"
+            }
+            Provider.FOURKHDHUB -> com.moviebox.tv.net.FourKHdHub.search(title)
+                .firstOrNull { titleMatches(it.title, title) }?.subjectId
+            Provider.AONEROOM -> resolveByTitle(title, year, isSeries)?.subjectId
+        }
+    }
+
+    /** Loose title equality for cross-provider matching — provider titles carry
+     *  their own decorations ("S1-S5", "[English]", release tags). */
+    private fun titleMatches(a: String, b: String): Boolean {
+        fun norm(s: String) = s.lowercase().replace(Regex("[^a-z0-9]+"), "")
+        val (x, y) = norm(a) to norm(b)
+        return x == y || x.startsWith(y) || y.startsWith(x)
+    }
+
     suspend fun resolvePlay(
         subjectId: String,
         resolution: String = "best",

@@ -504,6 +504,7 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                 onExoReady = { exoRef = it },
                 onStabilising = { stabilising = it },
                 tryDowngrade = vm::downgradeQuality,
+                onVodFailover = vm::failoverProvider,
                 resumeMs = if (play.isLive) 0L else state.resumeMs,
                 onProgress = { pos, dur ->
                     if (!play.isLive) vm.saveProgress(pos, dur)
@@ -1139,6 +1140,11 @@ private const val DRIFT_DANGER_MS: Long = 2_500L
  *  Both detected independently of any ExoPlayer error event — the
  *  freezes that triggered this fix never fired onPlayerError. */
 private const val STALL_MS: Long = 8_000L
+
+/** A VOD position that has not advanced for this long while the player is
+ *  buffering and WANTS to play is a stall, not a pause. Generous enough to
+ *  ride out an ordinary rebuffer on a slow CDN. */
+private const val VOD_STALL_MS: Long = 12_000L
 private const val STALE_FATAL_MS: Long = 30_000L
 
 /** Bandwidth-bound detection. A channel that produces this many deep
@@ -1512,6 +1518,9 @@ private fun VideoPlayer(
     onStabilising: (String?) -> Unit = {},
     /** If a decoder/render error fires, ask the VM to drop one quality notch. */
     tryDowngrade: () -> Boolean = { false },
+    /** Last-resort VOD stall recovery: re-resolve this title on another
+     *  provider. Default no-op keeps other call sites unchanged. */
+    onVodFailover: () -> Unit = {},
     resumeMs: Long,
     onProgress: (Long, Long) -> Unit,
     defaultSubtitleLang: String,
@@ -1565,6 +1574,7 @@ private fun VideoPlayer(
     val playingState = rememberUpdatedState(onPlayingChanged)
     val firstFrameState = rememberUpdatedState(onFirstFrame)
     val downgradeState = rememberUpdatedState(tryDowngrade)
+    val failoverState = rememberUpdatedState(onVodFailover)
     val progressState = rememberUpdatedState(onProgress)
     val liveErrorState = rememberUpdatedState(onLiveError)
     val fatalLiveState = rememberUpdatedState(onFatalLiveError)
@@ -1587,6 +1597,10 @@ private fun VideoPlayer(
     // first stopped advancing. Both reset per channel session.
     var stallLastPos by remember(mediaUrl) { mutableStateOf(Long.MIN_VALUE) }
     var stallSameSince by remember(mediaUrl) { mutableStateOf(0L) }
+    // VOD stall watchdog state (see the else-branch of the 1 s tick).
+    var vodStallLastPos by remember(mediaUrl) { mutableStateOf(Long.MIN_VALUE) }
+    var vodStallSince by remember(mediaUrl) { mutableStateOf(0L) }
+    var vodStallStrikes by remember(mediaUrl) { mutableStateOf(0) }
     // One-shot per channel: have we made the tunneling decision once the
     // real video frame rate is known? See the frame-rate check in the
     // per-second tick. Resets per channel so each stream is evaluated on
@@ -2399,6 +2413,46 @@ private fun VideoPlayer(
                             runCatching { exo.seekTo(target) }
                         }
                     }
+                }
+            } else {
+                // VOD stall watchdog. Everything above is live-only, so a
+                // movie that buffer-starved with no error and no dropped
+                // frames had NO recovery at all — ExoPlayer sat in
+                // STATE_BUFFERING and the user watched a spinner until they
+                // pressed Back ("it just stops"). Escalate instead:
+                //   1st  re-prepare in place (transient CDN hiccup)
+                //   2nd  drop a quality rung (the pipe can't hold this one)
+                //   3rd  fail over to another provider (this source is bad)
+                // Only counts time spent NOT advancing while we're supposed
+                // to be playing, so a user-initiated pause never trips it.
+                val pos = exo.currentPosition
+                val wantPlay = exo.playWhenReady &&
+                    exo.playbackState == Player.STATE_BUFFERING
+                if (wantPlay && pos == vodStallLastPos) {
+                    val now = SystemClock.elapsedRealtime()
+                    if (vodStallSince == 0L) vodStallSince = now
+                    else if (now - vodStallSince > VOD_STALL_MS) {
+                        vodStallStrikes++
+                        android.util.Log.w(
+                            "VodDiag",
+                            "VOD STALL pos frozen at $pos for " +
+                                "${(now - vodStallSince) / 1000}s — recovery #$vodStallStrikes",
+                        )
+                        com.moviebox.tv.debug.Telemetry.onFreeze()
+                        when (vodStallStrikes) {
+                            1 -> runCatching { exo.prepare() }
+                            2 -> if (!downgradeState.value()) vodStallStrikes++
+                            else -> failoverState.value()
+                        }
+                        vodStallSince = 0L
+                        vodStallLastPos = Long.MIN_VALUE
+                    }
+                } else if (pos != vodStallLastPos) {
+                    vodStallLastPos = pos
+                    vodStallSince = 0L
+                    // Sustained progress clears the strike count so a rough
+                    // patch hours apart doesn't inherit an old escalation.
+                    if (exo.isPlaying) vodStallStrikes = 0
                 }
             }
             RemoteController.updatePlayback(

@@ -1134,6 +1134,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun openItem(item: Item) {
+        // A source pick applies to ONE title; opening another clears it.
+        pinnedProvider = null
         rememberCover(item)
         dub = "Original"
         quality = DEFAULT_QUALITY
@@ -1709,6 +1711,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         subjectId: String, title: String, coverUrl: String?, type: Int,
         season: Int?, episode: Int?, year: Int? = null,
     ) {
+        // A source pick applies to ONE title; opening another clears it.
+        pinnedProvider = null
         // Flip the TV INSTANTLY to a "loading the new pick" state. Previously
         // we left `play` populated from whatever the TV was already showing,
         // so the old movie kept playing in the foreground while the new
@@ -1860,6 +1864,75 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      *  Saves within [CONTENT_SWITCH_SUPPRESS_MS] of a switch are dropped. */
     @Volatile private var contentSwitchAtMs = 0L
 
+    /** Explicit source choice from the remote's provider picker. When set,
+     *  [resolve] uses ONLY that provider — an explicit pick must never be
+     *  silently overridden by failover. Cleared when the user opens a
+     *  different title. */
+    @Volatile private var pinnedProvider: Repository.Provider? = null
+
+    /** Play the CURRENT title from a specific source (remote source picker).
+     *  Keeps season/episode and position; re-resolves against that provider. */
+    fun pickProvider(label: String) {
+        val p = Repository.Provider.entries.firstOrNull { it.label.equals(label, true) }
+            ?: return
+        val previous = _state.value.play
+        pinnedProvider = p
+        viewModelScope.launch {
+            _state.update { it.copy(playLoading = true, error = null) }
+            val item = _state.value.detailItem
+            val got = runCatching {
+                repo.resolvePlayAnyProvider(
+                    subjectId = subjectId,
+                    title = item?.title.orEmpty(),
+                    year = item?.year,
+                    isSeries = item?.isSeries ?: (_state.value.currentSe != null),
+                    resolution = quality,
+                    season = _state.value.currentSe,
+                    episode = _state.value.currentEp,
+                    dub = dub,
+                    only = p,
+                )
+            }.getOrNull()
+            if (got != null) {
+                quality = got.selected
+                _state.update { it.copy(play = got, playLoading = false) }
+                return@launch
+            }
+            // That source can't serve this title — say so and stay on the
+            // stream that WAS working rather than leaving a dead player.
+            pinnedProvider = null
+            _state.update {
+                it.copy(
+                    play = previous, playLoading = false,
+                    error = "${p.label} doesn't have this title — kept the current source.",
+                )
+            }
+        }
+    }
+
+    /** Sources that could serve the current title, for the remote's picker. */
+    fun providerOptions(): List<String> =
+        Repository.Provider.entries.map { it.label }
+
+    /** Last-resort stall recovery: re-resolve the current title on a DIFFERENT
+     *  provider. Called by the player's VOD stall watchdog after a re-prepare
+     *  and a quality drop both failed to get frames moving again. Banning the
+     *  failed source is what stops it re-picking the same dead stream. */
+    fun failoverProvider() {
+        val current = _state.value.play?.provider
+        val next = Repository.Provider.entries.firstOrNull { !it.label.equals(current, true) }
+            ?: return
+        android.util.Log.w(
+            "VodDiag", "stall failover: '$current' -> '${next.label}'",
+        )
+        pinnedProvider = next
+        _state.update {
+            it.copy(error = "Stream stalled — switching to ${next.label}…")
+        }
+        resolve()
+    }
+
+
     private fun resolve() {
         contentSwitchAtMs = android.os.SystemClock.elapsedRealtime()
         _state.update { it.copy(playLoading = true, error = null, screen = Screen.PLAYER) }
@@ -1873,15 +1946,25 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             // "Starting…" forever because v0.1.97 (correctly) stopped
             // silently substituting S1 for missing higher seasons.
             suspend fun attempt(se: Int?, ep: Int?) = runCatching {
-                repo.resolvePlay(
-                    subjectId = subjectId, resolution = quality,
-                    season = se, episode = ep,
-                    dub = dub,
+                val item = _state.value.detailItem
+                // Failing over ACROSS providers, not just within aoneroom: a
+                // dead stream used to end at "not available" even when another
+                // provider carried the same title. Also the only path the TV
+                // UI has to reach VixSrc/4KHDHub at all (openItem never built
+                // those ids). pinnedProvider honours an explicit source pick.
+                repo.resolvePlayAnyProvider(
+                    subjectId = subjectId,
                     // Hint lets the H5 lookup search by title when no
                     // detailPath is cached (e.g. resume from history,
                     // direct deep-link). Without it we'd land on the wrong
                     // detailPath and play the wrong movie.
-                    titleHint = _state.value.detailItem?.title,
+                    title = item?.title.orEmpty(),
+                    year = item?.year,
+                    isSeries = item?.isSeries ?: (se != null),
+                    resolution = quality,
+                    season = se, episode = ep,
+                    dub = dub,
+                    only = pinnedProvider,
                 )
             }
             var primary = attempt(originalSe, originalEp)

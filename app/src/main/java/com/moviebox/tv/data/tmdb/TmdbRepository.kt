@@ -123,6 +123,14 @@ class TmdbRepository(token: String = BuildConfig.TMDB_TOKEN) {
         )
     }
 
+    /** TMDB id + whether it's a series, for a source title. Lets the play
+     *  failover chain address TMDB-keyed providers (VixSrc) for a title that
+     *  only came from aoneroom/4KHDHub. Null when there's no confident match. */
+    suspend fun matchId(title: String, year: Int?, isSeries: Boolean): Pair<Int, Boolean>? {
+        val m = matchItem(title, year, isSeries) ?: return null
+        return m.id to (mediaTypeOf(m) == "tv")
+    }
+
     /** Strict title→TMDB-id match: exact normalized title, right media type,
      *  closest year. No loose/first-result fallback — a wrong match would show
      *  the wrong poster/trailer/cast (the "Affinity → Avengers" failure class). */

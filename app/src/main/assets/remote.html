@@ -351,6 +351,14 @@
         <select id="qualitySel" class="select-pill"></select>
         <select id="dubSel" class="select-pill"></select>
       </div>
+      <!-- Source (provider) the stream is served from. Lets the viewer move a
+           title to another source when the current one stalls or looks poor. -->
+      <div class="row label-row" id="srcLabels">
+        <span class="muted">Source</span>
+      </div>
+      <div class="row" id="srcRow">
+        <select id="srcSel" class="select-pill"></select>
+      </div>
       <!-- Subtitles (CC). Populated from /api/state.subtitles; changing it
            enables that language's track on the TV. Hidden when the title
            has no subtitle tracks. -->

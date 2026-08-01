@@ -294,6 +294,15 @@ object RemoteController {
 
     // -- library -----------------------------------------------------------
 
+    /** Source serving the current stream (e.g. "MovieBox"/"VixSrc"/"4KHDHub"). */
+    val currentProvider: String get() = vm?.state?.value?.play?.provider.orEmpty()
+
+    /** Sources the remote may switch the current title to. */
+    fun providerOptions(): List<String> = vm?.providerOptions() ?: emptyList()
+
+    /** Re-resolve the playing title on [label]'s source. */
+    fun pickProvider(label: String) = main.post { vm?.pickProvider(label) }
+
     fun history(): List<WatchHistoryEntity> = vm?.continueWatching?.value ?: emptyList()
     fun downloads(): List<DownloadEntity> = vm?.downloads?.value ?: emptyList()
     fun deleteHistory(key: String) = main.post { vm?.removeHistory(key) }
