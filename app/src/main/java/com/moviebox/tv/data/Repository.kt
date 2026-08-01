@@ -523,7 +523,7 @@ class Repository(
         // of the aoneroom play pipeline. Movies use season/episode 0.
         if (subjectId.startsWith(com.moviebox.tv.net.FourKHdHub.PREFIX)) {
             return com.moviebox.tv.net.FourKHdHub.resolvePlay(
-                subjectId, season ?: 0, episode ?: 0,
+                subjectId, season ?: 0, episode ?: 0, resolution,
             )
         }
         // Get the real title + dubs from the H5 detail endpoint. The legacy

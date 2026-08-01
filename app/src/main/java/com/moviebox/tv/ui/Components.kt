@@ -311,6 +311,27 @@ fun PosterCard(
                     Modifier.align(Alignment.TopStart).padding(6.dp),
                 )
             }
+            // Provider badge: mark 4KHDHub items so cross-provider search
+            // results are unambiguous (aoneroom vs the gap-filler source).
+            if (item.subjectId.startsWith(com.moviebox.tv.net.FourKHdHub.PREFIX)) {
+                Box(
+                    Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(6.dp)
+                        .background(
+                            com.moviebox.tv.ui.theme.Accent,
+                            RoundedCornerShape(4.dp),
+                        )
+                        .padding(horizontal = 5.dp, vertical = 1.dp),
+                ) {
+                    Text(
+                        "4K",
+                        color = androidx.compose.ui.graphics.Color.Black,
+                        fontWeight = FontWeight.Black,
+                        fontSize = if (isTv) 11.sp else 9.sp,
+                    )
+                }
+            }
         }
         Text(
             item.title,

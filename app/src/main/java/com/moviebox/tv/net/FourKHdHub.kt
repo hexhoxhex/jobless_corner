@@ -12,7 +12,6 @@ import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.jsoup.Jsoup
-import org.jsoup.nodes.Document
 import java.util.concurrent.TimeUnit
 
 /**
@@ -25,10 +24,15 @@ import java.util.concurrent.TimeUnit
  * hubcloud → sportverse chain to a **direct** MP4/MKV file (Google storage,
  * Cloudflare R2, pixeldrain), which ExoPlayer plays like any VOD URL.
  *
+ * MEMORY NOTE: a full-series detail page is ~1.5 MB with 800+ episode items.
+ * jsoup-parsing that into a DOM OOM'd the app on low-heap TVs (192 MB cap),
+ * so the heavy detail page is parsed with targeted REGEX, not jsoup. Only the
+ * small search / hubcloud / sportverse pages use jsoup.
+ *
  * Items are tagged with the [PREFIX] subjectId so [com.moviebox.tv.data.Repository]
- * can route search/details/resolvePlay here, mirroring the existing `tmdb:`
- * bridge. HTML scraping is inherently fragile — selectors track the live site
- * as of 2026-08 and may need updates if 4khdhub redesigns.
+ * routes search/details/resolvePlay here, mirroring the existing `tmdb:` bridge.
+ * HTML scraping is inherently fragile — selectors track the live site as of
+ * 2026-08 and may need updates if 4khdhub redesigns.
  */
 object FourKHdHub {
 
@@ -50,6 +54,7 @@ object FourKHdHub {
 
     // ---- public API (called by Repository for `4k:` subjectIds) ----------
 
+    /** Search is a small (~20 KB) page — jsoup is fine here. */
     suspend fun search(query: String): List<Item> = withContext(Dispatchers.IO) {
         val html = get("$BASE/?s=${urlEncode(query)}") ?: return@withContext emptyList()
         val doc = Jsoup.parse(html, BASE)
@@ -79,30 +84,27 @@ object FourKHdHub {
         out
     }
 
+    /** Detail page is huge — enumerate seasons/episodes by REGEX over the raw
+     *  HTML (no jsoup DOM) to keep memory tiny. */
     suspend fun details(subjectId: String): Details = withContext(Dispatchers.IO) {
         val path = subjectId.removePrefix(PREFIX)
         val html = get(BASE + path) ?: throw ApiException("4KHDHub page unavailable")
-        val doc = Jsoup.parse(html, BASE)
         val isSeries = path.contains("-series-")
         val title = stripTrailingYear(
-            doc.selectFirst("h1")?.text()?.trim()
-                ?: metaContent(doc, "meta[property=og:title]").orEmpty(),
+            Regex("<h1[^>]*>\\s*([^<]+?)\\s*</h1>").find(html)?.groupValues?.get(1)
+                ?: metaContent(html, "og:title").orEmpty(),
         )
-        val description = doc.selectFirst(".content-section p.mt-4")?.text()
-            ?: metaContent(doc, "meta[name=description]").orEmpty()
-        val year = findMetadata(doc, "Release:")?.let(::firstYear)
-            ?: findMetadata(doc, "Last Air:")?.let(::firstYear)
+        val description = metaContent(html, "description").orEmpty()
+        val year = Regex("(19|20)\\d{2}").find(title)?.value?.toIntOrNull()
 
         val seasons: List<SeasonInfo> = if (isSeries) {
             val map = sortedMapOf<Int, java.util.TreeSet<Int>>()
-            for (node in doc.select("#episodes .episode-download-item")) {
-                val fn = node.selectFirst(".episode-file-title")?.text().orEmpty()
-                val se = parseSeasonEpisode(fn) ?: continue
-                map.getOrPut(se.first) { java.util.TreeSet() }.add(se.second)
+            for (m in Regex("[Ss](\\d{1,2})[Ee](\\d{1,3})").findAll(html)) {
+                val s = m.groupValues[1].toIntOrNull() ?: continue
+                val e = m.groupValues[2].toIntOrNull() ?: continue
+                if (s in 1..99 && e in 1..999) map.getOrPut(s) { java.util.TreeSet() }.add(e)
             }
-            map.map { (s, eps) ->
-                SeasonInfo(s, eps.size, DEFAULT_RES, eps.toList())
-            }
+            map.map { (s, eps) -> SeasonInfo(s, eps.size, DEFAULT_RES, eps.toList()) }
         } else {
             listOf(SeasonInfo(0, 1, DEFAULT_RES, listOf(0)))
         }
@@ -119,31 +121,40 @@ object FourKHdHub {
         )
     }
 
-    /** Resolve a playable direct URL for [subjectId] (movie: season/episode 0). */
+    /** Resolve a playable direct URL. [resolution] is a quality label from a
+     *  prior [PlayInfo.qualities] entry (or "best"/blank for the streamable
+     *  default). Movies use season/episode 0. */
     suspend fun resolvePlay(
         subjectId: String,
         season: Int,
         episode: Int,
+        resolution: String = "best",
     ): PlayInfo = withContext(Dispatchers.IO) {
         val path = subjectId.removePrefix(PREFIX)
         val html = get(BASE + path) ?: throw ApiException("4KHDHub page unavailable")
-        val doc = Jsoup.parse(html, BASE)
-        val releases = parseReleases(doc, season, episode)
-        if (releases.isEmpty()) throw ApiException("This title isn't available right now.")
+        val all = parseReleases(html, season, episode)
+        if (all.isEmpty()) throw ApiException("This title isn't available right now.")
 
-        // Best quality first; try each release's mirrors until one resolves +
-        // preflights to a real media URL.
-        for (release in releases) {
+        // Prefer the requested label; else the most streamable (first).
+        val ordered = buildList {
+            all.firstOrNull { it.label.equals(resolution, true) }?.let(::add)
+            addAll(all.filter { !it.label.equals(resolution, true) })
+        }
+        val qualities = all.map { Quality(it.label, null) }
+
+        for (release in ordered) {
             for (mirror in release.mirrors) {
                 val candidates = runCatching { resolveMirror(mirror) }.getOrDefault(emptyList())
                 for (cand in candidates) {
                     val playable = runCatching { preflight(cand) }.getOrNull() ?: continue
-                    android.util.Log.i(TAG, "resolved ${release.filename} -> ${playable.take(90)}")
+                    android.util.Log.i(TAG, "resolved [${release.label}] -> ${playable.take(80)}")
                     return@withContext PlayInfo(
                         title = release.filename,
                         mediaUrl = playable,
-                        selected = release.quality ?: "best",
-                        qualities = listOf(Quality(release.quality ?: "Original", playable)),
+                        selected = release.label,
+                        qualities = qualities.map {
+                            if (it.label == release.label) Quality(it.label, playable) else it
+                        },
                         captions = emptyList(),
                         dubs = emptyList(),
                         selectedDub = "Original",
@@ -158,37 +169,74 @@ object FourKHdHub {
         throw ApiException("This title isn't available right now.")
     }
 
-    // ---- release parsing --------------------------------------------------
+    // ---- release parsing (REGEX over the raw HTML — memory-light) ---------
 
     private data class Mirror(val url: String)
     private data class ReleaseInfo(
         val filename: String,
-        val quality: String?,
+        val label: String,      // user-facing quality label + stable key
+        val streamScore: Int,   // lower = more streamable (default pick)
         val mirrors: List<Mirror>,
     )
 
-    private fun parseReleases(doc: Document, season: Int, episode: Int): List<ReleaseInfo> {
-        val itemSel = if (season > 0) "#episodes .episode-download-item" else ".download-item"
-        val titleSel = if (season > 0) ".episode-file-title" else ".file-title"
-        val out = ArrayList<ReleaseInfo>()
-        for (item in doc.select(itemSel)) {
-            val filename = item.selectFirst(titleSel)?.text().orEmpty()
+    private val ITEM_SPLIT = Regex("class=\"(?:episode-download-item|download-item)\"")
+    private val TITLE_RE = Regex("(?:episode-)?file-title[^>]*>\\s*([^<]+?)\\s*<")
+    private val SIZE_RE = Regex("badge-size[^>]*>\\s*([^<]+?)\\s*<")
+    private val HREF_RE = Regex("href=\"(https://[^\"]+)\"")
+
+    /** Split the giant page into per-item chunks and pull filename/size/mirrors
+     *  from each with small regexes. Excludes REMUX (download-only, ~3 GB —
+     *  the OOM/buffering culprit) when any streamable release exists. */
+    private fun parseReleases(html: String, season: Int, episode: Int): List<ReleaseInfo> {
+        val chunks = ITEM_SPLIT.split(html)
+        val parsed = ArrayList<ReleaseInfo>()
+        // chunks[0] is the pre-first-item preamble — skip it.
+        for (i in 1 until chunks.size) {
+            val chunk = chunks[i]
+            val filename = TITLE_RE.find(chunk)?.groupValues?.get(1)?.trim().orEmpty()
             if (filename.isEmpty() || isArchive(filename)) continue
             if (season > 0 && parseSeasonEpisode(filename) != (season to episode)) continue
-            val mirrors = item.select("a[href]").mapNotNull { a ->
-                val href = a.attr("href")
-                if (!href.startsWith("https://") || href.contains("logout")) null else Mirror(href)
-            }.distinctBy { it.url }
+            val mirrors = HREF_RE.findAll(chunk)
+                .map { it.groupValues[1] }
+                .filter { !it.contains("logout") && (it.contains("hubcloud.") || it.contains("hubdrive.") || isValidPlayback(it)) }
+                .distinct().map { Mirror(it) }.toList()
             if (mirrors.isEmpty()) continue
-            out.add(ReleaseInfo(filename, detectQuality(filename), mirrors))
+            val res = detectQuality(filename)
+            val codec = detectCodec(filename)
+            val sizeText = SIZE_RE.find(chunk)?.groupValues?.get(1)?.trim()
+            val label = buildString {
+                append(res ?: "SD")
+                codec?.let { append(" ").append(it) }
+                sizeText?.let { append(" · ").append(it) }
+            }
+            parsed.add(
+                ReleaseInfo(
+                    filename, label,
+                    streamScore(res, codec, parseSizeBytes(sizeText ?: "")),
+                    mirrors,
+                ),
+            )
         }
-        // Best quality first (2160 > 1080 > 720 > 480 > unknown).
-        return out.sortedByDescending { qualityRank(it.quality) }
+        // Drop REMUX unless it's the ONLY thing available.
+        val streamable = parsed.filter { !it.label.contains("REMUX", true) }
+        val pool = streamable.ifEmpty { parsed }
+        return pool.sortedBy { it.streamScore }.distinctBy { it.label }
     }
 
-    // ---- mirror resolver chain -------------------------------------------
+    /** Lower = better default for streaming. Codec COMPATIBILITY dominates:
+     *  H.264/x264 decodes on every TV (verified playing here), whereas
+     *  HEVC 10-bit MKV stalls this TCL/Realtek decoder — so x264 is the
+     *  default and HEVC stays a selectable option. Then a ~1080p sweet spot,
+     *  then smaller files. REMUX is excluded upstream (unstreamable). */
+    private fun streamScore(res: String?, codec: String?, sizeBytes: Long?): Int {
+        val codecScore = when (codec) { "x264" -> 0; "HEVC" -> 1; "REMUX" -> 3; else -> 2 }
+        val resScore = when (res) { "1080p" -> 0; "720p" -> 1; "480p" -> 2; "2160p" -> 3; else -> 2 }
+        val sizeGb = ((sizeBytes ?: 0L) / (1024L * 1024 * 1024)).toInt().coerceIn(0, 9)
+        return codecScore * 100 + resScore * 10 + sizeGb
+    }
 
-    /** Turn a mirror link into candidate direct-file URLs (best first). */
+    // ---- mirror resolver chain (small pages — jsoup ok) -------------------
+
     private fun resolveMirror(mirror: Mirror): List<String> {
         val url = mirror.url
         return when {
@@ -198,7 +246,6 @@ object FourKHdHub {
         }
     }
 
-    /** hubcloud `/drive/…` → `a#download` (sportverse) → direct file candidates. */
     private fun resolveHubcloud(driveUrl: String): List<String> {
         val driveHtml = get(driveUrl) ?: return emptyList()
         val sportverse = Jsoup.parse(driveHtml, driveUrl)
@@ -209,9 +256,7 @@ object FourKHdHub {
         val page = get(sportverse) ?: return emptyList()
 
         val scored = ArrayList<Pair<Int, String>>()
-        // pixeldrain URLs embedded in `var pxl … https://pixeldrain.dev/u/<id>`
         for (u in extractPixeldrain(page)) scored.add(0 to u)
-        // anchor hrefs
         for (a in Jsoup.parse(page, sportverse).select("a[href]")) {
             val href = a.attr("href")
             if (!isValidPlayback(href)) continue
@@ -221,7 +266,6 @@ object FourKHdHub {
         return scored.sortedBy { it.first }.map { it.second }.distinct()
     }
 
-    /** hubdrive `/file/…` → embedded hubcloud `/drive/…` → [resolveHubcloud]. */
     private fun resolveHubdrive(driveUrl: String): List<String> {
         val html = get(driveUrl) ?: return emptyList()
         val hub = Jsoup.parse(html, driveUrl).select("a[href]")
@@ -231,9 +275,6 @@ object FourKHdHub {
         return resolveHubcloud(hub)
     }
 
-    /** Range-preflight a candidate: follow redirects, reject html/zip, unwrap
-     *  a `?link=` wrapper if the CDN returns a landing page. Returns the final
-     *  media URL or null. */
     private fun preflight(url: String): String? {
         if (!isValidPlayback(url)) return null
         val resp = runCatching {
@@ -249,7 +290,6 @@ object FourKHdHub {
             if (ct.contains("text/html") || ct.contains("application/zip") ||
                 ct.contains("text/plain")
             ) {
-                // wrapped landing page: unwrap ?link=
                 val wrapped = it.request.url.queryParameter("link")
                     ?.takeIf { w -> w.startsWith("https://") } ?: return null
                 return preflight(wrapped)
@@ -271,7 +311,6 @@ object FourKHdHub {
     private fun urlEncode(s: String): String =
         java.net.URLEncoder.encode(s, "UTF-8").replace("+", "%20")
 
-    /** Keep only same-host relative paths (guards against off-site hrefs). */
     private fun sameHostPath(href: String): String? {
         if (href.startsWith("/")) return href
         val u = runCatching { java.net.URI(href) }.getOrNull() ?: return null
@@ -292,18 +331,19 @@ object FourKHdHub {
     private fun stripTrailingYear(s: String): String =
         s.trim().replace(Regex("\\s*\\((19|20)\\d{2}\\)\\s*$"), "").trim()
 
-    private fun metaContent(doc: Document, css: String): String? =
-        doc.selectFirst(css)?.attr("content")?.takeIf { it.isNotBlank() }
-
-    private fun findMetadata(doc: Document, label: String): String? {
-        for (item in doc.select(".metadata-item")) {
-            val l = item.selectFirst(".metadata-label")?.text()?.trim()
-            if (l == label) return item.selectFirst(".metadata-value")?.text()?.trim()
-        }
-        return null
+    /** Cheap meta-tag content pull without a DOM (property= or name=). */
+    private fun metaContent(html: String, key: String): String? {
+        val re = Regex(
+            "<meta[^>]*(?:property|name)=\"(?:og:)?$key\"[^>]*content=\"([^\"]*)\"",
+            RegexOption.IGNORE_CASE,
+        )
+        return re.find(html)?.groupValues?.get(1)?.takeIf { it.isNotBlank() }
+            ?: Regex(
+                "<meta[^>]*content=\"([^\"]*)\"[^>]*(?:property|name)=\"(?:og:)?$key\"",
+                RegexOption.IGNORE_CASE,
+            ).find(html)?.groupValues?.get(1)?.takeIf { it.isNotBlank() }
     }
 
-    /** Parse `S12E01` → (12, 1) from a filename. */
     private fun parseSeasonEpisode(value: String): Pair<Int, Int>? {
         val m = Regex("[Ss](\\d{1,2})[Ee](\\d{1,3})").find(value) ?: return null
         val s = m.groupValues[1].toIntOrNull() ?: return null
@@ -314,13 +354,30 @@ object FourKHdHub {
     private fun detectQuality(v: String): String? =
         listOf("2160p", "1080p", "720p", "480p").firstOrNull { v.contains(it, true) }
 
-    private fun qualityRank(q: String?): Int = when (q) {
-        "2160p" -> 4; "1080p" -> 3; "720p" -> 2; "480p" -> 1; else -> 0
+    private fun detectCodec(v: String): String? {
+        val l = v.lowercase()
+        return when {
+            l.contains("remux") -> "REMUX"
+            l.contains("x265") || l.contains("h265") || l.contains("h.265") ||
+                l.contains("hevc") -> "HEVC"
+            l.contains("x264") || l.contains("h264") || l.contains("h.264") ||
+                l.contains("avc") -> "x264"
+            else -> null
+        }
     }
 
     private fun isArchive(v: String): Boolean {
         val l = v.lowercase()
         return l.endsWith(".zip") || l.contains("complete season") || l.contains("season pack")
+    }
+
+    private fun parseSizeBytes(v: String): Long? {
+        val m = Regex("([0-9.]+)\\s*(GB|MB|KB)", RegexOption.IGNORE_CASE).find(v) ?: return null
+        val n = m.groupValues[1].toDoubleOrNull() ?: return null
+        val mult = when (m.groupValues[2].uppercase()) {
+            "GB" -> 1024.0 * 1024 * 1024; "MB" -> 1024.0 * 1024; else -> 1024.0
+        }
+        return (n * mult).toLong()
     }
 
     private fun extractPixeldrain(html: String): List<String> {
@@ -339,7 +396,6 @@ object FourKHdHub {
         return "https://pixeldrain.dev/api/file/$id?download"
     }
 
-    /** Reject non-media targets (local hosts, login/logout, zip). */
     private fun isValidPlayback(raw: String): Boolean {
         val u = runCatching { java.net.URI(raw) }.getOrNull() ?: return false
         if (u.scheme != "https" || u.host.isNullOrBlank()) return false
@@ -350,7 +406,6 @@ object FourKHdHub {
         return true
     }
 
-    /** Prefer fast/direct hosts (pixeldrain > google > r2/workers > other). */
     private fun score(url: String, label: String): Int {
         val v = "$url $label".lowercase()
         return when {
