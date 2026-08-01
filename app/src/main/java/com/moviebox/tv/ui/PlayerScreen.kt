@@ -1144,7 +1144,7 @@ private const val STALL_MS: Long = 8_000L
 /** A VOD position that has not advanced for this long while the player is
  *  buffering and WANTS to play is a stall, not a pause. Generous enough to
  *  ride out an ordinary rebuffer on a slow CDN. */
-private const val VOD_STALL_MS: Long = 12_000L
+private const val VOD_STALL_MS: Long = 20_000L
 private const val STALE_FATAL_MS: Long = 30_000L
 
 /** Bandwidth-bound detection. A channel that produces this many deep
@@ -1601,6 +1601,9 @@ private fun VideoPlayer(
     var vodStallLastPos by remember(mediaUrl) { mutableStateOf(Long.MIN_VALUE) }
     var vodStallSince by remember(mediaUrl) { mutableStateOf(0L) }
     var vodStallStrikes by remember(mediaUrl) { mutableStateOf(0) }
+    // Set once real playback begins; gates the stall watchdog so startup
+    // buffering can never be mistaken for a stall.
+    var vodEverPlayed by remember(mediaUrl) { mutableStateOf(false) }
     // One-shot per channel: have we made the tunneling decision once the
     // real video frame rate is known? See the frame-rate check in the
     // per-second tick. Resets per channel so each stream is evaluated on
@@ -2426,7 +2429,15 @@ private fun VideoPlayer(
                 // Only counts time spent NOT advancing while we're supposed
                 // to be playing, so a user-initiated pause never trips it.
                 val pos = exo.currentPosition
-                val wantPlay = exo.playWhenReady &&
+                // ARM ONLY AFTER PLAYBACK HAS GENUINELY STARTED. Startup
+                // buffering legitimately holds the position still for well
+                // over the stall threshold on a cold CDN, and treating that
+                // as a stall cascaded: prepare() restarted buffering, the
+                // position was still frozen, so it downgraded and then failed
+                // over — killing a stream that was merely slow to open and
+                // dumping the viewer back on the detail page.
+                if (exo.isPlaying) vodEverPlayed = true
+                val wantPlay = vodEverPlayed && exo.playWhenReady &&
                     exo.playbackState == Player.STATE_BUFFERING
                 if (wantPlay && pos == vodStallLastPos) {
                     val now = SystemClock.elapsedRealtime()
