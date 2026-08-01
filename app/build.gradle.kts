@@ -25,8 +25,8 @@ android {
         // ExoPlayer codec support; covers virtually all Android TV devices.
         minSdk = 26
         targetSdk = 35
-        versionCode = 173
-        versionName = "0.1.172"
+        versionCode = 174
+        versionName = "0.1.173"
 
         // Ship only the ABIs real devices use. The universal APK carried four
         // (arm64-v8a, armeabi-v7a, x86, x86_64) = ~40 MB, and that size was
@@ -143,6 +143,11 @@ dependencies {
 
     implementation(libs.nanohttpd)
     implementation(libs.zxing.core)
+    // HTML parser for the 4KHDHub VOD provider — scrapes 4khdhub.one search /
+    // detail pages and the hubcloud/hubdrive resolver chain to reach direct
+    // MP4/MKV files. Fills catalog gaps the aoneroom backend lacks (older
+    // seasons/films). See net/FourKHdHub.kt.
+    implementation("org.jsoup:jsoup:1.17.2")
     // Lottie for vector animations — loading spinners, buffering hint,
     // download in-progress, success checkmark. Replaces the stock
     // CircularProgressIndicator at user-visible spots (Home loading, player

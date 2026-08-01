@@ -238,14 +238,27 @@ class Repository(
         type: SubjectType = SubjectType.ALL,
     ): List<Item> {
         val variants = keywordVariants(keyword)
-        if (variants.size <= 1) return search(keyword, type)
-        val lists = coroutineScope {
-            variants
-                .map { v -> async { runCatching { search(v, type) }.getOrDefault(emptyList()) } }
-                .map { it.await() }
+        val (mbLists, fourk) = coroutineScope {
+            // aoneroom spelling variants + the 4KHDHub provider, all in
+            // parallel so the extra source doesn't add serial latency.
+            val mb = variants.map { v ->
+                async { runCatching { search(v, type) }.getOrDefault(emptyList()) }
+            }
+            val fk = async {
+                runCatching { com.moviebox.tv.net.FourKHdHub.search(keyword) }
+                    .getOrDefault(emptyList())
+            }
+            mb.map { it.await() } to fk.await()
         }
         val merged = LinkedHashMap<String, Item>()
-        lists.forEach { list -> list.forEach { merged.putIfAbsent(it.subjectId, it) } }
+        mbLists.forEach { list -> list.forEach { merged.putIfAbsent(it.subjectId, it) } }
+        // Append 4KHDHub hits (separate `4k:` subjectId space — no collision
+        // with aoneroom). These fill catalog gaps and often carry the full
+        // season run where aoneroom only has a partial one, so they're worth
+        // surfacing even when aoneroom already returned a same-named entry.
+        fourk
+            .filter { type == SubjectType.ALL || it.type == type }
+            .forEach { merged.putIfAbsent(it.subjectId, it) }
         return merged.values.toList()
     }
 
@@ -408,6 +421,11 @@ class Repository(
         }
 
     suspend fun details(subjectId: String, titleHint: String? = null): Details {
+        // 4KHDHub provider items carry a `4k:` subjectId — route to its own
+        // HTML-scrape detail path instead of the aoneroom H5 endpoint.
+        if (subjectId.startsWith(com.moviebox.tv.net.FourKHdHub.PREFIX)) {
+            return com.moviebox.tv.net.FourKHdHub.details(subjectId)
+        }
         // H5 path: the legacy mobile itemDetails returns 441 "miss token". We
         // get every field the old path returned (title, description, year,
         // seasons, dubs) from the H5 /detail endpoint — same data, different
@@ -501,6 +519,13 @@ class Repository(
         // recursion — the retry passes false.
         allowReresolve: Boolean = true,
     ): PlayInfo {
+        // 4KHDHub provider: resolve the mirror chain to a direct file instead
+        // of the aoneroom play pipeline. Movies use season/episode 0.
+        if (subjectId.startsWith(com.moviebox.tv.net.FourKHdHub.PREFIX)) {
+            return com.moviebox.tv.net.FourKHdHub.resolvePlay(
+                subjectId, season ?: 0, episode ?: 0,
+            )
+        }
         // Get the real title + dubs from the H5 detail endpoint. The legacy
         // mobile itemDetails returns 441 now, so without this the player
         // showed the raw subjectId number instead of the movie name. Look the
