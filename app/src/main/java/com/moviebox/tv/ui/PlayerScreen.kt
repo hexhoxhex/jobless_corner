@@ -486,6 +486,7 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
         } else if (play != null && play.mediaUrl.isNotBlank()) {
             VideoPlayer(
                 mediaUrl = play.mediaUrl,
+                headers = play.headers,
                 captions = play.captions,
                 contentKey = vm.contentKey,
                 onEnded = {
@@ -1504,6 +1505,8 @@ private fun CircleBtn(
 @Composable
 private fun VideoPlayer(
     mediaUrl: String,
+    /** Headers this stream's CDN requires (Referer/Origin). See [StreamHeaders]. */
+    headers: Map<String, String> = emptyMap(),
     captions: List<CaptionTrack>,
     contentKey: String,
     onEnded: () -> Unit,
@@ -1736,15 +1739,33 @@ private fun VideoPlayer(
                     "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
                 )
         } else {
-            DefaultHttpDataSource.Factory()
-                .setAllowCrossProtocolRedirects(true)
-                .setConnectTimeoutMs(15_000)
-                .setReadTimeoutMs(20_000)
-                .setUserAgent(
-                    "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 " +
-                    "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
-                )
-                .setDefaultRequestProperties(Constants.mediaHeaders)
+            // Per-stream headers: several providers' CDNs 404/403 without the
+            // exact Referer that came back with the stream (vidnest returns a
+            // different one per sub-server). The factory is built once inside
+            // this remember, so it reads StreamHeaders at createDataSource
+            // time rather than capturing a snapshot — HLS makes a new data
+            // source per segment, so each one picks up the current values.
+            object : androidx.media3.datasource.HttpDataSource.Factory {
+                private val delegate = DefaultHttpDataSource.Factory()
+                    .setAllowCrossProtocolRedirects(true)
+                    .setConnectTimeoutMs(15_000)
+                    .setReadTimeoutMs(20_000)
+                    .setUserAgent(
+                        "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 " +
+                        "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+                    )
+
+                override fun setDefaultRequestProperties(
+                    defaultRequestProperties: MutableMap<String, String>,
+                ) = apply { delegate.setDefaultRequestProperties(defaultRequestProperties) }
+
+                override fun createDataSource(): androidx.media3.datasource.HttpDataSource {
+                    delegate.setDefaultRequestProperties(
+                        Constants.mediaHeaders + StreamHeaders.current,
+                    )
+                    return delegate.createDataSource()
+                }
+            }
         }
         // Live tuning: keep the latency tight to ~12s but allow a real cushion
         // so a momentary network dip doesn't pause playback. Numbers in ms:
@@ -2268,6 +2289,9 @@ private fun VideoPlayer(
                     .setMimeType(mime).setLanguage(c.code).setLabel(c.name)
                     .build()
             }
+            // Publish this stream's required headers BEFORE the media item is
+            // built, so the very first manifest fetch already carries them.
+            StreamHeaders.current = headers
             // Declare HLS explicitly when the URL can't be sniffed by suffix.
             // Provider playlists like vixsrc's "/playlist/693435?token=…" carry
             // no .m3u8 extension, so ExoPlayer's extension-based inference fell
@@ -3114,4 +3138,16 @@ private fun looksLikeHls(url: String): Boolean {
         u.endsWith(".avi") || u.endsWith(".mpd")
     ) return false
     return url.contains("/playlist/") || url.contains("/hls/")
+}
+
+/**
+ * Headers the CURRENT VOD stream's CDN requires (Referer/Origin).
+ *
+ * Held here rather than passed through the data-source factory because the
+ * factory is created once per player instance while the headers change per
+ * stream — and some providers hand back a different Referer per sub-server.
+ * Set from [PlayInfo.headers] whenever the media item changes.
+ */
+internal object StreamHeaders {
+    @Volatile var current: Map<String, String> = emptyMap()
 }

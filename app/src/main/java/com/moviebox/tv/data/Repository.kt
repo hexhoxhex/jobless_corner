@@ -556,10 +556,18 @@ class Repository(
     /** Which source served a stream — surfaced to the UI/remote so a title's
      *  origin is visible and switchable. */
     enum class Provider(val label: String) {
-        AONEROOM("MovieBox"), VIXSRC("VixSrc"), FOURKHDHUB("4KHDHub");
+        // Order is the failover order for a title with no explicit source.
+        // MovieBox first (streaming-sized files, measured smooth), then the
+        // TMDB-keyed adaptive-HLS providers, then 4KHDHub, whose download-
+        // oriented rips are the least suited to streaming.
+        AONEROOM("MovieBox"),
+        VIDNEST("VidNest"),
+        VIXSRC("VixSrc"),
+        FOURKHDHUB("4KHDHub");
 
         companion object {
             fun of(subjectId: String): Provider = when {
+                subjectId.startsWith(com.moviebox.tv.net.VidNest.PREFIX) -> VIDNEST
                 subjectId.startsWith(com.moviebox.tv.net.VixSrc.PREFIX) -> VIXSRC
                 subjectId.startsWith(com.moviebox.tv.net.FourKHdHub.PREFIX) -> FOURKHDHUB
                 else -> AONEROOM
@@ -660,6 +668,9 @@ class Repository(
             Provider.VIXSRC -> tmdb.matchId(title, year, isSeries)?.let { (id, isTv) ->
                 "${com.moviebox.tv.net.VixSrc.PREFIX}${if (isTv) "tv" else "movie"}:$id"
             }
+            Provider.VIDNEST -> tmdb.matchId(title, year, isSeries)?.let { (id, isTv) ->
+                "${com.moviebox.tv.net.VidNest.PREFIX}${if (isTv) "tv" else "movie"}:$id"
+            }
             Provider.FOURKHDHUB -> com.moviebox.tv.net.FourKHdHub.search(title)
                 .firstOrNull { titleMatches(it.title, title) }?.subjectId
             Provider.AONEROOM -> resolveByTitle(title, year, isSeries)?.subjectId
@@ -717,6 +728,20 @@ class Repository(
                 season = season, episode = episode, dub = dub,
                 titleHint = titleHint, allowReresolve = allowReresolve,
             )
+        }
+        // VidNest: TMDB-keyed adaptive HLS. Its CDN requires the Referer that
+        // came back with the stream, which travels in PlayInfo.headers.
+        if (subjectId.startsWith(com.moviebox.tv.net.VidNest.PREFIX)) {
+            val rest = subjectId.removePrefix(com.moviebox.tv.net.VidNest.PREFIX)
+            val isTv = rest.startsWith("tv:")
+            val tmdbId = rest.substringAfterLast(':').toIntOrNull()
+                ?: throw ApiException("This title isn't available right now.")
+            return com.moviebox.tv.net.VidNest.resolvePlay(
+                tmdbId = tmdbId,
+                season = if (isTv) (season ?: 1) else 0,
+                episode = if (isTv) (episode ?: 1) else 0,
+                title = titleHint.orEmpty(),
+            ) ?: throw ApiException("This title isn't available right now.")
         }
         // 4KHDHub provider: resolve the mirror chain to a direct file instead
         // of the aoneroom play pipeline. Movies use season/episode 0.

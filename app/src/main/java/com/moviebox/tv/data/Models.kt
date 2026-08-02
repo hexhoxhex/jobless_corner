@@ -107,6 +107,12 @@ data class PlayInfo(
     val episode: Int,
     val episodeTitle: String,
     val durationSec: Int,
+    /** Extra HTTP headers this stream's CDN REQUIRES (typically Referer, and
+     *  sometimes Origin). They differ per provider — vidnest even returns a
+     *  different Referer per sub-server inside its payload — so they travel
+     *  with the stream rather than being global. Without them the CDN answers
+     *  404/403 and playback never starts. */
+    val headers: Map<String, String> = emptyMap(),
     /** Which source served this stream ("MovieBox"/"VixSrc"/"4KHDHub") and the
      *  subjectId it was served under. Surfaced so the UI and remote can show
      *  the origin and let the user switch sources for the same title. */

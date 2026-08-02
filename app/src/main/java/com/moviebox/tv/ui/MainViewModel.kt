@@ -1778,8 +1778,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     val tmdbNum = subjectId.substringAfterLast(':').toIntOrNull()
                     if (tmdbNum != null) {
                         val kind = if (subjectId.startsWith("tmdb:tv")) "tv" else "movie"
+                        // VidNest first among the TMDB-keyed sources: measured
+                        // more reliable (8/8 catalogue hits vs VixSrc's slower
+                        // cold-origin CDN). The chain falls through to VixSrc
+                        // and 4KHDHub if it doesn't carry the title.
                         this@MainViewModel.subjectId =
-                            "${com.moviebox.tv.net.VixSrc.PREFIX}$kind:$tmdbNum"
+                            "${com.moviebox.tv.net.VidNest.PREFIX}$kind:$tmdbNum"
                         dub = "Original"
                         quality = DEFAULT_QUALITY
                         resolve()
