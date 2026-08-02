@@ -607,9 +607,12 @@ $("#q").addEventListener("input", (e) => {
 async function doSearch(q) {
   const grid = $("#results");
   if (q.trim().length < 2) {
-    grid.innerHTML = ""; $("#searchEmpty").classList.remove("hidden"); return;
+    grid.innerHTML = ""; $("#searchEmpty").classList.remove("hidden");
+    renderHistory();   // show recent searches when the field is empty
+    return;
   }
   $("#searchEmpty").classList.add("hidden");
+  $("#histWrap")?.classList.add("hidden");
   grid.innerHTML = skeletonGrid(6);
   let items = [], person = null;
   try {
@@ -641,7 +644,25 @@ async function doSearch(q) {
       </div>`;
     grid.appendChild(head);
   }
-  items.forEach(it => grid.appendChild(searchCard(it)));
+  // Split into Series and Movies so it's obvious what you're looking at,
+  // instead of one mixed wall of posters. A person's filmography keeps its
+  // header above the groups.
+  const series = items.filter(it => it.isSeries || it.type === 2);
+  const movies = items.filter(it => !(it.isSeries || it.type === 2));
+  const section = (label, rows) => {
+    if (!rows.length) return;
+    const h = document.createElement("div");
+    h.className = "res-head";
+    h.innerHTML = `${label} <span class="res-count">${rows.length}</span>`;
+    grid.appendChild(h);
+    rows.forEach(it => grid.appendChild(searchCard(it)));
+  };
+  // Lead with whichever group is larger — searching a series name shouldn't
+  // put three loose films above the season run you actually wanted.
+  if (series.length > movies.length) { section("Series", series); section("Movies", movies); }
+  else { section("Movies", movies); section("Series", series); }
+  histAdd(q);            // remember the term only once it returned something
+  renderHistory();
 }
 function skeletonGrid(n) {
   let out = ""; for (let i = 0; i < n; i++) {
@@ -1900,3 +1921,87 @@ setInterval(() => {
 }, 1500);
 
 boot();
+
+/* ---------- sticky header geometry ---------- */
+// The search bar pins under the top bar, whose height varies with the device
+// safe-area inset — so measure it rather than hard-coding an offset.
+function syncTopbarHeight() {
+  const tb = document.querySelector(".topbar");
+  if (!tb) return;
+  const h = tb.offsetHeight;
+  // Guard against a 0 measurement (called before first layout): writing 0px
+  // would override the CSS fallback and let the search bar pin UNDER the
+  // header instead of below it.
+  if (h > 0) document.documentElement.style.setProperty("--topbar-h", h + "px");
+}
+window.addEventListener("resize", syncTopbarHeight);
+window.addEventListener("orientationchange", syncTopbarHeight);
+window.addEventListener("load", syncTopbarHeight);
+document.addEventListener("DOMContentLoaded", () => {
+  // The header lives inside #app, which stays hidden behind the pairing gate
+  // until a token is accepted — so it measures 0 at first paint and the
+  // search bar falls back to a guessed offset (it overlapped the header by a
+  // few px). Re-measure across the first couple of seconds AND whenever the
+  // header actually resizes, so the pin lands exactly under it.
+  [0, 150, 600, 1500, 3000].forEach(d => setTimeout(syncTopbarHeight, d));
+  requestAnimationFrame(syncTopbarHeight);
+  const tb = document.querySelector(".topbar");
+  if (tb && window.ResizeObserver) new ResizeObserver(syncTopbarHeight).observe(tb);
+  const app = document.querySelector("#app");
+  if (app && window.MutationObserver) {
+    new MutationObserver(() => requestAnimationFrame(syncTopbarHeight))
+      .observe(app, {attributes: true, attributeFilter: ["class"]});
+  }
+});
+syncTopbarHeight();
+
+/* ---------- search history ---------- */
+const HIST_KEY = "vbb_search_history";
+const HIST_MAX = 12;
+function histAll() {
+  try { return JSON.parse(localStorage.getItem(HIST_KEY) || "[]"); }
+  catch (e) { return []; }
+}
+function histSave(list) {
+  try { localStorage.setItem(HIST_KEY, JSON.stringify(list.slice(0, HIST_MAX))); }
+  catch (e) {}
+}
+function histAdd(q) {
+  const term = (q || "").trim();
+  if (term.length < 2) return;
+  // Re-searching a term moves it to the front instead of duplicating it.
+  const list = histAll().filter(t => t.toLowerCase() !== term.toLowerCase());
+  list.unshift(term);
+  histSave(list);
+}
+function histRemove(q) {
+  histSave(histAll().filter(t => t !== q));
+  renderHistory();
+}
+function renderHistory() {
+  const wrap = $("#histWrap"), chips = $("#histChips");
+  if (!wrap || !chips) return;
+  const list = histAll();
+  const queryEmpty = ($("#q")?.value || "").trim().length < 2;
+  // Only shown when the field is empty — otherwise it competes with results.
+  wrap.classList.toggle("hidden", !(queryEmpty && list.length));
+  chips.innerHTML = "";
+  list.forEach(term => {
+    const c = document.createElement("div");
+    c.className = "chip";
+    c.innerHTML = `<span class="term"></span><span class="x">&times;</span>`;
+    c.querySelector(".term").textContent = term;
+    c.querySelector(".term").onclick = () => {
+      const q = $("#q");
+      q.value = term;
+      q.dispatchEvent(new Event("input", {bubbles: true}));
+    };
+    c.querySelector(".x").onclick = (e) => { e.stopPropagation(); histRemove(term); };
+    chips.appendChild(c);
+  });
+}
+document.addEventListener("DOMContentLoaded", () => {
+  $("#histClear")?.addEventListener("click", () => { histSave([]); renderHistory(); });
+  renderHistory();
+});
+

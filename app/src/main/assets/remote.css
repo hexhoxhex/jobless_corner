@@ -135,7 +135,12 @@ button .icon { display: inline-block; vertical-align: middle; }
   position: sticky; top: 0; z-index: 5;
   display: flex; align-items: center; justify-content: space-between;
   padding: calc(env(safe-area-inset-top) + 10px) 16px 10px;
-  background: linear-gradient(180deg, var(--bg) 80%, transparent);
+  /* Opaque, not a fade-to-transparent gradient: results scrolling underneath
+     used to show through the header and read as the header itself moving. */
+  background: var(--bg);
+  /* Permanent hairline: a sticky header needs a defined edge, and tying it to
+     a scroll listener was both fragile and pointless. */
+  border-bottom: 1px solid var(--line);
 }
 .topbar .title {
   font-weight: 700;
@@ -183,7 +188,16 @@ button.big    { padding: 16px; font-size: 1rem; }
 button.small  { padding: 8px 10px; font-size: .8rem; flex: 0 0 auto; }
 button.icon-btn { flex: 0 0 auto; padding: 8px 10px; }
 
-.searchbar { padding: 0 16px 8px; }
+/* Pinned directly under the top bar. It used to scroll off with the results,
+   so you lost the field (and the ability to refine) as soon as you looked
+   past the first row. --topbar-h is measured at runtime in remote.js. */
+.searchbar {
+  position: sticky;
+  top: var(--topbar-h, 56px);
+  z-index: 4;
+  padding: 0 16px 10px;
+  background: var(--bg);
+}
 .searchbar .field {
   position: relative; display: flex; align-items: center;
 }
@@ -996,3 +1010,40 @@ button.icon-btn { flex: 0 0 auto; padding: 8px 10px; }
 }
 .person-name { font-weight: 700; font-size: 14px; }
 .person-role { font-size: 12px; color: var(--muted); }
+
+/* ---------- Search history ---------- */
+.hist-wrap { padding: 2px 16px 10px; }
+.hist-row {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 8px;
+}
+.hist-title {
+  font-size: 12px; font-weight: 700; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--muted);
+}
+.hist-clear {
+  font-size: 12px; color: var(--accent); background: none;
+  border: none; padding: 4px 6px; cursor: pointer;
+}
+.hist-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 7px 12px; border-radius: 999px;
+  background: var(--card); border: 1px solid var(--line);
+  color: var(--text); font-size: 13px; cursor: pointer;
+}
+.chip .x { color: var(--muted); font-size: 15px; line-height: 1; }
+
+/* Group headings inside the results grid (Movies / Series). */
+.res-head {
+  grid-column: 1 / -1;
+  font-size: 12px; font-weight: 700; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--muted);
+  margin: 12px 2px 2px; display: flex; align-items: center; gap: 8px;
+}
+.res-head:first-child { margin-top: 0; }
+.res-count {
+  font-size: 11px; font-weight: 600; letter-spacing: 0;
+  padding: 1px 7px; border-radius: 999px;
+  background: var(--card); border: 1px solid var(--line);
+}
