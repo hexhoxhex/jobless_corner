@@ -48,6 +48,10 @@ enum class Availability { UNKNOWN, CHECKING, AVAILABLE, UNAVAILABLE }
 
 private const val DEFAULT_QUALITY = "720p"
 
+/** How long a resolve may run before we reassure the viewer it is still
+ *  working. Long enough that normal starts never show it. */
+private const val SLOW_RESOLVE_HINT_MS = 6_000L
+
 /** How many native-HLS failures before we conclude the proxy + ExoPlayer
  *  path is genuinely broken and try the WebView iframe fallback. With the
  *  proxy in place this should almost never fire — it only matters if the
@@ -1974,6 +1978,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun resolve() {
         contentSwitchAtMs = android.os.SystemClock.elapsedRealtime()
         _state.update { it.copy(playLoading = true, error = null, screen = Screen.PLAYER) }
+        // Reassure the viewer while a slow source is still being worked out.
+        // Resolving can genuinely take a while (a provider with dead mirrors
+        // has to time out before the next is tried) and an unexplained wait
+        // reads as a hang. Cancelled as soon as the resolve finishes.
+        val slowHint = viewModelScope.launch {
+            kotlinx.coroutines.delay(SLOW_RESOLVE_HINT_MS)
+            if (_state.value.playLoading) {
+                com.moviebox.tv.data.live.LiveStatus.note(
+                    "▶ Still finding a good source — hang on…",
+                )
+            }
+        }
         viewModelScope.launch {
             val originalSe = _state.value.currentSe
             val originalEp = _state.value.currentEp
@@ -2060,6 +2076,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     "resolve S${_state.value.currentSe}E${_state.value.currentEp} " +
                         "skipResume=$skipNow resume=${resume}ms",
                 )
+                slowHint.cancel()
+                // Leave the overlay to the player: it clears on first frame.
                 _state.update {
                     it.copy(play = p, playLoading = false, resumeMs = resume)
                 }
@@ -2067,6 +2085,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     kind = "vod", title = p.title,
                 )
             }.onFailure { e ->
+                slowHint.cancel()
                 // Always release the reload guard, or a failed re-resolve
                 // would block every later recovery attempt.
                 streamReloading = false

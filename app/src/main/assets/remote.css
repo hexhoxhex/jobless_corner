@@ -977,3 +977,8 @@ button.icon-btn { flex: 0 0 auto; padding: 8px 10px; }
   padding: 1px 7px; border-radius: 999px;
   background: var(--card); border: 1px solid var(--line); color: var(--muted);
 }
+
+/* Resolve-progress line on Now Playing ("Checking VixSrc…"). */
+.np-loading {
+  margin: 6px 2px 0; font-size: 12px; color: #e8b341;
+}

@@ -1032,6 +1032,14 @@ function syncTracks(s) {
       toast("Audio: " + v);
     });
   }
+  // Resolve progress ("Checking VixSrc…") — the phone used to show nothing
+  // while the TV worked through providers, so a slow start looked like a hang.
+  const loadEl = $("#npLoading");
+  if (loadEl) {
+    const msg = s.loading || "";
+    loadEl.textContent = msg;
+    loadEl.classList.toggle("hidden", !msg);
+  }
   // Source picker: switch the playing title to another provider. Shown only
   // when the TV reported more than one selectable source.
   const provs = s.providers || [];

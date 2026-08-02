@@ -702,6 +702,9 @@ class RemoteServer(
         })
         // Source the current stream came from + the sources selectable for
         // it, so the remote can show the origin and switch it.
+        // What the TV is doing right now while a title resolves ("Checking
+        // VixSrc…"), so the phone shows the same reason for a wait.
+        .put("loading", com.moviebox.tv.data.live.LiveStatus.message.value ?: "")
         .put("provider", RemoteController.currentProvider)
         .put("providers", JSONArray(RemoteController.providerOptions()))
         .put("subtitle", run {

@@ -553,9 +553,20 @@ class Repository(
         val order = if (only != null) listOf(only) else
             listOf(first) + Provider.entries.filter { it != first }
         var lastError: Throwable? = null
+        var tried = 0
         for (p in order) {
+            tried++
+            // Tell the viewer WHICH source is being tried. Resolving can take
+            // a while (a provider whose mirrors are dead has to time out
+            // before the next is attempted), and silence during that reads as
+            // "nothing is happening". The overlay clears on first frame.
+            com.moviebox.tv.data.live.LiveStatus.note(
+                if (tried == 1) "▶ Finding a source…"
+                else "↻ Not on ${order[tried - 2].label} — checking ${p.label}…",
+            )
             val id = runCatching { idForProvider(p, subjectId, title, year, isSeries) }
                 .getOrNull() ?: continue
+            com.moviebox.tv.data.live.LiveStatus.note("▶ Loading from ${p.label}…")
             val attempt = runCatching {
                 resolvePlay(
                     subjectId = id, resolution = resolution, season = season,
@@ -572,6 +583,7 @@ class Repository(
                 "${p.label} failed for '$title': ${lastError?.message} — trying next",
             )
         }
+        com.moviebox.tv.data.live.LiveStatus.note("✗ No source has this title")
         throw ApiException(
             lastError?.message ?: "This title isn't available right now.",
         )
