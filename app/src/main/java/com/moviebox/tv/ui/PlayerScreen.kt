@@ -505,6 +505,7 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                 onStabilising = { stabilising = it },
                 tryDowngrade = vm::downgradeQuality,
                 onVodFailover = vm::failoverProvider,
+                onReloadStream = vm::reloadStreamAt,
                 resumeMs = if (play.isLive) 0L else state.resumeMs,
                 onProgress = { pos, dur ->
                     if (!play.isLive) vm.saveProgress(pos, dur)
@@ -1145,6 +1146,11 @@ private const val STALL_MS: Long = 8_000L
  *  buffering and WANTS to play is a stall, not a pause. Generous enough to
  *  ride out an ordinary rebuffer on a slow CDN. */
 private const val VOD_STALL_MS: Long = 20_000L
+
+/** A VOD stream that "ends" more than this far from its runtime did not
+ *  finish — its URL expired. Wide enough to tolerate the short durations
+ *  aoneroom under-reports. */
+private const val PREMATURE_END_SLACK_MS: Long = 60_000L
 private const val STALE_FATAL_MS: Long = 30_000L
 
 /** Bandwidth-bound detection. A channel that produces this many deep
@@ -1521,6 +1527,9 @@ private fun VideoPlayer(
     /** Last-resort VOD stall recovery: re-resolve this title on another
      *  provider. Default no-op keeps other call sites unchanged. */
     onVodFailover: () -> Unit = {},
+    /** Re-resolve the current title (fresh stream URL) and resume at the
+     *  given position. Used when a VOD stream expires mid-playback. */
+    onReloadStream: (Long) -> Unit = {},
     resumeMs: Long,
     onProgress: (Long, Long) -> Unit,
     defaultSubtitleLang: String,
@@ -1575,6 +1584,7 @@ private fun VideoPlayer(
     val firstFrameState = rememberUpdatedState(onFirstFrame)
     val downgradeState = rememberUpdatedState(tryDowngrade)
     val failoverState = rememberUpdatedState(onVodFailover)
+    val reloadState = rememberUpdatedState(onReloadStream)
     val progressState = rememberUpdatedState(onProgress)
     val liveErrorState = rememberUpdatedState(onLiveError)
     val fatalLiveState = rememberUpdatedState(onFatalLiveError)
@@ -2532,9 +2542,31 @@ private fun VideoPlayer(
                             exo.prepare()
                         }
                     } else {
-                        android.util.Log.i("VodDiag",
-                            "STATE_ENDED (VOD) — content finished, will advance")
-                        endedState.value()
+                        // A VOD "end" well short of the runtime is NOT the
+                        // content finishing — it's the stream URL dying under
+                        // us. Provider tokens are short-lived, so a long watch
+                        // (or a long pause) outlives them: segments start
+                        // failing, the player gives up, and the picture sat
+                        // frozen mid-film with nothing to recover it. Verified
+                        // on Spider-Man, which stopped at 89 min of 121 and
+                        // resumed instantly from a freshly-resolved URL.
+                        // Re-resolve and pick up where it stopped.
+                        val dur = exo.duration
+                        val pos = exo.currentPosition
+                        val premature = dur > 0 && pos > 0 &&
+                            pos < dur - PREMATURE_END_SLACK_MS
+                        if (premature) {
+                            android.util.Log.w(
+                                "VodDiag",
+                                "STATE_ENDED (VOD) at ${pos / 1000}s of " +
+                                    "${dur / 1000}s — stream expired, re-resolving",
+                            )
+                            reloadState.value(pos)
+                        } else {
+                            android.util.Log.i("VodDiag",
+                                "STATE_ENDED (VOD) — content finished, will advance")
+                            endedState.value()
+                        }
                     }
                 }
                 if (isBuffering && playbackState != Player.STATE_BUFFERING) {
@@ -2852,6 +2884,26 @@ private fun VideoPlayer(
                         exo.prepare()
                         exo.play()
                     }
+                    return
+                }
+                // A network/source error mid-film is usually an EXPIRED stream
+                // URL (provider tokens are short-lived), not a bitrate the
+                // link can't carry — dropping quality re-uses the same dead
+                // URL and fails again. Re-resolve first and resume in place;
+                // only fall back to a quality downgrade if that isn't the
+                // shape of the failure.
+                val cause = error.cause
+                val looksExpired = cause is androidx.media3.datasource
+                    .HttpDataSource.InvalidResponseCodeException ||
+                    cause is androidx.media3.datasource.HttpDataSource
+                        .HttpDataSourceException
+                if (looksExpired && exo.currentPosition > 0) {
+                    android.util.Log.w(
+                        "VodDiag",
+                        "VOD source error at ${exo.currentPosition / 1000}s " +
+                            "(${cause?.javaClass?.simpleName}) — re-resolving",
+                    )
+                    reloadState.value(exo.currentPosition)
                     return
                 }
                 // VOD: try one notch lower (e.g. 1080P HEVC → 720P / 480P H.264).

@@ -1925,6 +1925,33 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun providerOptions(): List<String> =
         Repository.Provider.entries.map { it.label }
 
+    /** Re-resolve the CURRENT title (same provider) to get a fresh stream URL
+     *  and resume at [positionMs].
+     *
+     *  Provider stream URLs are signed and short-lived, so a long watch — or a
+     *  long pause — outlives them. The segments then start failing and the
+     *  player stops with the picture frozen mid-film and nothing to recover
+     *  it (verified: Spider-Man stopped at 89 min of 121 and played instantly
+     *  from a freshly-resolved URL). Re-resolving is the fix; the provider is
+     *  NOT changed, because the content was never the problem. */
+    fun reloadStreamAt(positionMs: Long) {
+        if (streamReloading) return
+        streamReloading = true
+        pendingResumeMs = positionMs.coerceAtLeast(0L)
+        android.util.Log.i(
+            "VodDiag", "re-resolving stream, resume at ${positionMs / 1000}s",
+        )
+        _state.update { it.copy(error = null) }
+        resolve()
+    }
+
+    /** Guards against a reload storm if the fresh URL fails the same way. */
+    @Volatile private var streamReloading: Boolean = false
+
+    /** One-shot resume position for [reloadStreamAt], preferred over the
+     *  saved-history position (which lags by up to the save interval). */
+    @Volatile private var pendingResumeMs: Long? = null
+
     /** Last-resort stall recovery: re-resolve the current title on a DIFFERENT
      *  provider. Called by the player's VOD stall watchdog after a re-prepare
      *  and a quality drop both failed to get frames moving again. Banning the
@@ -2016,8 +2043,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 // next ordinary resolve (quality/dub change) still gets
                 // the saved position.
                 val skipNow = skipResumeNext
-                val resume = if (skipNow) 0L
-                else watchDao.positionOf(key) ?: 0L
+                // A stream-expiry reload carries the EXACT position the player
+                // stopped at; prefer it over the saved history position, which
+                // lags by up to one save interval and would rewind the viewer.
+                val reloadAt = pendingResumeMs
+                pendingResumeMs = null
+                streamReloading = false
+                val resume = when {
+                    reloadAt != null -> reloadAt
+                    skipNow -> 0L
+                    else -> watchDao.positionOf(key) ?: 0L
+                }
                 skipResumeNext = false
                 android.util.Log.i(
                     "VodDiag",
@@ -2031,6 +2067,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     kind = "vod", title = p.title,
                 )
             }.onFailure { e ->
+                // Always release the reload guard, or a failed re-resolve
+                // would block every later recovery attempt.
+                streamReloading = false
+                pendingResumeMs = null
                 // If this play came from a TMDB-bridged item, the bridge picked
                 // an aoneroom title but the stream is broken/unavailable —
                 // remember the TMDB id is dead and bounce out gracefully.
