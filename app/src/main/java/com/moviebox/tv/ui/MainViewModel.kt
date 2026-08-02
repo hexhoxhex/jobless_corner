@@ -1925,6 +1925,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Person matched by the most recent search (for labelling results). */
+    fun personMatch(): com.moviebox.tv.data.tmdb.TmdbRepository.Person? =
+        repo.lastPersonMatch
+
     /** Sources that could serve the current title, for the remote's picker. */
     fun providerOptions(): List<String> =
         Repository.Provider.entries.map { it.label }

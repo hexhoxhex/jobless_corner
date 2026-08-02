@@ -294,6 +294,13 @@ object RemoteController {
 
     // -- library -----------------------------------------------------------
 
+    /** Person (actor/director/producer) matched by the last search, if any —
+     *  lets the remote label the filmography rows. Read from THIS controller's
+     *  own Repository, which is the instance that ran the remote's search —
+     *  the ViewModel holds a different one and would always report null. */
+    fun lastPersonMatch(): com.moviebox.tv.data.tmdb.TmdbRepository.Person? =
+        repo.lastPersonMatch
+
     /** Recently watched live channels, most recent first. */
     fun liveRecents(): List<com.moviebox.tv.data.local.LiveRecents.Entry> {
         val ctx = com.moviebox.tv.App.instance

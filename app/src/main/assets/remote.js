@@ -611,13 +611,36 @@ async function doSearch(q) {
   }
   $("#searchEmpty").classList.add("hidden");
   grid.innerHTML = skeletonGrid(6);
-  let items = [];
-  try { items = await get("/api/search?q=" + encodeURIComponent(q)); }
+  let items = [], person = null;
+  try {
+    const res = await get("/api/search?q=" + encodeURIComponent(q));
+    // The endpoint returns a bare array normally, or {results, person} when
+    // the query matched an actor/director/producer. Handle both so an older
+    // shape never breaks search.
+    if (Array.isArray(res)) { items = res; }
+    else { items = res.results || []; person = res.person || null; }
+  }
   catch (e) { grid.innerHTML = `<div class="muted small">Search failed.</div>`; return; }
   if (!items.length) {
     grid.innerHTML = `<div class="muted small">No matches.</div>`; return;
   }
   grid.innerHTML = "";
+  // Head a filmography with who it belongs to, so it reads as "their work"
+  // rather than as odd title matches.
+  if (person && person.name) {
+    const head = document.createElement("div");
+    head.className = "person-head";
+    const role = person.department === "Directing" ? "Directed by"
+      : person.department === "Production" ? "Produced by"
+      : "Starring";
+    head.innerHTML = `
+      ${person.profile ? `<img class="person-pic" src="${person.profile}" />` : ""}
+      <div>
+        <div class="person-name">${escapeHtml(person.name)}</div>
+        <div class="person-role">${role} · ${items.length} titles</div>
+      </div>`;
+    grid.appendChild(head);
+  }
   items.forEach(it => grid.appendChild(searchCard(it)));
 }
 function skeletonGrid(n) {

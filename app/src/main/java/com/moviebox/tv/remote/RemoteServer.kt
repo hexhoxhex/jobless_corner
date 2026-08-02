@@ -171,7 +171,23 @@ class RemoteServer(
                 items
                     .filter { keepByLanguage(it.title, deny) }
                     .forEach { arr.put(itemJson(it)) }
-                json(arr.toString())
+                // When the query was a PERSON, name them so the SPA can head
+                // the results with "Films with <name>" rather than presenting
+                // a filmography as if it were an ordinary title match.
+                val person = RemoteController.lastPersonMatch()
+                if (person == null) json(arr.toString())
+                else json(
+                    JSONObject()
+                        .put("results", arr)
+                        .put(
+                            "person",
+                            JSONObject()
+                                .put("name", person.name)
+                                .put("department", person.department ?: "")
+                                .put("profile", person.profileUrl ?: ""),
+                        )
+                        .toString(),
+                )
             }
 
             uri == "/api/details" -> {

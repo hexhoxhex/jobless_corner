@@ -123,6 +123,80 @@ class TmdbRepository(token: String = BuildConfig.TMDB_TOKEN) {
         )
     }
 
+    /** A person the user might be searching for, with what they're known for. */
+    data class Person(
+        val id: Int,
+        val name: String,
+        val department: String?,
+        val profileUrl: String?,
+    )
+
+    /** Best person match for [query] — an actor, director or producer.
+     *  Requires an exact normalized name so an ordinary title search
+     *  ("Gladiator") can never be mistaken for a person. Null when the query
+     *  isn't a person's name. */
+    suspend fun findPerson(query: String): Person? {
+        val want = normalize(query)
+        if (want.length < 3) return null
+        val hits = runCatching { api.searchPerson(query).results }.getOrNull().orEmpty()
+        val exact = hits.filter { normalize(it.name) == want }
+        // Most-popular exact match: "Chris Evans" is the actor, not the
+        // similarly-named lesser credits TMDB also returns.
+        val best = exact.maxByOrNull { it.popularity } ?: return null
+        return Person(
+            id = best.id,
+            name = best.name,
+            department = best.department,
+            profileUrl = profile(best.profilePath),
+        )
+    }
+
+    /** Everything [personId] acted in, directed or produced, newest and
+     *  best-known first. Crew credits are filtered to the jobs people
+     *  actually search by — a producer's catering credits aren't a
+     *  filmography. */
+    suspend fun filmography(
+        personId: Int,
+        limit: Int = 40,
+        department: String? = null,
+    ): List<Item> {
+        val credits = runCatching { api.personCredits(personId) }.getOrNull()
+            ?: return emptyList()
+        val acted = credits.cast
+        val worked = credits.crew
+            .filter { c ->
+                val job = c.job.orEmpty()
+                job.equals("Director", true) || job.equals("Producer", true) ||
+                    job.equals("Executive Producer", true) ||
+                    job.equals("Writer", true) || job.equals("Screenplay", true) ||
+                    c.department.equals("Directing", true)
+            }
+            .map { c ->
+                TmdbItemDto(
+                    id = c.id, title = c.title, name = c.name,
+                    mediaType = c.mediaType, releaseDate = c.releaseDate,
+                    firstAirDate = c.firstAirDate, posterPath = c.posterPath,
+                    backdropPath = c.backdropPath, voteAverage = c.voteAverage,
+                    voteCount = c.voteCount, overview = c.overview,
+                )
+            }
+        // Lead with the work this person is KNOWN for. Ranking the union by
+        // vote count alone put Denzel Washington's single directing credit on
+        // Grey's Anatomy above every film he starred in, because the show is
+        // more voted than any one movie. So an actor's roles come first and a
+        // director's/producer's own productions come first; the other list
+        // follows. Within each, most-voted first.
+        val actorFirst = department == null || department.equals("Acting", true)
+        val primary = if (actorFirst) acted else worked
+        val secondary = if (actorFirst) worked else acted
+        fun rank(xs: List<TmdbItemDto>) =
+            xs.sortedByDescending { it.voteCount ?: 0 }
+        return (rank(primary) + rank(secondary))
+            .distinctBy { it.id to (it.mediaType ?: "") }
+            .mapNotNull { it.toItem() }
+            .take(limit)
+    }
+
     /** TMDB id + whether it's a series, for a source title. Lets the play
      *  failover chain address TMDB-keyed providers (VixSrc) for a title that
      *  only came from aoneroom/4KHDHub. Null when there's no confident match. */

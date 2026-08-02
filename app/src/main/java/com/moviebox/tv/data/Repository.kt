@@ -238,7 +238,7 @@ class Repository(
         type: SubjectType = SubjectType.ALL,
     ): List<Item> {
         val variants = keywordVariants(keyword)
-        val (mbLists, fourk) = coroutineScope {
+        val (mbLists, fourk, byPerson) = coroutineScope {
             // aoneroom spelling variants + the 4KHDHub provider, all in
             // parallel so the extra source doesn't add serial latency.
             val mb = variants.map { v ->
@@ -248,7 +248,20 @@ class Repository(
                 runCatching { com.moviebox.tv.net.FourKHdHub.search(keyword) }
                     .getOrDefault(emptyList())
             }
-            mb.map { it.await() } to fk.await()
+            // Searching a PERSON — actor, director or producer — returns their
+            // filmography. The name has to match exactly (see findPerson), so
+            // an ordinary title search can't be hijacked by a similarly named
+            // person. Runs in parallel, so it costs no extra latency.
+            val person = async {
+                runCatching {
+                    lastPersonMatch = null
+                    tmdb.findPerson(keyword)?.let { p ->
+                        lastPersonMatch = p
+                        tmdb.filmography(p.id, department = p.department)
+                    }
+                }.getOrNull().orEmpty()
+            }
+            Triple(mb.map { it.await() }, fk.await(), person.await())
         }
         val merged = LinkedHashMap<String, Item>()
         mbLists.forEach { list -> list.forEach { merged.putIfAbsent(it.subjectId, it) } }
@@ -259,8 +272,33 @@ class Repository(
         fourk
             .filter { type == SubjectType.ALL || it.type == type }
             .forEach { merged.putIfAbsent(it.subjectId, it) }
-        return merged.values.toList()
+        // A person's filmography goes FIRST when the catalogues found nothing
+        // (searching "Tom Holland" has no title match, so those results are
+        // the whole point) and after the title hits otherwise, so an actor who
+        // shares a name with a film doesn't bury the film.
+        val people = byPerson.filter { type == SubjectType.ALL || it.type == type }
+        if (people.isNotEmpty()) {
+            android.util.Log.i(
+                "PersonSearch",
+                "'$keyword' -> ${lastPersonMatch?.name} " +
+                    "(${lastPersonMatch?.department}) ${people.size} titles",
+            )
+        }
+        // A confident person match means the user typed a NAME, so their work
+        // leads. The catalogues answer a name query with fuzzy junk — "Tom
+        // Holland" returned Moana and Knucklebones — which would otherwise
+        // bury the filmography the user actually asked for. Catalogue hits
+        // still follow, in case one of them is the real target.
+        return if (people.isEmpty()) merged.values.toList()
+        else people + merged.values.filterNot { m -> people.any { it.subjectId == m.subjectId } }
     }
+
+    /** The person whose filmography the last [searchVariants] surfaced, so the
+     *  UI can label the row ("Films with Tom Holland"). Null when the last
+     *  search wasn't a person. */
+    @Volatile
+    var lastPersonMatch: TmdbRepository.Person? = null
+        private set
 
     /** Spelling variants to broaden a literal-match search. Toggles the
      *  space⇄hyphen⇄concatenated forms of the query; capped at 4 to bound

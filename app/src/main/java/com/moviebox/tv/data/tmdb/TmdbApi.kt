@@ -63,6 +63,21 @@ interface TmdbApi {
         @Query("append_to_response") append: String = "videos,credits",
     ): TmdbDetailDto
 
+    /** Find a person (actor, director, producer) by name. */
+    @GET("search/person")
+    suspend fun searchPerson(
+        @Query("query") query: String,
+        @Query("include_adult") includeAdult: Boolean = false,
+        @Query("language") language: String = "en-US",
+    ): TmdbPage<TmdbPersonDto>
+
+    /** Everything a person acted in OR worked on, movies and TV together. */
+    @GET("person/{id}/combined_credits")
+    suspend fun personCredits(
+        @Path("id") id: Int,
+        @Query("language") language: String = "en-US",
+    ): TmdbPersonCredits
+
     @GET("genre/movie/list")
     suspend fun movieGenres(): TmdbGenres
 
@@ -133,6 +148,41 @@ data class TmdbCastMember(
     val character: String? = null,
     @Json(name = "profile_path") val profilePath: String? = null,
     val order: Int = 999,
+)
+
+@JsonClass(generateAdapter = true)
+data class TmdbPersonDto(
+    val id: Int = 0,
+    val name: String = "",
+    @Json(name = "known_for_department") val department: String? = null,
+    @Json(name = "profile_path") val profilePath: String? = null,
+    val popularity: Double = 0.0,
+)
+
+/** combined_credits: `cast` = performed in, `crew` = directed/produced/wrote. */
+@JsonClass(generateAdapter = true)
+data class TmdbPersonCredits(
+    val cast: List<TmdbItemDto> = emptyList(),
+    val crew: List<TmdbCrewCredit> = emptyList(),
+)
+
+/** A crew credit is an item plus the job done on it, so a "producer" search
+ *  can keep only the producing/directing work rather than every gaffer role. */
+@JsonClass(generateAdapter = true)
+data class TmdbCrewCredit(
+    val id: Int = 0,
+    val title: String? = null,
+    val name: String? = null,
+    val job: String? = null,
+    val department: String? = null,
+    @Json(name = "media_type") val mediaType: String? = null,
+    @Json(name = "release_date") val releaseDate: String? = null,
+    @Json(name = "first_air_date") val firstAirDate: String? = null,
+    @Json(name = "poster_path") val posterPath: String? = null,
+    @Json(name = "backdrop_path") val backdropPath: String? = null,
+    @Json(name = "vote_average") val voteAverage: Double? = null,
+    @Json(name = "vote_count") val voteCount: Int? = null,
+    val overview: String? = null,
 )
 
 @JsonClass(generateAdapter = true)

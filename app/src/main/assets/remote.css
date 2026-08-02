@@ -982,3 +982,17 @@ button.icon-btn { flex: 0 0 auto; padding: 8px 10px; }
 .np-loading {
   margin: 6px 2px 0; font-size: 12px; color: #e8b341;
 }
+
+/* Header above a person's filmography in search results. */
+.person-head {
+  grid-column: 1 / -1;
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 12px; margin-bottom: 4px;
+  background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+}
+.person-pic {
+  width: 44px; height: 44px; border-radius: 50%;
+  object-fit: cover; border: 1px solid var(--line);
+}
+.person-name { font-weight: 700; font-size: 14px; }
+.person-role { font-size: 12px; color: var(--muted); }
