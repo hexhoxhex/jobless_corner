@@ -195,7 +195,8 @@ button.icon-btn { flex: 0 0 auto; padding: 8px 10px; }
   position: sticky;
   top: var(--topbar-h, 56px);
   z-index: 4;
-  padding: 0 16px 10px;
+  /* Top padding so the field isn't flush against the header's hairline. */
+  padding: 10px 16px;
   background: var(--bg);
 }
 .searchbar .field {
@@ -1003,6 +1004,12 @@ button.icon-btn { flex: 0 0 auto; padding: 8px 10px; }
   display: flex; align-items: center; gap: 12px;
   padding: 10px 12px; margin-bottom: 4px;
   background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+  /* Pinned under the search bar: whose filmography you are looking at is
+     context you need while scrolling it, not a banner that slides away.
+     --searchbar-h is measured at runtime alongside --topbar-h. */
+  position: sticky;
+  top: calc(var(--topbar-h, 56px) + var(--searchbar-h, 65px));
+  z-index: 3;
 }
 .person-pic {
   width: 44px; height: 44px; border-radius: 50%;
@@ -1047,3 +1054,12 @@ button.icon-btn { flex: 0 0 auto; padding: 8px 10px; }
   padding: 1px 7px; border-radius: 999px;
   background: var(--card); border: 1px solid var(--line);
 }
+
+/* Cast entries are tappable (they open that person's filmography). */
+.cast-item { cursor: pointer; }
+.cast-item:active .cast-pic { transform: scale(.94); }
+.cast-item .cast-pic { transition: transform .12s ease, border-color .12s ease; }
+.cast-item:hover .cast-pic, .cast-item:focus-visible .cast-pic {
+  border-color: var(--accent);
+}
+.cast-item:focus-visible { outline: none; }

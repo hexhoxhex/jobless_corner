@@ -592,6 +592,7 @@ class Repository(
             listOf(first) + Provider.entries.filter { it != first }
         var lastError: Throwable? = null
         var tried = 0
+        val startedAt = android.os.SystemClock.elapsedRealtime()
         for (p in order) {
             tried++
             // Tell the viewer WHICH source is being tried. Resolving can take
@@ -602,14 +603,34 @@ class Repository(
                 if (tried == 1) "▶ Finding a source…"
                 else "↻ Not on ${order[tried - 2].label} — checking ${p.label}…",
             )
-            val id = runCatching { idForProvider(p, subjectId, title, year, isSeries) }
-                .getOrNull() ?: continue
+            // Bound the whole chain. Each additional provider adds its own
+            // failure latency — 4KHDHub can spend ~90 s timing out dead
+            // mirrors — so without a budget a title no source carries would
+            // leave the viewer staring at a spinner for minutes. Stop looking
+            // once the budget is gone and report honestly.
+            if (android.os.SystemClock.elapsedRealtime() - startedAt > CHAIN_BUDGET_MS) {
+                android.util.Log.w(
+                    "Failover",
+                    "budget spent after $tried provider(s) for '$title' — stopping",
+                )
+                break
+            }
+            val id = runCatching {
+                kotlinx.coroutines.withTimeoutOrNull(LOOKUP_TIMEOUT_MS) {
+                    idForProvider(p, subjectId, title, year, isSeries)
+                }
+            }.getOrNull() ?: continue
             com.moviebox.tv.data.live.LiveStatus.note("▶ Loading from ${p.label}…")
             val attempt = runCatching {
-                resolvePlay(
-                    subjectId = id, resolution = resolution, season = season,
-                    episode = episode, dub = dub, titleHint = title,
-                )
+                // Per-provider cap: one slow source must not eat the budget
+                // the others need. Generous enough for the aoneroom WebView
+                // resolver, which legitimately takes 10-20 s on a cold start.
+                kotlinx.coroutines.withTimeout(PER_PROVIDER_TIMEOUT_MS) {
+                    resolvePlay(
+                        subjectId = id, resolution = resolution, season = season,
+                        episode = episode, dub = dub, titleHint = title,
+                    )
+                }
             }
             attempt.onSuccess {
                 android.util.Log.i("Failover", "served '$title' via ${p.label}")
@@ -1003,6 +1024,19 @@ class Repository(
         private const val DEFAULT_MAX_RESOLUTION = 1080
 
         private const val PER_PAGE = 20
+
+        // --- Provider failover budget (resolvePlayAnyProvider) ---
+        /** Total time the whole provider chain may spend before giving up.
+         *  Each extra provider adds its own failure latency (4KHDHub can
+         *  spend ~90 s timing out dead mirrors), so without a budget a title
+         *  no source carries leaves the viewer on a spinner for minutes. */
+        private const val CHAIN_BUDGET_MS = 75_000L
+        /** Cap on ONE provider's resolve, so a slow source can't eat the
+         *  budget the others need. Wide enough for the aoneroom WebView
+         *  resolver, which legitimately takes 10-20 s on a cold start. */
+        private const val PER_PROVIDER_TIMEOUT_MS = 30_000L
+        /** Cap on the cheap "does this provider have the title" lookup. */
+        private const val LOOKUP_TIMEOUT_MS = 12_000L
 
         // --- Episode enumeration (enumerateEpisodes) ---
         /** Resolution arg for the listing walk. aoneroom returns files

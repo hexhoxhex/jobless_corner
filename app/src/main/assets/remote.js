@@ -661,8 +661,7 @@ async function doSearch(q) {
   // put three loose films above the season run you actually wanted.
   if (series.length > movies.length) { section("Series", series); section("Movies", movies); }
   else { section("Movies", movies); section("Series", series); }
-  histAdd(q);            // remember the term only once it returned something
-  renderHistory();
+  histAddWhenSettled(q); // keep only the term typing settled on
 }
 function skeletonGrid(n) {
   let out = ""; for (let i = 0; i < n; i++) {
@@ -807,13 +806,35 @@ function renderCast(list) {
   if (!wrap) return;
   if (!list || !list.length) { wrap.innerHTML = ""; wrap.classList.add("hidden"); return; }
   wrap.classList.remove("hidden");
-  wrap.innerHTML = '<h3>Cast</h3><div class="cast-row">' + list.map(c =>
-    '<div class="cast-item">' +
+  wrap.innerHTML = '<h3>Cast</h3><div class="cast-row">' + list.map((c, i) =>
+    '<div class="cast-item" role="button" tabindex="0" data-actor="' + i + '">' +
       '<div class="cast-pic"' +
         (c.profile ? ' style="background-image:url(\'' + c.profile + '\')"' : '') + '></div>' +
       '<div class="cast-name">' + escapeHtml(c.name || '') + '</div>' +
       (c.character ? '<div class="cast-char">' + escapeHtml(c.character) + '</div>' : '') +
     '</div>').join('') + '</div>';
+  // Tapping a cast member searches for them, which surfaces their whole
+  // filmography (the person search added in v0.1.193) — so you can go from
+  // "who is that?" to "what else are they in?" in one tap.
+  wrap.querySelectorAll('.cast-item').forEach(el => {
+    const name = list[+el.dataset.actor] && list[+el.dataset.actor].name;
+    if (!name) return;
+    const go = () => showActor(name);
+    el.onclick = go;
+    el.onkeydown = (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); }
+    };
+  });
+}
+
+/** Jump to Search and look up [name] — used by the cast list. */
+function showActor(name) {
+  const q = $("#q");
+  if (!q) return;
+  selectTab("search");
+  q.value = name;
+  q.dispatchEvent(new Event("input", { bubbles: true }));
+  toast("Showing " + name);
 }
 function openTrailer(ytId) {
   const wrap = $("#trailerFrameWrap");
@@ -1933,6 +1954,10 @@ function syncTopbarHeight() {
   // would override the CSS fallback and let the search bar pin UNDER the
   // header instead of below it.
   if (h > 0) document.documentElement.style.setProperty("--topbar-h", h + "px");
+  // The person header pins below the search bar, so it needs that height too.
+  const sb = document.querySelector(".searchbar");
+  const sh = sb ? sb.offsetHeight : 0;
+  if (sh > 0) document.documentElement.style.setProperty("--searchbar-h", sh + "px");
 }
 window.addEventListener("resize", syncTopbarHeight);
 window.addEventListener("orientationchange", syncTopbarHeight);
@@ -1947,6 +1972,11 @@ document.addEventListener("DOMContentLoaded", () => {
   requestAnimationFrame(syncTopbarHeight);
   const tb = document.querySelector(".topbar");
   if (tb && window.ResizeObserver) new ResizeObserver(syncTopbarHeight).observe(tb);
+  // The search bar sits inside a pane that is display:none until the Search
+  // tab is opened, so it measures 0 during the startup retries — observe it
+  // so the actor header's pin offset is right the moment the pane appears.
+  const sbEl = document.querySelector(".searchbar");
+  if (sbEl && window.ResizeObserver) new ResizeObserver(syncTopbarHeight).observe(sbEl);
   const app = document.querySelector("#app");
   if (app && window.MutationObserver) {
     new MutationObserver(() => requestAnimationFrame(syncTopbarHeight))
@@ -1969,10 +1999,26 @@ function histSave(list) {
 function histAdd(q) {
   const term = (q || "").trim();
   if (term.length < 2) return;
-  // Re-searching a term moves it to the front instead of duplicating it.
-  const list = histAll().filter(t => t.toLowerCase() !== term.toLowerCase());
+  const lower = term.toLowerCase();
+  // Search fires on every keystroke, so typing "tom holland" used to store
+  // "to", "tom", "tom h" … and the history filled with fragments. Drop any
+  // stored term that this one extends (and skip storing a fragment of one we
+  // already have), so only the full term the user actually settled on stays.
+  const list = histAll().filter(t => {
+    const tl = t.toLowerCase();
+    return tl !== lower && !lower.startsWith(tl);
+  });
+  if (list.some(t => t.toLowerCase().startsWith(lower))) return;
   list.unshift(term);
   histSave(list);
+}
+
+// Only remember a term once typing has SETTLED — mid-word states are not
+// searches the user meant to keep.
+let histSettleTimer = null;
+function histAddWhenSettled(q) {
+  clearTimeout(histSettleTimer);
+  histSettleTimer = setTimeout(() => { histAdd(q); renderHistory(); }, 1400);
 }
 function histRemove(q) {
   histSave(histAll().filter(t => t !== q));
