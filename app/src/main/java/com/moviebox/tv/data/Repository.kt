@@ -562,12 +562,14 @@ class Repository(
         // oriented rips are the least suited to streaming.
         AONEROOM("MovieBox"),
         VIDNEST("VidNest"),
+        ICEFY("Icefy"),
         VIXSRC("VixSrc"),
         FOURKHDHUB("4KHDHub");
 
         companion object {
             fun of(subjectId: String): Provider = when {
                 subjectId.startsWith(com.moviebox.tv.net.VidNest.PREFIX) -> VIDNEST
+                subjectId.startsWith(com.moviebox.tv.net.Icefy.PREFIX) -> ICEFY
                 subjectId.startsWith(com.moviebox.tv.net.VixSrc.PREFIX) -> VIXSRC
                 subjectId.startsWith(com.moviebox.tv.net.FourKHdHub.PREFIX) -> FOURKHDHUB
                 else -> AONEROOM
@@ -671,6 +673,9 @@ class Repository(
             Provider.VIDNEST -> tmdb.matchId(title, year, isSeries)?.let { (id, isTv) ->
                 "${com.moviebox.tv.net.VidNest.PREFIX}${if (isTv) "tv" else "movie"}:$id"
             }
+            Provider.ICEFY -> tmdb.matchId(title, year, isSeries)?.let { (id, isTv) ->
+                "${com.moviebox.tv.net.Icefy.PREFIX}${if (isTv) "tv" else "movie"}:$id"
+            }
             Provider.FOURKHDHUB -> com.moviebox.tv.net.FourKHdHub.search(title)
                 .firstOrNull { titleMatches(it.title, title) }?.subjectId
             Provider.AONEROOM -> resolveByTitle(title, year, isSeries)?.subjectId
@@ -737,6 +742,21 @@ class Repository(
             val tmdbId = rest.substringAfterLast(':').toIntOrNull()
                 ?: throw ApiException("This title isn't available right now.")
             return com.moviebox.tv.net.VidNest.resolvePlay(
+                tmdbId = tmdbId,
+                season = if (isTv) (season ?: 1) else 0,
+                episode = if (isTv) (episode ?: 1) else 0,
+                title = titleHint.orEmpty(),
+            ) ?: throw ApiException("This title isn't available right now.")
+        }
+        // Icefy: TMDB-keyed adaptive HLS. Referer AND Origin are mandatory —
+        // without both the edge serves a Cloudflare challenge — so they come
+        // back in PlayInfo.headers and ride every segment request.
+        if (subjectId.startsWith(com.moviebox.tv.net.Icefy.PREFIX)) {
+            val rest = subjectId.removePrefix(com.moviebox.tv.net.Icefy.PREFIX)
+            val isTv = rest.startsWith("tv:")
+            val tmdbId = rest.substringAfterLast(':').toIntOrNull()
+                ?: throw ApiException("This title isn't available right now.")
+            return com.moviebox.tv.net.Icefy.resolvePlay(
                 tmdbId = tmdbId,
                 season = if (isTv) (season ?: 1) else 0,
                 episode = if (isTv) (episode ?: 1) else 0,
