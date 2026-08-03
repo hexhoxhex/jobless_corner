@@ -394,8 +394,14 @@ button.icon-btn { flex: 0 0 auto; padding: 8px 10px; }
   background: var(--bg);
   border-top: 1px solid var(--line);
   z-index: 30;
-  transform: translateZ(0);
-  will-change: transform;
+  /* NO will-change/translateZ here. Promoting a position:fixed bar to its own
+     compositor layer makes the compositor thread own its placement, and on
+     Android Chrome that layer visibly LAGS the content during a fling and
+     mis-anchors while the URL bar collapses — the "bottom bar follows the
+     scroll" glitch. Plain position:fixed is re-anchored by the browser itself
+     and stays put. The dynamic-toolbar case is handled in remote.js by
+     pinning to the VISUAL viewport (--vv-offset). */
+  transform: translateY(calc(-1 * var(--vv-offset, 0px)));
 }
 .tab {
   /* Equal-width distribution — without flex:1 the tabs sized to text width,
@@ -1063,3 +1069,11 @@ button.icon-btn { flex: 0 0 auto; padding: 8px 10px; }
   border-color: var(--accent);
 }
 .cast-item:focus-visible { outline: none; }
+
+/* Now Playing hero is tappable — opens the playing title's info. */
+.np-hero-tap { cursor: pointer; }
+.np-hero-tap:active { opacity: .82; }
+.np-info-hint {
+  margin-top: 4px; font-size: 11px; color: var(--accent);
+  letter-spacing: .04em;
+}

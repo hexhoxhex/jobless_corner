@@ -294,11 +294,14 @@
     </div>
     <div class="card np-card" id="npCard" hidden>
       <!-- Hero: poster + title/episode side by side. -->
-      <div class="np-hero">
+      <!-- Tapping the hero opens the playing title's details (cast, overview,
+           trailer, other episodes) without interrupting playback. -->
+      <div class="np-hero np-hero-tap" id="npHero" role="button" tabindex="0">
         <img id="npCover" class="np-cover" alt="" onerror="this.style.visibility='hidden'"/>
         <div class="np-hero-meta">
           <div class="np-title" id="npTitle">Nothing playing</div>
           <div class="np-ep" id="npEp" hidden></div>
+          <div class="np-info-hint" id="npInfoHint" hidden>Tap for info</div>
         </div>
       </div>
       <!-- Scrubber: drag to seek the TV's playback. Pattern mirrors the

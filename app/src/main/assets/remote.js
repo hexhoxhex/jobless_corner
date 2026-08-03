@@ -1008,6 +1008,17 @@ async function refresh() {
       else { cover.removeAttribute("src"); cover.style.visibility = "hidden"; }
     }
     $("#npTitle").textContent = s.title || "Nothing playing";
+    // Remember what's playing so the hero can open its details on tap.
+    nowPlayingItem = s.subjectId ? {
+      subjectId: s.subjectId,
+      // The state title carries "S1E2 · " for episodes; details wants the show.
+      title: (s.title || "").replace(/^S\d+E\d+\s*[·-]\s*/i, ""),
+      cover: s.cover || "",
+      type: s.type || 0,
+      year: s.year || 0,
+    } : null;
+    const hint = $("#npInfoHint");
+    if (hint) hint.hidden = !nowPlayingItem;
     // Episode badge under the title — kept in sync with TV state so the
     // remote shows the same episode the user is actually watching, even
     // after an auto-advance to the next episode.
@@ -2066,3 +2077,41 @@ document.addEventListener("DOMContentLoaded", () => {
   renderHistory();
 });
 
+/* ---------- bottom bar vs the mobile URL bar ---------- */
+// A position:fixed element is anchored to the LAYOUT viewport. On Android and
+// iOS the browser's toolbar shrinks the VISUAL viewport without changing the
+// layout one, so the tab bar ends up below the visible area and appears to
+// drift with the scroll. Track the difference and shift the bar up by it.
+(function pinBottomBar() {
+  const vv = window.visualViewport;
+  if (!vv) return;                        // desktop / older webviews: fine as-is
+  let queued = false;
+  const apply = () => {
+    queued = false;
+    const gap = Math.max(0, Math.round(window.innerHeight - (vv.height + vv.offsetTop)));
+    document.documentElement.style.setProperty("--vv-offset", gap + "px");
+  };
+  const schedule = () => { if (!queued) { queued = true; requestAnimationFrame(apply); } };
+  vv.addEventListener("resize", schedule);
+  vv.addEventListener("scroll", schedule);
+  window.addEventListener("orientationchange", schedule);
+  apply();
+})();
+
+/* ---------- now playing -> details ---------- */
+// What the TV is currently playing, captured from /api/state so the Now
+// Playing hero can open its info page. Tapping does NOT touch playback.
+let nowPlayingItem = null;
+document.addEventListener("DOMContentLoaded", () => {
+  const hero = $("#npHero");
+  if (!hero) return;
+  const open = () => {
+    if (!nowPlayingItem) return;
+    // pushView, so Back returns to Now Playing rather than dumping you on a tab.
+    pushView("details", nowPlayingItem);
+  };
+  hero.onclick = open;
+  hero.onkeydown = (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
+  };
+});
