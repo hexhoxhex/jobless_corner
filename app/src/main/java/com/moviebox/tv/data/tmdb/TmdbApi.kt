@@ -120,11 +120,21 @@ data class TmdbDetailDto(
     @Json(name = "release_date") val releaseDate: String? = null,
     @Json(name = "first_air_date") val firstAirDate: String? = null,
     @Json(name = "number_of_seasons") val numberOfSeasons: Int? = null,
+    /** Per-season episode counts — the season/episode picker for a series
+     *  that only the TMDB-keyed providers carry comes from here. */
+    val seasons: List<TmdbSeasonDto> = emptyList(),
     val genres: List<TmdbGenre> = emptyList(),
     val networks: List<TmdbNetwork> = emptyList(),
     // Populated by append_to_response=videos,credits.
     val videos: TmdbVideos? = null,
     val credits: TmdbCredits? = null,
+)
+
+@JsonClass(generateAdapter = true)
+data class TmdbSeasonDto(
+    @Json(name = "season_number") val seasonNumber: Int = 0,
+    @Json(name = "episode_count") val episodeCount: Int = 0,
+    val name: String? = null,
 )
 
 @JsonClass(generateAdapter = true)

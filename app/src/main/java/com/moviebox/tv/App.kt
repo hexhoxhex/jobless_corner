@@ -35,6 +35,15 @@ class App : Application(), ImageLoaderFactory {
             { com.moviebox.tv.net.H5PlayResolver.warmSession() },
             800,
         )
+        // Pick up the published provider config (which sources are live, and
+        // in what order). Reads the cache instantly and refreshes in the
+        // background, so a source that dies upstream can be disabled for
+        // existing installs without an app update.
+        Thread {
+            kotlinx.coroutines.runBlocking {
+                runCatching { com.moviebox.tv.data.ProviderConfig.warm(this@App) }
+            }
+        }.apply { isDaemon = true }.start()
     }
 
     companion object {

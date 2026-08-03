@@ -197,6 +197,18 @@ class TmdbRepository(token: String = BuildConfig.TMDB_TOKEN) {
             .take(limit)
     }
 
+    /** Season -> episode-count for a TMDB series, specials (season 0) and
+     *  unaired seasons dropped. This is where the season/episode picker comes
+     *  from for a show the MovieBox catalogue doesn't carry — WandaVision
+     *  rendered an EMPTY picker because seasons only ever came from aoneroom. */
+    suspend fun seasonsOf(tmdbId: Int): List<Pair<Int, Int>> {
+        val d = runCatching { api.tvDetail(tmdbId) }.getOrNull() ?: return emptyList()
+        return d.seasons
+            .filter { it.seasonNumber > 0 && it.episodeCount > 0 }
+            .sortedBy { it.seasonNumber }
+            .map { it.seasonNumber to it.episodeCount }
+    }
+
     /** TMDB id + whether it's a series, for a source title. Lets the play
      *  failover chain address TMDB-keyed providers (VixSrc) for a title that
      *  only came from aoneroom/4KHDHub. Null when there's no confident match. */

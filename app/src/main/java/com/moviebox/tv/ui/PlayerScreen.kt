@@ -1669,6 +1669,9 @@ private fun VideoPlayer(
     // the video-only fallback once per play. Reset on mediaUrl change so
     // a movie switch gets a fresh chance at audio.
     val audioDisabled = remember { mutableStateOf(false) }
+    // One shot at "try a different quality" before muting the film, so a
+    // variant whose audio ALSO fails can't ping-pong between qualities.
+    val audioQualityTried = remember { mutableStateOf(false) }
     LaunchedEffect(mediaUrl) { audioDisabled.value = false }
 
     // resilience uses it to cap max bitrate after repeated stalls.
@@ -2880,6 +2883,25 @@ private fun VideoPlayer(
                             it.className.contains("Audio", ignoreCase = true) ||
                                 it.className.contains("DecoderAudio")
                         } == true
+                // Before muting the film, TRY ANOTHER QUALITY. A broken audio
+                // track is usually specific to one variant — the user hit this
+                // on Doctor Strange, where 1080p's audio failed but 720p's was
+                // fine, and we silently dropped them to a silent 1080p instead
+                // of a working 720p. Only when no lower variant exists is
+                // video-only the right answer.
+                if (isAudioDecoderFail && !audioDisabled.value &&
+                    !audioQualityTried.value
+                ) {
+                    audioQualityTried.value = true
+                    android.util.Log.w(
+                        "VodDiag",
+                        "audio decoder failed — trying a different quality " +
+                            "variant before giving up on sound",
+                    )
+                    stabilisingState.value("Audio unsupported — trying another quality…")
+                    if (downgradeState.value()) return
+                    android.util.Log.w("VodDiag", "no lower variant — video-only")
+                }
                 if (isAudioDecoderFail && !audioDisabled.value) {
                     audioDisabled.value = true
                     android.util.Log.w(

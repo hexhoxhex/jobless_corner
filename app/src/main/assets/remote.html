@@ -197,6 +197,11 @@
 
   <!-- SEARCH -->
   <section id="pane-search" class="pane">
+    <!-- Only shown when this search was opened FROM somewhere (e.g. tapping a
+         cast member), so there is a frame to go back to. -->
+    <button class="back hidden" id="searchBack">
+      <svg class="icon"><use href="#i-chevron-left"/></svg> Back
+    </button>
     <div class="searchbar">
       <div class="field">
         <svg class="icon"><use href="#i-search"/></svg>

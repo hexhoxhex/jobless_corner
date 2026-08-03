@@ -281,6 +281,19 @@ function renderView(view) {
   showPane(view.pane);
   if (view.pane === "details"  && view.ctx) renderDetailsContent(view.ctx);
   if (view.pane === "episodes" && view.ctx) renderEpisodes(view.ctx);
+  // A search frame can carry its query, so going back to it (or forward into
+  // it from a cast tap) restores the results rather than a blank box.
+  // Back affordance on Search: present only when we arrived here from
+  // another frame (a cast tap), absent when Search is the root tab.
+  const sBack = $("#searchBack");
+  if (sBack) sBack.classList.toggle("hidden", !(view.pane === "search" && view.ctx && view.ctx.q));
+  if (view.pane === "search" && view.ctx && view.ctx.q) {
+    const q = $("#q");
+    if (q && q.value !== view.ctx.q) {
+      q.value = view.ctx.q;
+      q.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+  }
 }
 
 /** Navigate to a root tab — collapses back to a single history entry. */
@@ -303,6 +316,7 @@ window.addEventListener("popstate", (e) => {
 });
 
 $$(".tab").forEach(b => b.onclick = () => selectTab(b.dataset.pane));
+$("#searchBack") && ($("#searchBack").onclick = () => history.back());
 
 // Topbar Devices + Debug shortcuts (superuser only — visibility from fetchMe()).
 const devicesBtn = $("#devicesBtn");
@@ -831,9 +845,10 @@ function renderCast(list) {
 function showActor(name) {
   const q = $("#q");
   if (!q) return;
-  selectTab("search");
-  q.value = name;
-  q.dispatchEvent(new Event("input", { bubbles: true }));
+  // pushView, NOT selectTab: selectTab uses history.replaceState, which drops
+  // the frame you came from — tapping a cast member from a film left you with
+  // no way back to that film. Pushing keeps the details page behind this one.
+  pushView("search", { q: name });
   toast("Showing " + name);
 }
 function openTrailer(ytId) {

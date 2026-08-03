@@ -464,6 +464,39 @@ class Repository(
         if (subjectId.startsWith(com.moviebox.tv.net.FourKHdHub.PREFIX)) {
             return com.moviebox.tv.net.FourKHdHub.details(subjectId)
         }
+        // TMDB-keyed items (browsed from TMDB rows, an actor's filmography, or
+        // already pinned to a TMDB provider). Their seasons come from TMDB,
+        // NOT from the aoneroom catalogue — a show the catalogue lacks used to
+        // render an EMPTY season picker even though the TMDB-keyed providers
+        // could play every episode (WandaVision: seasons=[]).
+        tmdbKeyOf(subjectId)?.let { (tmdbId, isTv) ->
+            val seasons = if (isTv) {
+                runCatching { tmdb.seasonsOf(tmdbId) }.getOrDefault(emptyList())
+                    .map { (se, count) ->
+                        SeasonInfo(
+                            season = se,
+                            episodes = count,
+                            resolutions = emptyList(),
+                            realEpisodes = (1..count).toList(),
+                        )
+                    }
+            } else emptyList()
+            val meta = runCatching {
+                tmdb.details(tmdbId, isTv)
+            }.getOrNull()
+            return Details(
+                subjectId = subjectId,
+                title = meta?.let { it.name ?: it.title }.orEmpty()
+                    .ifBlank { titleHint.orEmpty() },
+                type = if (isTv) SubjectType.TV_SERIES else SubjectType.MOVIE,
+                description = meta?.overview.orEmpty(),
+                year = (meta?.firstAirDate ?: meta?.releaseDate)
+                    ?.take(4)?.toIntOrNull(),
+                isSeries = isTv,
+                seasons = seasons,
+                dubs = emptyList(),
+            )
+        }
         // H5 path: the legacy mobile itemDetails returns 441 "miss token". We
         // get every field the old path returned (title, description, year,
         // seasons, dubs) from the H5 /detail endpoint — same data, different
@@ -598,8 +631,17 @@ class Repository(
         only: Provider? = null,
     ): PlayInfo {
         val first = only ?: Provider.of(subjectId)
-        val order = if (only != null) listOf(only) else
-            listOf(first) + Provider.entries.filter { it != first }
+        // Remote config decides which providers are live and in what order —
+        // a source that dies is a published file edit, not an app release.
+        // Falls back to the built-in list if the config is absent or bad.
+        val available = ProviderConfig.apply(Provider.entries)
+        val order = when {
+            only != null -> listOf(only)
+            // Whatever the item is already keyed to still goes first, even if
+            // the config would rank it lower: the caller asked for that source.
+            else -> (listOf(first) + available.filter { it != first })
+                .filter { it == first || available.contains(it) }
+        }
         var lastError: Throwable? = null
         var tried = 0
         val startedAt = android.os.SystemClock.elapsedRealtime()
@@ -680,6 +722,22 @@ class Repository(
                 .firstOrNull { titleMatches(it.title, title) }?.subjectId
             Provider.AONEROOM -> resolveByTitle(title, year, isSeries)?.subjectId
         }
+    }
+
+    /** (tmdbId, isTv) for any TMDB-keyed subjectId — the browse form
+     *  `tmdb:tv:123` and the provider forms `vn:tv:123` / `ice:movie:9`
+     *  / `vix:tv:5`. Null for catalogue ids, which keep the aoneroom path. */
+    private fun tmdbKeyOf(subjectId: String): Pair<Int, Boolean>? {
+        val prefixes = listOf(
+            "tmdb:",
+            com.moviebox.tv.net.VidNest.PREFIX,
+            com.moviebox.tv.net.Icefy.PREFIX,
+            com.moviebox.tv.net.VixSrc.PREFIX,
+        )
+        val p = prefixes.firstOrNull { subjectId.startsWith(it) } ?: return null
+        val rest = subjectId.removePrefix(p)
+        val id = rest.substringAfterLast(':').toIntOrNull() ?: return null
+        return id to rest.startsWith("tv")
     }
 
     /** Loose title equality for cross-provider matching — provider titles carry
