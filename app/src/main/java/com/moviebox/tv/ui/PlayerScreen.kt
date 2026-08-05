@@ -1229,7 +1229,17 @@ private fun UpNextCard(
     // to consider these buttons as focus targets.
     val playFocus = remember { androidx.compose.ui.focus.FocusRequester() }
     LaunchedEffect(Unit) {
-        runCatching { playFocus.requestFocus() }
+        // RETRY until it lands. A single attempt loses the race with
+        // AnimatedVisibility: the button isn't attached/focusable while the
+        // card is still fading in, so requestFocus() throws and runCatching
+        // swallowed it — focus stayed on the player surface and the D-pad
+        // couldn't reach Next or Cancel at all ("can't even select either").
+        var tries = 0
+        while (tries < 20) {
+            if (runCatching { playFocus.requestFocus() }.isSuccess) break
+            kotlinx.coroutines.delay(30)
+            tries++
+        }
     }
     Box(
         Modifier.clip(RoundedCornerShape(14.dp))
@@ -1298,7 +1308,16 @@ private fun UpNextItemCard(
     onDismiss: () -> Unit,
 ) {
     val playFocus = remember { FocusRequester() }
-    LaunchedEffect(Unit) { runCatching { playFocus.requestFocus() } }
+    LaunchedEffect(Unit) {
+        // Same retry as UpNextCard — a single attempt races AnimatedVisibility
+        // and leaves the card unreachable by the TV remote.
+        var tries = 0
+        while (tries < 20) {
+            if (runCatching { playFocus.requestFocus() }.isSuccess) break
+            kotlinx.coroutines.delay(30)
+            tries++
+        }
+    }
     Box(
         Modifier.clip(RoundedCornerShape(14.dp))
             .background(Color(0xEE0A0C12))
@@ -1919,8 +1938,16 @@ private fun VideoPlayer(
                 override fun createMediaSource(
                     mediaItem: MediaItem,
                 ): androidx.media3.exoplayer.source.MediaSource {
+                    // ALWAYS go through the default factory when the item has
+                    // sideloaded subtitles: DashMediaSource.Factory ignores
+                    // them, so a DASH stream lost every caption track. The
+                    // MediaItem now declares APPLICATION_MPD, which the default
+                    // factory routes to DASH itself — and it wraps the result in
+                    // a MergingMediaSource carrying the subtitles.
                     val uri = mediaItem.localConfiguration?.uri
-                    return if (uri != null && isDash(uri))
+                    val hasSubs = mediaItem.localConfiguration
+                        ?.subtitleConfigurations?.isNotEmpty() == true
+                    return if (uri != null && isDash(uri) && !hasSubs)
                         dash.createMediaSource(mediaItem)
                     else default.createMediaSource(mediaItem)
                 }
@@ -2303,6 +2330,13 @@ private fun VideoPlayer(
             val b = MediaItem.Builder().setUri(mediaUrl)
                 .setSubtitleConfigurations(subs)
             if (looksLikeHls(mediaUrl)) b.setMimeType(MimeTypes.APPLICATION_M3U8)
+            // Declare DASH the same way. This is what lets the DEFAULT media
+            // source factory route the manifest correctly — which matters
+            // because only that factory merges sideloaded subtitles into the
+            // source. Building a DashMediaSource directly (what we used to do)
+            // silently DROPPED every subtitle track: the CC menu listed 33
+            // languages and picking one did nothing on any DASH stream.
+            else if (looksLikeDash(mediaUrl)) b.setMimeType(MimeTypes.APPLICATION_MPD)
             b.build()
         }
         // VOD: resume from saved position; quality/dub swap on same content keeps
@@ -3153,6 +3187,13 @@ private fun VideoPlayer(
  *  Direct .m3u8 links sniff fine; provider-minted playlist endpoints (e.g.
  *  vixsrc's "/playlist/{id}?token=…") have no extension, so the MIME type has
  *  to be declared or the player picks a progressive extractor and fails. */
+/** DASH manifest by URL shape — aoneroom serves its high-quality streams as
+ *  `…/playstream.mpd`, sometimes with query params after the extension. */
+private fun looksLikeDash(url: String): Boolean {
+    val u = url.substringBefore('?').lowercase()
+    return u.endsWith(".mpd") || u.contains("playstream.mpd")
+}
+
 private fun looksLikeHls(url: String): Boolean {
     val u = url.substringBefore('?').lowercase()
     if (u.endsWith(".m3u8") || u.endsWith(".m3u")) return true
