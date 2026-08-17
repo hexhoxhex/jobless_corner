@@ -1877,6 +1877,32 @@ private fun VideoPlayer(
                                 .LoadErrorHandlingPolicy.LoadErrorInfo,
                         ): Long {
                             val attempts = loadErrorInfo.errorCount
+                            // A 404 gets a SHORT, BOUNDED retry — not the
+                            // escalating budget below. The comment under
+                            // isEligibleForFallback assumes a 404 is a
+                            // transient edge-desync that resolves on the next
+                            // attempt; on volder.timst.cfd it usually is not.
+                            // Telemetry caught 50 error events covering just
+                            // TWO segment URLs — the player re-asking for the
+                            // same dead chunks ~25 times each, riding
+                            // 1+2+4+8+8+8s of backoff ≈ 31 s of frozen picture
+                            // before giving up. That is the "TV just freezes
+                            // while streaming" report.
+                            //
+                            // Two quick retries cover the genuine desync case
+                            // (the segment lands within a few hundred ms if it
+                            // is coming at all); past that, returning
+                            // TIME_UNSET stops the retry so the player can move
+                            // on to the next segment instead of staring at a
+                            // chunk that will never exist. Worst case is now
+                            // ~0.6 s, not ~31 s.
+                            val cause = loadErrorInfo.exception
+                            val is404 = cause is androidx.media3.datasource
+                                .HttpDataSource.InvalidResponseCodeException &&
+                                cause.responseCode == 404
+                            if (is404) {
+                                return if (attempts <= 2) 300L else C.TIME_UNSET
+                            }
                             // 1s, 2s, 4s, 8s, 8s, 8s — caps at 8s so we
                             // don't sit on a single dead chunk forever.
                             return (1000L shl (attempts - 1).coerceAtMost(3))
