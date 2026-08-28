@@ -509,7 +509,14 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                 onReloadStream = vm::reloadStreamAt,
                 resumeMs = if (play.isLive) 0L else state.resumeMs,
                 onProgress = { pos, dur ->
-                    if (!play.isLive) vm.saveProgress(pos, dur)
+                    // Pass WHICH media produced this tick. `play` here is the
+                    // PlayInfo this player instance was built for, captured in
+                    // the lambda — so a late tick from the outgoing player
+                    // still identifies itself as the OLD episode instead of
+                    // being attributed to whatever is playing now.
+                    if (!play.isLive) {
+                        vm.saveProgress(pos, dur, play.season, play.episode)
+                    }
                 },
                 defaultSubtitleLang =
                     LocalConfiguration.current.locales[0].language,
@@ -2652,6 +2659,16 @@ private fun VideoPlayer(
                         } else {
                             android.util.Log.i("VodDiag",
                                 "STATE_ENDED (VOD) — content finished, will advance")
+                            // Record the finish BEFORE advancing. The periodic
+                            // progress tick only fires while isPlaying, so at
+                            // ENDED it never runs again and the last stored
+                            // position is up to 5 s short of the duration —
+                            // which, combined with the leak fixed in
+                            // saveProgress, is why episodes you actually
+                            // finished showed no watched tick in the picker.
+                            // Writing the full duration here makes "finished"
+                            // unambiguous.
+                            if (dur > 0) progressState.value(dur, dur)
                             endedState.value()
                         }
                     }

@@ -630,7 +630,17 @@ class Repository(
         dub: String = "Original",
         only: Provider? = null,
     ): PlayInfo {
-        val first = only ?: Provider.of(subjectId)
+        // A provider that served this title before goes first. Without this
+        // every episode re-walks the whole chain — Malcolm in the Middle
+        // misses on MovieBox and VidNest (~5 s each) before VixSrc answers,
+        // so each episode change sat on a black screen for ~6 s.
+        val ctx = com.moviebox.tv.App.instance
+        val remembered = if (only == null) {
+            ProviderMemory.preferredFor(ctx, subjectId)?.let { label ->
+                Provider.entries.firstOrNull { it.label == label }
+            }
+        } else null
+        val first = only ?: remembered ?: Provider.of(subjectId)
         // Remote config decides which providers are live and in what order —
         // a source that dies is a published file edit, not an app release.
         // Falls back to the built-in list if the config is absent or bad.
@@ -686,8 +696,12 @@ class Repository(
             }
             attempt.onSuccess {
                 android.util.Log.i("Failover", "served '$title' via ${p.label}")
+                ProviderMemory.remember(ctx, subjectId, p.label)
                 return it.copy(provider = p.label, providerSubjectId = id)
             }
+            // The remembered pick just failed — drop the hint so a source that
+            // has died doesn't keep getting first refusal on every retry.
+            if (p == remembered) ProviderMemory.forget(ctx, subjectId)
             lastError = attempt.exceptionOrNull()
             android.util.Log.w(
                 "Failover",

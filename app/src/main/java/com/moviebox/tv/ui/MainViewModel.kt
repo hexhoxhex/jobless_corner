@@ -2120,20 +2120,44 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Called periodically by the player to persist resume position. */
-    fun saveProgress(positionMs: Long, durationMs: Long) {
+    /** Called periodically by the player to persist resume position.
+     *
+     *  [fromSeason]/[fromEpisode] identify the media that PRODUCED this tick.
+     *  The player passes its own PlayInfo's values, so a late tick from an
+     *  outgoing player is recognisable even after state.play has moved on. */
+    fun saveProgress(
+        positionMs: Long,
+        durationMs: Long,
+        fromSeason: Int = -1,
+        fromEpisode: Int = -1,
+    ) {
         if (durationMs <= 0 || positionMs <= 0) return
-        // Drop saves that land right after a content switch — these are the
-        // OLD player's final onProgress firing its near-end position while
-        // state.play has already moved to the NEW item, which would corrupt
-        // the new item's resume position (the "next episode starts from the
-        // middle / skips minutes in" bug). The new item's own saves resume
-        // a few seconds later once its real position is flowing.
-        if (android.os.SystemClock.elapsedRealtime() - contentSwitchAtMs
-            < CONTENT_SWITCH_SUPPRESS_MS
-        ) return
         val s = _state.value
         val play = s.play ?: return
+        // IDENTITY CHECK, not a stopwatch. The old guard dropped saves for a
+        // fixed 3 s after a content switch, on the assumption the outgoing
+        // player goes quiet by then. It does not: resolving the next episode
+        // now runs a provider failover chain (MovieBox and VidNest both miss
+        // on some series, ~5 s each), so the outgoing player's final tick
+        // lands well AFTER the window with state.play already pointing at the
+        // new episode — and its near-end position got written under the new
+        // episode's key.
+        //
+        // That single leak caused both reported symptoms: the next episode
+        // resumed ~2 min from the end (so it ended instantly and auto-advanced
+        // — the "looping, changing streams" report), and the episode you just
+        // finished never received its own final save, so it never crossed the
+        // finished threshold and showed no watched tick.
+        //
+        // Now a tick is only honoured when it came from the media currently
+        // playing. Ticks with no identity (-1) are legacy callers and still
+        // fall back to the timer.
+        if (fromSeason >= 0 && fromEpisode >= 0) {
+            if (fromSeason != play.season || fromEpisode != play.episode) return
+        } else if (
+            android.os.SystemClock.elapsedRealtime() - contentSwitchAtMs
+            < CONTENT_SWITCH_SUPPRESS_MS
+        ) return
         // Live TV never belongs in Continue Watching — there's no position
         // to resume. The caller already guards on !play.isLive, but keep a
         // defensive check here so a stray live save (like the legacy
