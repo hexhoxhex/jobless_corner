@@ -232,8 +232,21 @@ class TmdbRepository(token: String = BuildConfig.TMDB_TOKEN) {
         // filtering to movies then matches an obscure "The Office" film
         // instead of the famous series. Ranking by votes lets the canonical
         // entry win regardless of that mislabel.
+        // Exact normalized title, OR the same title differing only by a
+        // leading article. The catalogue and TMDB disagree on those constantly
+        // — the catalogue lists "Terminator" where TMDB has "The Terminator"
+        // (id 218, 15k votes). A strict compare found ZERO matches, so no TMDB
+        // id was produced, so every TMDB-KEYED PROVIDER WAS SKIPPED: the chain
+        // went MovieBox -> 4KHDHub and reported "no source has this title",
+        // while VidNest was carrying the film the whole time.
+        //
+        // Deliberately narrow: only a leading "the/a/an" may differ. Anything
+        // looser reopens the wrong-match class this filter exists to prevent
+        // (the "Affinity -> Avengers" failure).
+        val wantBare = stripArticle(want)
         val pool = results.filter {
-            normalize(titleOf(it)) == want &&
+            val t = normalize(titleOf(it))
+            (t == want || stripArticle(t) == wantBare) &&
                 (mediaTypeOf(it) == "movie" || mediaTypeOf(it) == "tv")
         }
         if (pool.isEmpty()) return null
@@ -254,6 +267,15 @@ class TmdbRepository(token: String = BuildConfig.TMDB_TOKEN) {
     private fun titleOf(d: TmdbItemDto): String = d.title ?: d.name ?: ""
     private fun mediaTypeOf(d: TmdbItemDto): String =
         d.mediaType ?: if (d.title != null) "movie" else "tv"
+
+    /** Drop a leading article AFTER normalisation ("theterminator" ->
+     *  "terminator"). Only ever used alongside an exact compare, never alone. */
+    private fun stripArticle(normalized: String): String = when {
+        normalized.startsWith("the") -> normalized.removePrefix("the")
+        normalized.startsWith("an") -> normalized.removePrefix("an")
+        normalized.startsWith("a") -> normalized.removePrefix("a")
+        else -> normalized
+    }
 
     private fun normalize(s: String): String =
         s.lowercase().replace(Regex("[^a-z0-9]+"), "")
