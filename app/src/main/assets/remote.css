@@ -1254,3 +1254,34 @@ button.icon-btn { flex: 0 0 auto; padding: 8px 10px; }
 .fu-row { padding: 12px 4px; gap: 12px; }
 .fu-row .fu-play { min-height: 38px; }
 .follow-head { margin: 26px 0 10px; }
+
+
+/* ---------- Settings pane ---------- */
+.set-group { margin-bottom: 26px; }
+.set-head {
+  font-size: .92rem; font-weight: 700; color: var(--text);
+  margin-bottom: 10px; display: flex; align-items: center; gap: 8px;
+}
+.set-head::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.set-note { margin: 0 2px 12px; line-height: 1.45; }
+.set-rows { display: flex; flex-direction: column; gap: 8px; }
+.set-row {
+  display: flex; align-items: baseline; gap: 12px;
+  background: var(--surface); border-radius: var(--radius);
+  padding: 11px 13px;
+}
+.set-row .sr-k { flex: 0 0 40%; color: var(--muted); font-size: .82rem; }
+.set-row .sr-v {
+  flex: 1 1 auto; color: var(--text); font-size: .86rem;
+  font-weight: 600; word-break: break-word;
+}
+.set-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.set-actions button { flex: 1 1 auto; min-height: 44px; }
+.diag-out {
+  margin-top: 14px; max-height: 320px; overflow: auto;
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 12px;
+  font-size: .68rem; line-height: 1.4; white-space: pre-wrap;
+  word-break: break-word; color: var(--text-2);
+}
+.diag-out.hidden { display: none; }

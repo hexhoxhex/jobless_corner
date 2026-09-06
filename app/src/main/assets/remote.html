@@ -74,6 +74,16 @@
     <symbol id="i-star" viewBox="0 0 24 24" fill="currentColor">
       <path d="M12 2l3 6.5 7 1-5 5 1 7-6-3.5-6 3.5 1-7-5-5 7-1z"/>
     </symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="3"/>
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.14.61.66 1.05 1.28 1.05H21a2 2 0 1 1 0 4h-.09c-.62 0-1.14.44-1.28 1.05z"/>
+    </symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="9" y="9" width="13" height="13" rx="2"/>
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+    </symbol>
     <symbol id="i-bell" viewBox="0 0 24 24" fill="none" stroke="currentColor"
             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
       <path d="M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/>
@@ -514,6 +524,34 @@
     </div>
   </section>
 
+  <!-- SETTINGS -->
+  <section id="pane-settings" class="pane">
+    <h2 class="ph">Settings</h2>
+
+    <div class="set-group">
+      <div class="set-head">This TV</div>
+      <div id="setInfo" class="set-rows"></div>
+    </div>
+
+    <div class="set-group">
+      <div class="set-head">Report a streaming problem</div>
+      <p class="muted small set-note">
+        Collects what went wrong with recent streams — error counts, buffer
+        timings and measured feed health — so the fault can be diagnosed.
+        It does <strong>not</strong> include your name, IP address, account,
+        or what you watched.
+      </p>
+      <div class="set-actions">
+        <button id="diagCopy" class="primary">
+          <svg class="icon sm"><use href="#i-copy"/></svg> Copy report
+        </button>
+        <button id="diagDownload" class="ghost">Download</button>
+        <button id="diagView" class="ghost">Preview</button>
+      </div>
+      <pre id="diagOut" class="diag-out hidden"></pre>
+    </div>
+  </section>
+
   <section id="pane-dl" class="pane">
     <h2 class="ph">Downloads</h2>
     <div id="downloads" class="list" style="padding:0 16px"></div>
@@ -609,6 +647,9 @@
     </button>
     <button class="tab" data-pane="prefs">
       <svg class="icon"><use href="#i-tune"/></svg><i>Taste</i>
+    </button>
+    <button class="tab" data-pane="settings">
+      <svg class="icon"><use href="#i-gear"/></svg><i>Settings</i>
     </button>
   </nav>
 </main>

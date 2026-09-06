@@ -252,7 +252,7 @@ async function boot() {
    them instead of reloading or exiting the whole SPA — that reload was what
    made navigation "reset" and feel broken. popstate re-renders whatever view
    the browser hands back, so Back/Forward Just Work. */
-const ROOT_TABS = ["browse", "live", "search", "np", "dl", "prefs", "debug", "devices"];
+const ROOT_TABS = ["browse", "live", "search", "np", "dl", "prefs", "debug", "devices", "settings"];
 let originTab = "browse";   // last root tab — pushed frames highlight it + Back falls back to it
 
 function showPane(name) {
@@ -279,6 +279,7 @@ function showPane(name) {
 
 function renderView(view) {
   showPane(view.pane);
+  if (view.pane === "settings") loadSettings();
   if (view.pane === "details"  && view.ctx) renderDetailsContent(view.ctx);
   if (view.pane === "episodes" && view.ctx) renderEpisodes(view.ctx);
   // A search frame can carry its query, so going back to it (or forward into
@@ -1705,6 +1706,89 @@ function selectLiveSubtab(which) {
 document.querySelectorAll("#pane-live .subtab").forEach(b => {
   b.onclick = () => selectLiveSubtab(b.dataset.sub);
 });
+
+/* ---------- Settings ----------
+   The remote had no settings surface at all: every control lived on the TV,
+   which is exactly the wrong place when the thing you want to report is
+   that the TV is misbehaving. */
+async function loadSettings() {
+  const box = $("#setInfo");
+  box.innerHTML = "";
+  const rows = [];
+  try {
+    const d = await get("/api/diagnostics");
+    rows.push(["App version", d.app?.version || "?"]);
+    rows.push(["Device", `${d.device?.manufacturer || ""} ${d.device?.model || ""}`.trim()]);
+    rows.push(["Android", `${d.device?.android || "?"} (SDK ${d.device?.sdk || "?"})`]);
+    rows.push(["Memory", `${d.memory?.avail_mb ?? "?"} MB free of ${d.memory?.total_mb ?? "?"} MB`]);
+    const t = d.telemetry?.session || {};
+    rows.push(["This session", `${t.rebuffers ?? 0} rebuffers, ${t.freezes ?? 0} freezes, ${t.httpErrors ?? 0} errors`]);
+    const feeds = d.feeds || [];
+    if (feeds.length) {
+      const ok = feeds.filter(f => f.ok).length;
+      rows.push(["Feeds measured", `${ok} usable of ${feeds.length}`]);
+    }
+  } catch (e) {
+    rows.push(["Status", "Could not reach the TV"]);
+  }
+  rows.forEach(([k, v]) => {
+    const r = document.createElement("div");
+    r.className = "set-row";
+    r.innerHTML = `<span class="sr-k">${escapeHtml(k)}</span>` +
+                  `<span class="sr-v">${escapeHtml(String(v))}</span>`;
+    box.appendChild(r);
+  });
+}
+
+async function fetchDiagText() {
+  const d = await get("/api/diagnostics");
+  return JSON.stringify(d, null, 2);
+}
+
+const diagCopyEl = document.getElementById("diagCopy");
+if (diagCopyEl) diagCopyEl.onclick = async () => {
+  try {
+    const text = await fetchDiagText();
+    // navigator.clipboard needs a secure context; the remote is plain
+    // http on the LAN, so fall back to a hidden textarea + execCommand.
+    let done = false;
+    if (navigator.clipboard && window.isSecureContext) {
+      try { await navigator.clipboard.writeText(text); done = true; } catch (e) {}
+    }
+    if (!done) {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select();
+      try { done = document.execCommand("copy"); } catch (e) {}
+      ta.remove();
+    }
+    showToast(done ? "Report copied — paste it to us" : "Couldn't copy; use Download");
+  } catch (e) { showToast("Couldn't build report"); }
+};
+
+const diagDlEl = document.getElementById("diagDownload");
+if (diagDlEl) diagDlEl.onclick = async () => {
+  try {
+    const text = await fetchDiagText();
+    const blob = new Blob([text], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "vijanabarubaru-report.json";
+    document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  } catch (e) { showToast("Couldn't build report"); }
+};
+
+const diagViewEl = document.getElementById("diagView");
+if (diagViewEl) diagViewEl.onclick = async () => {
+  const out = $("#diagOut");
+  if (!out.classList.contains("hidden")) { out.classList.add("hidden"); return; }
+  out.textContent = "Building…";
+  out.classList.remove("hidden");
+  try { out.textContent = await fetchDiagText(); }
+  catch (e) { out.textContent = "Could not build the report."; }
+};
 
 /** How many channel pills to show before collapsing the rest behind a
  *  "+N more" control. Fixtures routinely carry 40-60 mirrors; rendering

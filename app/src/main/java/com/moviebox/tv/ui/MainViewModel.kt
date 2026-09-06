@@ -1162,7 +1162,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             val ranker = com.moviebox.tv.data.live.FeedRanker
             val exclude = autoSwitchTried + current
-            var pick = ranker.best(siblings.keys, exclude)
+            var pick = ranker.best(siblings.keys, exclude, names = siblings)
             if (pick == null) {
                 // Nothing fresh enough to trust — measure, then decide.
                 com.moviebox.tv.data.live.LiveStatus.note(
@@ -1171,7 +1171,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val candidates = siblings.keys.filter { it !in exclude }
                     .take(AUTO_SWITCH_PROBE_LIMIT)
                 ranker.probeAll(candidates) { liveProxy.probe(it) }
-                pick = ranker.best(siblings.keys, exclude)
+                pick = ranker.best(siblings.keys, exclude, names = siblings)
             }
             if (pick == null) {
                 android.util.Log.w(
@@ -1186,7 +1186,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             android.util.Log.w(
                 "LiveDiag",
                 "AUTOSWITCH $current -> ${pick.channelId} ($name) " +
-                    "headroom=${pick.headroom} reason=$reason",
+                    "headroom=${pick.headroom} " +
+                    "lang=${com.moviebox.tv.data.live.ChannelLanguage.guess(name)} " +
+                    "reason=$reason",
             )
             autoSwitchTried.add(current)
             lastAutoSwitchAt = android.os.SystemClock.elapsedRealtime()

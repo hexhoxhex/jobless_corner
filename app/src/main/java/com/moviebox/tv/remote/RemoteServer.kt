@@ -777,6 +777,11 @@ class RemoteServer(
                         .put("id", cid)
                         .put("name", name)
                         .put("current", cid == id)
+                        .put(
+                            "lang",
+                            com.moviebox.tv.data.live.ChannelLanguage
+                                .guess(name).name,
+                        )
                     ranker.cached(cid)?.result?.let { r ->
                         o.put("ok", r.ok)
                             .put("playlist_ms", r.playlistMs)
@@ -811,6 +816,15 @@ class RemoteServer(
                     RemoteController.playLiveChannel(id)
                     ok()
                 }
+            }
+
+            // Shareable diagnostics bundle. Anonymous by construction --
+            // see DiagnosticsReport: no serial/IP/account, viewing titles
+            // redacted, URLs reduced to host, fresh random report id.
+            uri == "/api/diagnostics" -> {
+                json(
+                    com.moviebox.tv.debug.DiagnosticsReport.build(context)
+                )
             }
 
             uri == "/api/debug" -> {

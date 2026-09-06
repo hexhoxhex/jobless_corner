@@ -110,12 +110,27 @@ object FeedRanker {
         candidates: Collection<String>,
         excluding: Set<String> = emptySet(),
         minHeadroom: Float = MIN_HEADROOM,
-    ): LiveStreamProxy.ProbeResult? =
-        candidates.asSequence()
+        /** id -> display name, for the language preference. */
+        names: Map<String, String> = emptyMap(),
+    ): LiveStreamProxy.ProbeResult? {
+        val usable = candidates.asSequence()
             .filter { it !in excluding }
             .mapNotNull { cached(it)?.result }
             .filter { it.ok && it.headroom >= minHeadroom }
-            .maxByOrNull { it.headroom }
+            .toList()
+        if (usable.isEmpty()) return null
+        // Every feed here already clears the headroom bar, so they are all
+        // watchable. Order by LANGUAGE first: the healthiest mirror of a
+        // Premier League match is routinely "DAZN1 Spain" or "Canal+ Extra
+        // 1 Poland", and silently moving an English viewer onto Spanish
+        // commentary is its own failure. Headroom breaks the tie inside a
+        // language group, so we still take the sturdiest English feed.
+        return usable.minWithOrNull(
+            compareBy<LiveStreamProxy.ProbeResult> {
+                ChannelLanguage.preference(names[it.channelId])
+            }.thenByDescending { it.headroom }
+        )
+    }
 
     /** Forget everything — used when the user changes fixture entirely. */
     fun clear() {

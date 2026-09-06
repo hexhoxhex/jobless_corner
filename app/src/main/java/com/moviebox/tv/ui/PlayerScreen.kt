@@ -1226,6 +1226,17 @@ private const val AUTOSWITCH_LOW_BUFFER_MS = 2_500L
  *  single rebuffer never triggers it, short enough to rescue a match. */
 private const val AUTOSWITCH_STALL_TICKS = 25
 
+/** A live buffer that never climbs above this is running on fumes. Healthy
+ *  feeds on this box hold ~20 s; 9 s is comfortably below anything that is
+ *  actually coping. */
+private const val THIN_BUFFER_MS = 9_000L
+
+/** Seconds of chronically thin buffer before looking for a better feed.
+ *  Deliberately long (90 s): this fires while the picture is still fine, so
+ *  it must be sure the feed genuinely cannot build a cushion rather than
+ *  reacting to a slow patch. */
+private const val THIN_BUFFER_TICKS = 90
+
 /** Live rendition ceiling — see the track-selector comment. 720p at up to
  *  ~4.5 Mbps is what this box demonstrably sustains; the 9 Mbps 1080p rung
  *  starves the buffer and freezes. Soft constraints: a channel that only
@@ -2474,6 +2485,7 @@ private fun VideoPlayer(
         // Rolling stall score for the auto-switch trigger (1 Hz ticks).
         var liveStallScore = 0
         var liveStallDecay = 0
+        var thinBufferTicks = 0
         while (true) {
             kotlinx.coroutines.delay(1_000)
             // ---- Frame-rate-aware tunneling correction (app-wide) ----
@@ -2714,9 +2726,36 @@ private fun VideoPlayer(
                 }
                 if (liveStallScore >= AUTOSWITCH_STALL_TICKS) {
                     liveStallScore = 0
+                    thinBufferTicks = 0
                     android.util.Log.w(
                         "LiveDiag",
                         "PLAYER sustained live stalling — asking for a better feed",
+                    )
+                    onBandwidthBound()
+                }
+
+                // Chronically thin buffer, measured BEFORE anything freezes.
+                //
+                // Sky Sports Main Event at 13790 kbps played 79/79 samples
+                // with zero stalls, yet held only 3.8-12.9 s of buffer
+                // (avg 7.6) where a healthy feed on this box sits at ~20 s.
+                // It never tripped the stall trigger and never would --
+                // until one hiccup dropped it. Waiting for the freeze the
+                // user can see means always reacting too late, so treat a
+                // buffer that cannot climb as the leading indicator it is.
+                if (exo.isPlaying &&
+                    exo.totalBufferedDuration in 1 until THIN_BUFFER_MS
+                ) {
+                    thinBufferTicks += 1
+                } else if (thinBufferTicks > 0) {
+                    thinBufferTicks -= 1
+                }
+                if (thinBufferTicks >= THIN_BUFFER_TICKS) {
+                    thinBufferTicks = 0
+                    android.util.Log.w(
+                        "LiveDiag",
+                        "PLAYER buffer stuck under ${THIN_BUFFER_MS}ms for " +
+                            "${THIN_BUFFER_TICKS}s — pre-emptive feed check",
                     )
                     onBandwidthBound()
                 }
