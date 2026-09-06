@@ -625,6 +625,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         liveChannels = c, liveSchedule = s, liveLoading = false,
                     )
                 }
+                // Every schedule refresh is a chance for a followed team's
+                // fixture to have appeared, moved, or been added to. The
+                // scheduler is idempotent (alarms keyed by event, fires
+                // recorded in a ledger) so re-running it here is cheap and
+                // can't double-alert.
+                runCatching {
+                    com.moviebox.tv.reminders.ReminderWarm.cache(s)
+                    com.moviebox.tv.reminders.ReminderScheduler
+                        .reschedule(getApplication(), s)
+                }
             }.onFailure { e ->
                 _state.update {
                     it.copy(liveLoading = false, liveError = e.message)
@@ -701,6 +711,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      *  AudioTrack and crashes the player. Remember the channel and disable
      *  tunneling for the next attempt — the resample chain then runs. */
     private val nonTunnelingChannels = mutableSetOf<String>()
+
+    private companion object {
+        /** Never auto-switch more often than this. Two minutes is longer
+         *  than a recoverable CDN wobble, so a feed gets a real chance to
+         *  settle before we give up on it. */
+        const val AUTO_SWITCH_COOLDOWN_MS = 2 * 60 * 1000L
+
+        /** Probes to run when a stall forces a decision with no fresh
+         *  measurements. Bounded so recovery stays quick. */
+        const val AUTO_SWITCH_PROBE_LIMIT = 6
+    }
 
     fun disableTunnelingFor(channelId: String): Boolean =
         channelId in nonTunnelingChannels
@@ -1087,6 +1108,101 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      *  if the user invokes it before the LIVE tab has loaded, we load the
      *  catalog first, then play. Without that, hitting the API from cold
      *  silently no-ops because `liveChannels` is empty. */
+    /** Measure a feed without touching playback. See LiveStreamProxy.probe. */
+    suspend fun probeChannel(channelId: String) = liveProxy.probe(channelId)
+
+    /** Channels carrying the same fixture as [channelId]. */
+    fun siblingFeeds(channelId: String): Map<String, String> =
+        com.moviebox.tv.data.live.FeedRanker.siblingsOf(
+            channelId,
+            com.moviebox.tv.reminders.ReminderWarm
+                .scheduleOrCached(_state.value.liveSchedule),
+        )
+
+    /**
+     * Measure every mirror of the current fixture, in the background.
+     * Results land in [FeedRanker] as they arrive, so the phone can render
+     * a partial ranking while it runs.
+     */
+    fun rankFeeds(channelId: String) {
+        val ids = siblingFeeds(channelId).keys.toList()
+        if (ids.isEmpty()) return
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            com.moviebox.tv.data.live.FeedRanker.probeAll(ids) { liveProxy.probe(it) }
+        }
+    }
+
+    /** Feeds auto-switch already tried and that disappointed. */
+    private val autoSwitchTried = mutableSetOf<String>()
+    private var lastAutoSwitchAt = 0L
+
+    /**
+     * The current feed can't sustain playback — move to a mirror that can.
+     *
+     * Only fires on a measured bandwidth-bound stall, never on an ordinary
+     * hiccup, and never more than once per [AUTO_SWITCH_COOLDOWN_MS] so a
+     * bad night can't turn into channel roulette. If nothing has been
+     * measured yet it probes first, which costs a few seconds but beats
+     * switching blind to a feed that may be worse.
+     */
+    fun autoSwitchFeed(reason: String) {
+        val current = _state.value.currentLiveChannel?.id ?: return
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - lastAutoSwitchAt < AUTO_SWITCH_COOLDOWN_MS) {
+            android.util.Log.i(
+                "LiveDiag", "AUTOSWITCH suppressed (cooldown) reason=$reason",
+            )
+            return
+        }
+        val siblings = siblingFeeds(current)
+        if (siblings.size <= 1) {
+            android.util.Log.i("LiveDiag", "AUTOSWITCH no siblings for $current")
+            return
+        }
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val ranker = com.moviebox.tv.data.live.FeedRanker
+            val exclude = autoSwitchTried + current
+            var pick = ranker.best(siblings.keys, exclude)
+            if (pick == null) {
+                // Nothing fresh enough to trust — measure, then decide.
+                com.moviebox.tv.data.live.LiveStatus.note(
+                    "⚠  Checking other feeds for this match…",
+                )
+                val candidates = siblings.keys.filter { it !in exclude }
+                    .take(AUTO_SWITCH_PROBE_LIMIT)
+                ranker.probeAll(candidates) { liveProxy.probe(it) }
+                pick = ranker.best(siblings.keys, exclude)
+            }
+            if (pick == null) {
+                android.util.Log.w(
+                    "LiveDiag",
+                    "AUTOSWITCH found no feed clearing headroom " +
+                        "${com.moviebox.tv.data.live.FeedRanker.MIN_HEADROOM} " +
+                        "among ${siblings.size}",
+                )
+                return@launch
+            }
+            val name = siblings[pick.channelId] ?: pick.channelId
+            android.util.Log.w(
+                "LiveDiag",
+                "AUTOSWITCH $current -> ${pick.channelId} ($name) " +
+                    "headroom=${pick.headroom} reason=$reason",
+            )
+            autoSwitchTried.add(current)
+            lastAutoSwitchAt = android.os.SystemClock.elapsedRealtime()
+            com.moviebox.tv.data.live.LiveStatus.note("↻  Switching to $name…")
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                playScheduleChannel(pick.channelId)
+            }
+        }
+    }
+
+    /** Clear auto-switch memory when the user picks a channel themselves. */
+    fun resetAutoSwitch() {
+        autoSwitchTried.clear()
+        lastAutoSwitchAt = 0L
+    }
+
     fun playScheduleChannel(channelId: String) {
         val cached = _state.value.liveChannels.firstOrNull { it.id == channelId }
         if (cached != null) {

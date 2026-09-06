@@ -357,6 +357,22 @@ object RemoteController {
      *  [ensureLiveLoaded] and retry shortly after. */
     fun liveChannels(): List<Channel> = vm?.state?.value?.liveChannels ?: emptyList()
 
+    /** Channel id currently on screen, for defaulting /api/live/feeds. */
+    fun currentLiveChannelId(): String? = vm?.state?.value?.currentLiveChannel?.id
+
+    /** Exercise the auto-switch path on demand (diagnostics). */
+    fun forceAutoSwitch() { vm?.autoSwitchFeed("manual") }
+
+    /** Kick off a background probe of every mirror of this fixture. */
+    fun rankFeeds(channelId: String) { vm?.rankFeeds(channelId) }
+
+    /** Channels carrying the same fixture as [channelId]. */
+    fun siblingFeeds(channelId: String): Map<String, String> =
+        vm?.siblingFeeds(channelId) ?: emptyMap()
+
+    /** Probe a feed's health without disturbing what is playing. */
+    suspend fun probeChannel(channelId: String) = vm?.probeChannel(channelId)
+
     fun liveSchedule(): List<ScheduleEvent> =
         vm?.state?.value?.liveSchedule ?: emptyList()
 

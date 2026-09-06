@@ -64,6 +64,11 @@ import com.moviebox.tv.ui.theme.SurfaceElevated
 import com.moviebox.tv.ui.theme.TextMuted
 import com.moviebox.tv.ui.theme.TextPrimary
 
+/** How long an event stays listed after it starts. Live events have no
+ *  published runtime, so this stands in for "probably still on air" — long
+ *  enough for a match or a film, matching the upstream feed's own grace. */
+private const val SCHEDULE_GRACE_SEC = 3 * 60 * 60L
+
 @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable
 fun LiveTvScreen(state: UiState, vm: MainViewModel) {
@@ -427,13 +432,24 @@ private fun ScheduleView(state: UiState, vm: MainViewModel, isTv: Boolean) {
         // aired. Without this filter the schedule shows yesterday's morning
         // shows alongside tonight's events because the scraper still hands
         // them up while they're inside the 3 h grace window.
+        // Keep an event listed for SCHEDULE_GRACE_SEC after it starts. The
+        // window was 1 h, which hid things that were still on air: a football
+        // match, a film, a Big Brother feed all run well past the hour, so the
+        // show you were watching vanished from the schedule mid-broadcast and
+        // you could not find it again. Measured against today's live feed:
+        // a 1 h window listed 215 events, 3 h lists 340 — 125 of which had
+        // started but were still running.
+        //
+        // 3 h also matches the grace the upstream scraper already applies when
+        // it decides what to keep publishing, so the two agree instead of the
+        // UI silently discarding rows the feed deliberately kept.
         val nowSec = System.currentTimeMillis() / 1000
         val live = state.liveSchedule.filter {
             val s = it.startUnix
-            s == null || s + 3_600 >= nowSec
+            s == null || s + SCHEDULE_GRACE_SEC >= nowSec
         }
         val buckets = LinkedHashMap<String, MutableList<ScheduleEvent>>()
-        for (e in live) buckets.getOrPut(e.category) { mutableListOf() }.add(e)
+        for (e in live) buckets.getOrPut(bucketNameFor(e)) { mutableListOf() }.add(e)
         // Sort inside each bucket by the authoritative startUnix when set;
         // unparseable entries sink to the end.
         buckets.map { (k, v) -> k to v.sortedBy { it.startUnix ?: Long.MAX_VALUE } }
@@ -490,6 +506,16 @@ private fun EventRow(
             Text(formatEventTime(e), color = Color(0xFF9CC8FF), fontSize = 12.sp,
                 fontWeight = FontWeight.Medium,
                 modifier = Modifier.padding(end = 10.dp))
+            // LIVE / NEXT badge. The list mixes what is on air right now with
+            // what is still to come, and a start time alone does not say which
+            // — you had to work it out against the clock. Every event in the
+            // feed carries a start time (checked: 701 of 701), so this is
+            // always decidable.
+            when (eventStatus(e)) {
+                EventStatus.LIVE -> StatusPill("LIVE", Color(0xFF21C55D))
+                EventStatus.NEXT -> StatusPill("NEXT", Color(0xFF9AA7AE))
+                EventStatus.ENDED -> Unit
+            }
             Text(e.title, color = TextPrimary, fontSize = 13.sp,
                 fontWeight = FontWeight.Medium, maxLines = 2,
                 overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
@@ -594,5 +620,78 @@ private fun initialsGradient(seed: String): Brush {
     val (a, b) = palette[(hash % palette.size).toInt()]
     return Brush.linearGradient(
         listOf(Color(a), Color(b)),
+    )
+}
+
+/** Which heading an event is filed under.
+ *
+ *  The feed dumps almost all football into two giant buckets — "All Soccer
+ *  Events" alone holds 186 of today's fixtures — so finding one match meant
+ *  scrolling a wall of unrelated games from every country. The league is
+ *  already in the title ("England - Premier League : Chelsea vs Brighton"),
+ *  and it parses for 99% of them (292 of 294 today, 83 distinct leagues), so
+ *  we file those under the league instead of the catch-all.
+ *
+ *  Only the generic football buckets are re-filed; a feed category that is
+ *  already specific ("England - League One") is left exactly as-is.
+ */
+private fun bucketNameFor(e: ScheduleEvent): String {
+    val cat = e.category
+    val generic = cat.equals("All Soccer Events", true) ||
+        cat.equals("Soccer", true) || cat.equals("Football", true)
+    if (!generic) return cat
+    return leagueFromTitle(e.title) ?: cat
+}
+
+/** "🏴 England - Premier League : Chelsea vs Brighton" -> "England - Premier
+ *  League". Null when the title has no league prefix, so the caller keeps the
+ *  feed's own category rather than inventing a heading. */
+private fun leagueFromTitle(title: String): String? {
+    val head = title.substringBefore(" : ", missingDelimiterValue = "")
+    if (head.isBlank() || head.length == title.length) return null
+    // Keep only characters a league name is actually made of. A character
+    // filter beats an emoji regex here: the titles carry flags (surrogate
+    // pairs), sport pictographs and variation selectors, and matching those
+    // by range is easy to get subtly wrong — while anything that is not a
+    // letter, digit or ordinary separator is decoration by definition.
+    val cleaned = buildString {
+        for (c in head) {
+            val keep = c.isLetterOrDigit() || c == ' ' || c == '-' ||
+                c == '\'' || c == '.' || c == '&' || c == '/'
+            append(if (keep) c else ' ')
+        }
+    }.replace(Regex("""\s{2,}"""), " ").trim().trim('-', ' ')
+    return cleaned.takeIf { it.length in 3..48 }
+}
+
+/** Where an event sits relative to now. */
+private enum class EventStatus { LIVE, NEXT, ENDED }
+
+/** Live events publish no runtime, so "on air" is a window rather than an end
+ *  time: started, and started recently enough to still plausibly be running.
+ *  Kept identical to the schedule's own grace so a row cannot claim to be live
+ *  after the list has stopped showing it. */
+private fun eventStatus(e: ScheduleEvent): EventStatus {
+    val start = e.startUnix ?: return EventStatus.NEXT
+    val now = System.currentTimeMillis() / 1000
+    return when {
+        start > now -> EventStatus.NEXT
+        now - start <= SCHEDULE_GRACE_SEC -> EventStatus.LIVE
+        else -> EventStatus.ENDED
+    }
+}
+
+@Composable
+private fun StatusPill(label: String, tint: Color) {
+    Text(
+        label,
+        color = tint,
+        fontSize = 9.sp,
+        fontWeight = FontWeight.Bold,
+        modifier = Modifier
+            .padding(end = 8.dp)
+            .clip(RoundedCornerShape(4.dp))
+            .background(tint.copy(alpha = 0.18f))
+            .padding(horizontal = 5.dp, vertical = 1.dp),
     )
 }

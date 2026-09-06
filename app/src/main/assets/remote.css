@@ -794,28 +794,60 @@ button.icon-btn { flex: 0 0 auto; padding: 8px 10px; }
   content: ""; flex: 1; height: 1px; background: var(--line);
 }
 .schedule-event {
-  display: flex; align-items: center; gap: 10px;
-  padding: 9px 0 9px 4px; border-bottom: 1px solid var(--line);
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 10px 0 10px 4px; border-bottom: 1px solid var(--line);
+}
+.schedule-event .se-head {
+  display: flex; align-items: center; gap: 8px; min-width: 0;
+}
+/* Follow stars + channel pills share a wrapping second line, so neither
+   competes with the title for horizontal space. */
+.schedule-event .se-actions {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  padding-left: calc(3.2em + 8px);
 }
 .schedule-event:last-child { border-bottom: none; }
+/* On-air / upcoming badge. Mirrors the TV schedule's LIVE (green) /
+   NEXT (grey) pills so the remote and the screen say the same thing,
+   and makes the live-first ordering legible instead of implicit. */
+.schedule-event .ev-status {
+  flex: 0 0 auto; font-size: .58rem; font-weight: 800;
+  letter-spacing: .05em; text-transform: uppercase;
+  padding: 2px 6px; border-radius: 4px; white-space: nowrap;
+}
+.schedule-event .ev-status.live {
+  background: rgba(33, 197, 93, .18); color: #21c55d;
+}
+.schedule-event .ev-status.next {
+  background: var(--surface-2); color: var(--muted);
+}
+.schedule-event.is-live .what { font-weight: 600; }
 .schedule-event .when {
   flex: 0 0 auto; min-width: 3.2em;
   font-variant-numeric: tabular-nums; font-weight: 600;
   color: var(--text); font-size: .85rem;
 }
 .schedule-event .what {
-  flex: 1 1 auto; font-size: .85rem; color: var(--text);
-  line-height: 1.25;
+  flex: 1 1 auto; min-width: 0; font-size: .85rem; color: var(--text);
+  line-height: 1.3;
+  /* Two lines max — long fixture names stay readable without letting one
+     row push everything else down the page. */
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 .schedule-event .chs {
-  flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 4px;
-  justify-content: flex-end; max-width: 45%;
+  display: flex; flex-wrap: wrap; gap: 4px;
+  justify-content: flex-start; min-width: 0;
 }
 .schedule-event .ch-pill {
   background: var(--accent); color: #fff;
   font-size: .65rem; font-weight: 700;
   padding: 3px 8px; border-radius: 12px;
   cursor: pointer; white-space: nowrap;
+  /* Cap + ellipsis. The catalog carries channels with names like
+     "Channel Not Listed #JustAsk" that rendered as a single 505px
+     nowrap pill and pushed the whole page into horizontal scroll. */
+  max-width: 58vw; overflow: hidden; text-overflow: ellipsis;
 }
 .schedule-event .ch-pill:active { transform: scale(.96); }
 /* Overflow channel dropdown — shows for events with 5+ mirror feeds
@@ -1077,3 +1109,148 @@ button.icon-btn { flex: 0 0 auto; padding: 8px 10px; }
   margin-top: 4px; font-size: 11px; color: var(--accent);
   letter-spacing: .04em;
 }
+
+
+/* ---------- Follow star on a schedule row ---------- */
+.schedule-event .ev-follows {
+  display: flex; flex-wrap: wrap; gap: 4px; min-width: 0;
+}
+.schedule-event .ev-follow {
+  flex: 0 0 auto; background: transparent; border: 1px solid var(--line);
+  color: var(--muted); border-radius: 12px; padding: 3px 7px;
+  font-size: .62rem; font-weight: 700; gap: 4px; max-width: 120px;
+}
+.schedule-event .ev-follow span {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.schedule-event .ev-follow.on {
+  background: var(--accent-soft); border-color: var(--accent); color: var(--accent);
+}
+.schedule-event .ev-follow .icon { width: 12px; height: 12px; }
+
+/* ---------- Following pane ---------- */
+.follow-hint { margin: 2px 2px 12px; }
+.follow-add { flex: 0 0 auto; padding: 12px 18px; }
+.follow-head {
+  margin: 22px 0 8px; font-size: .92rem; font-weight: 700; color: var(--text);
+  display: flex; align-items: center; gap: 8px;
+}
+.follow-head::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.follow-list { display: flex; flex-direction: column; gap: 8px; }
+.follow-row {
+  display: flex; align-items: center; gap: 8px;
+  background: var(--surface); border-radius: var(--radius); padding: 10px 12px;
+}
+.follow-row .fr-main { flex: 1 1 auto; min-width: 0; }
+.follow-row .fr-label {
+  font-size: .92rem; font-weight: 700; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.follow-row .fr-next { margin-top: 2px; }
+.follow-row .fr-bell,
+.follow-row .fr-del,
+.follow-row .fr-play {
+  flex: 0 0 36px; width: 36px; padding: 8px; border-radius: 10px;
+  background: var(--surface-2); color: var(--muted);
+}
+.follow-row .fr-bell.on { background: var(--accent-soft); color: var(--accent); }
+.follow-row .fr-play { background: var(--accent); color: #fff; }
+
+/* ---------- "Coming up for you" ---------- */
+.follow-upcoming { display: flex; flex-direction: column; gap: 6px; }
+.fu-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 4px; border-bottom: 1px solid var(--line);
+}
+.fu-row:last-child { border-bottom: none; }
+.fu-row .fu-main { flex: 1 1 auto; min-width: 0; }
+.fu-row .fu-title {
+  font-size: .86rem; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.fu-row.is-live .fu-title { font-weight: 600; }
+.fu-row .fu-sub { margin-top: 2px; }
+.fu-row .fu-play {
+  flex: 0 0 34px; width: 34px; padding: 7px; border-radius: 10px;
+  background: var(--accent); color: #fff;
+}
+
+/* ---------- Fired reminder banner ----------
+   Fixed above the tab bar so it survives a pane switch — the whole point
+   is that it reaches the user wherever they happen to be in the app. */
+.reminder-banner {
+  position: fixed; left: 12px; right: 12px;
+  bottom: calc(var(--tabbar-h) + 12px);
+  display: flex; align-items: center; gap: 10px;
+  background: var(--surface-2); border: 1px solid var(--accent);
+  border-radius: var(--radius); padding: 12px; z-index: 70;
+  box-shadow: var(--shadow);
+}
+.reminder-banner.hidden { display: none; }
+.reminder-banner > .icon { color: var(--accent); }
+.reminder-banner .rb-text { flex: 1 1 auto; min-width: 0; }
+.reminder-banner .rb-title {
+  font-size: .92rem; font-weight: 700; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.reminder-banner .rb-sub { margin-top: 2px; }
+.reminder-banner .rb-watch { flex: 0 0 auto; padding: 10px 16px; }
+.reminder-banner .rb-close { flex: 0 0 40px; }
+
+
+/* The schedule pane must never scroll the page sideways — a long fixture
+   name or a wall of channel pills wraps instead. */
+.schedule-list, .schedule-category, .schedule-event { max-width: 100%; min-width: 0; }
+.schedule-event .ev-follow { max-width: 46vw; }
+
+
+/* Channels carrying a followed fixture. Wraps under the fixture line so a
+   match on eight feeds can't push the row into horizontal scroll. */
+.follow-row .fr-channels {
+  display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px;
+}
+.follow-row .fr-ch {
+  flex: 0 0 auto; background: var(--accent); color: #fff;
+  font-size: .65rem; font-weight: 700; padding: 3px 8px;
+  border-radius: 12px; white-space: nowrap;
+  max-width: 58vw; overflow: hidden; text-overflow: ellipsis;
+}
+.follow-row .fr-ch:active { transform: scale(.96); }
+
+
+/* ---------- Density pass ----------
+   Tap targets were colliding: pills at 4px apart on a phone read as one
+   block and mis-tap. Roomier gaps, and a real minimum height on anything
+   tappable so a finger has something to aim at. */
+.schedule-event { padding: 12px 0 12px 4px; gap: 8px; }
+.schedule-event .se-actions { gap: 8px; margin-top: 2px; }
+.schedule-event .ev-follows { gap: 6px; }
+.schedule-event .chs { gap: 6px; }
+.schedule-event .ch-pill,
+.schedule-event .ch-more,
+.schedule-event .ev-follow {
+  min-height: 28px; display: inline-flex; align-items: center;
+  padding: 5px 10px;
+}
+.schedule-category { margin-bottom: 24px; }
+
+.follow-list { gap: 10px; }
+.follow-row { padding: 12px 14px; gap: 10px; }
+.follow-row .fr-channels { gap: 6px; margin-top: 8px; }
+.follow-row .fr-ch {
+  min-height: 28px; display: inline-flex; align-items: center;
+  padding: 5px 10px;
+}
+/* The "+N more" control reads as a control, not another channel. */
+.follow-row .fr-ch.more {
+  background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--line);
+}
+.follow-row .fr-bell,
+.follow-row .fr-del,
+.follow-row .fr-play { min-height: 38px; }
+
+.follow-upcoming { gap: 10px; }
+.fu-row { padding: 12px 4px; gap: 12px; }
+.fu-row .fu-play { min-height: 38px; }
+.follow-head { margin: 26px 0 10px; }

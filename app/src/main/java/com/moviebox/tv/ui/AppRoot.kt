@@ -9,7 +9,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -23,6 +26,8 @@ import androidx.compose.material.icons.filled.LiveTv
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SettingsRemote
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.NavigationBar
@@ -40,6 +45,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -53,6 +60,7 @@ import com.moviebox.tv.remote.RemoteController
 import com.moviebox.tv.ui.theme.Accent
 import com.moviebox.tv.ui.theme.Surface
 import com.moviebox.tv.ui.theme.TextMuted
+import com.moviebox.tv.ui.theme.TextPrimary
 
 /** Read with `val isTv = LocalIsTv.current` from any Composable. */
 val LocalIsTv = compositionLocalOf { false }
@@ -107,7 +115,93 @@ fun AppRoot(vm: MainViewModel = viewModel()) {
         if (state.screen != Screen.PLAYER && errorMsg != null) {
             ErrorBanner(errorMsg, onDismiss = vm::dismissError)
         }
+
+        // Fired match/show reminder. Deliberately drawn on the PLAYER
+        // screen too: "Man United kick off in 20 minutes" is worth a
+        // corner of the screen even mid-programme, which is the entire
+        // reason the user asked for it. It never changes what is
+        // playing on its own — that needs a deliberate press.
+        val reminder by com.moviebox.tv.reminders.ReminderScheduler
+            .pending.collectAsState()
+        reminder?.let { r ->
+            ReminderBanner(
+                payload = r,
+                onWatch = {
+                    r.channelId?.let { vm.playScheduleChannel(it) }
+                    com.moviebox.tv.reminders.ReminderScheduler.clearInApp()
+                },
+                onDismiss = {
+                    com.moviebox.tv.reminders.ReminderScheduler.clearInApp()
+                },
+            )
+        }
     }
+    }
+}
+
+/**
+ * On-screen reminder for a followed team or show.
+ *
+ * Android TV boxes frequently have no notification shade at all, so the
+ * system notification [com.moviebox.tv.reminders.ReminderNotifier] posts
+ * is the fallback and this is the real delivery. Auto-dismisses so a
+ * reminder nobody acts on doesn't sit over the picture forever.
+ */
+@Composable
+private fun BoxScope.ReminderBanner(
+    payload: com.moviebox.tv.reminders.ReminderPayload,
+    onWatch: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    LaunchedEffect(payload.eventKey) {
+        kotlinx.coroutines.delay(30_000)
+        onDismiss()
+    }
+    val minutes = ((payload.startUnix - System.currentTimeMillis() / 1000) / 60)
+        .coerceAtLeast(0)
+    val watch = remember { FocusRequester() }
+    // Grab focus so the d-pad's OK button acts on the banner immediately —
+    // otherwise the user has to hunt for it with arrow keys while the
+    // match starts.
+    LaunchedEffect(payload.eventKey) { runCatching { watch.requestFocus() } }
+
+    Row(
+        Modifier
+            .align(Alignment.TopEnd)
+            .statusBarsPadding()
+            .padding(top = 24.dp, end = 24.dp)
+            .widthIn(max = 460.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(Color(0xF21A2130))
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                payload.headline(),
+                color = TextPrimary, fontSize = 15.sp,
+                fontWeight = FontWeight.Bold, maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            )
+            Text(
+                buildString {
+                    append(if (minutes <= 0L) "starting now" else "starts in $minutes min")
+                    payload.channelName?.takeIf { it.isNotBlank() }
+                        ?.let { append(" · ").append(it) }
+                },
+                color = TextMuted, fontSize = 12.sp, maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            )
+        }
+        if (payload.channelId != null) {
+            Button(
+                onClick = onWatch,
+                modifier = Modifier.focusRequester(watch),
+                colors = ButtonDefaults.buttonColors(containerColor = Accent),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
+            ) { Text("Watch", fontSize = 13.sp, fontWeight = FontWeight.Bold) }
+        }
     }
 }
 

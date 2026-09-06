@@ -185,8 +185,17 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
     // starts (first-frame render or isPlaying=true, see below).
     val liveStatusMsg by com.moviebox.tv.data.live.LiveStatus.message
         .collectAsState()
-    LaunchedEffect(hasRenderedFrame) {
-        if (hasRenderedFrame) com.moviebox.tv.data.live.LiveStatus.clear()
+    // Keyed on `playing` as well as the first frame. Keying on
+    // hasRenderedFrame alone meant this ran exactly ONCE per player: the
+    // proxy posts "Buffering…" on every master fetch, including the
+    // re-resolves that happen mid-playback, and by then hasRenderedFrame was
+    // already true and never changed again — so nothing ever cleared the
+    // note and the badge sat on screen over a stream playing happily with a
+    // 21 s buffer. Re-running whenever playback resumes clears those.
+    LaunchedEffect(hasRenderedFrame, playing) {
+        if (hasRenderedFrame && playing) {
+            com.moviebox.tv.data.live.LiveStatus.clear()
+        }
     }
     // Don't clear on mediaUrl change — the resolver posts "Fetching
     // streams…" milliseconds after mediaUrl is set, and clearing here
@@ -557,9 +566,10 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                 preferSoftwareDecoder = state.currentLiveChannel?.id?.let {
                     vm.preferSoftwareDecoderFor(it)
                 } ?: false,
-                noTunneling = state.currentLiveChannel?.id?.let {
-                    vm.disableTunnelingFor(it)
-                } ?: false,
+                noTunneling = com.moviebox.tv.data.LiveTuning.forceNoTunneling ||
+                    (state.currentLiveChannel?.id?.let {
+                        vm.disableTunnelingFor(it)
+                    } ?: false),
                 onAudioTrackInitFailed = {
                     val chId = state.currentLiveChannel?.id
                     if (chId != null && !vm.disableTunnelingFor(chId)) {
@@ -567,6 +577,7 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                         true // rebuild scheduled — skip the WebView fallback
                     } else false
                 },
+                onBandwidthBound = { vm.autoSwitchFeed("bandwidth-bound") },
                 onCodecFlapping = {
                     state.currentLiveChannel?.id?.let {
                         vm.markChannelAsCodecFlapping(it)
@@ -1116,14 +1127,35 @@ private const val BEHIND_LIVE_WINDOW_MS: Long = 3 * 60 * 1000L
  *  "video hitches, audio fine". 18s in the 24s window still leaves 6s
  *  of back-edge margin. Paired with a gentle 1.06 max speed so the
  *  player doesn't burn the cushion racing back to the live edge. */
-// 25 s (was 18 s): live-edge distance the proactive-seek snaps to. When
-// the CDN inner-playlist hiccups for 3-4 s (observed in the FOX USA
-// World Cup session on Kenyan ISPs), the buffer drains and the player
-// drifts back. A larger target offset means we can accumulate more
-// cushion before the drift crosses the "snap forward" threshold — so
-// the codec-flushing seek fires less often. Trade-off is ~7 s more
-// latency behind absolute live, which is invisible on continuous
-// content like a football broadcast.
+// 25 s. NOTE (tried and REVERTED 2026-09-05): dropping this to 12 s to
+// keep the playhead further from the back edge looked right on paper --
+// a 25 s target sits past the 22 s maxOffset below and past a 24 s
+// manifest window. But measured, it made things markedly WORSE: BBC One
+// went from 45/50 samples with video and a ~22 s buffer to 3/71 with a
+// 1.4 s buffer. The reason is in the line below: the offset IS the
+// cushion. Channels publishing a ~60 s window (CNN measured dur=59041)
+// were relying on the full 25 s of it. If this is revisited, the fix is
+// to derive the offset from the ACTUAL window length per channel rather
+// than to lower the constant globally.
+//
+// Original rationale: the manifest window is ~24 s (6 x 4 s), and
+// the LiveConfiguration below sets maxOffset = 22 s. A 25 s target is
+// therefore BOTH past the configured maximum AND past the end of the
+// window — it asks the player to sit further behind live than there is
+// content to sit in, permanently parked on the back edge where segments
+// are actively rolling off.
+//
+// That is precisely what was observed on CNN:
+//   PLAYER STALL_RECOVERY pos=-33048 dur=60058 (anchored 33s behind)
+// followed by repeated `SEG 403` on segments that had aged out, a
+// re-prepare, and the same anchor again — the user's "plays, freezes,
+// says reconnecting, over and over".
+//
+// Each earlier bump was chasing more cushion to ride out CDN hiccups.
+// But cushion past the back edge is not cushion, it is a stall. 12 s
+// leaves roughly half the window ahead of the playhead as genuine
+// margin, and still sits comfortably inside the 60 s windows some
+// channels publish.
 private const val LIVE_TARGET_OFFSET_MS: Long = 25_000L
 
 /** Proactive drift prevention. When the player's position drops to
@@ -1178,6 +1210,29 @@ private const val BANDWIDTH_WINDOW_MS: Long = 3 * 60 * 1000L
  *  below it, fall back to SurfaceFlinger which does correct-speed frame
  *  conversion. 55 sits between 50 and 59.94 so both classes land right. */
 private const val TUNNEL_MIN_FPS: Float = 55f
+
+/** Buffer level at or above which a live status badge is considered stale
+ *  and cleared. Well under the ~25 s steady-state cushion, so it only stays
+ *  on screen when the stream is actually in trouble. */
+private const val BADGE_CLEAR_BUFFER_MS = 8_000L
+
+/** Buffer below this counts as starving for auto-switch purposes. Well
+ *  under the ~20 s a healthy feed holds on this box, so a feed has to be
+ *  in real trouble to score. */
+private const val AUTOSWITCH_LOW_BUFFER_MS = 2_500L
+
+/** Starving ticks (1 Hz) before we go looking for a better feed. ~25 s of
+ *  trouble inside a rolling window — long enough that a CDN wobble or a
+ *  single rebuffer never triggers it, short enough to rescue a match. */
+private const val AUTOSWITCH_STALL_TICKS = 25
+
+/** Live rendition ceiling — see the track-selector comment. 720p at up to
+ *  ~4.5 Mbps is what this box demonstrably sustains; the 9 Mbps 1080p rung
+ *  starves the buffer and freezes. Soft constraints: a channel that only
+ *  publishes 1080p still plays. */
+private const val LIVE_MAX_W = 1280
+private const val LIVE_MAX_H = 720
+private const val LIVE_MAX_BITRATE = 4_500_000
 
 /** How long before the FILE end to start showing the manual "Next"
  *  button. The user wants it unobtrusive — appearing only ~40s before
@@ -1594,6 +1649,8 @@ private fun VideoPlayer(
     /** Fired when [LiveCodecFlapDetector] sees the hardware decoder
      *  being torn down + rebuilt too often on a live stream. */
     onCodecFlapping: () -> Unit = {},
+    /** Fired when this feed is measurably heavier than the connection. */
+    onBandwidthBound: () -> Unit = {},
     /** Fired the first time AUDIO_TRACK_INIT_FAILED hits on a live
      *  channel. Caller is expected to mark the channel as needing
      *  tunneling OFF and bump a rebuild revision; the next prepare
@@ -1732,6 +1789,25 @@ private fun VideoPlayer(
             parameters = buildUponParameters()
                 .setPreferredAudioLanguages("en", "eng", "en-US")
                 .setTunnelingEnabled(isLive && !noTunneling)
+                .apply {
+                    // Cap the live rendition. Measured on this box, same
+                    // channel, minutes apart: the 1280x720 @ 1620 kbps rung
+                    // held a 24 s buffer with 1 rebuffer, while the
+                    // 1920x1080 @ 9000 kbps rung starved (avg 1576 ms
+                    // buffer, 7 rebuffers in 2 min) and froze constantly.
+                    // The panel is 60 Hz-locked and the box is memory- and
+                    // throughput-tight; 9 Mbps of 1080p59.94 is simply more
+                    // than this hardware sustains over this link.
+                    //
+                    // These are SOFT constraints — DefaultTrackSelector
+                    // exceeds them rather than failing when a channel
+                    // offers nothing lighter (plenty are 1080p-only), so a
+                    // single-rendition channel still plays.
+                    if (isLive) {
+                        setMaxVideoSize(LIVE_MAX_W, LIVE_MAX_H)
+                        setMaxVideoBitrate(LIVE_MAX_BITRATE)
+                    }
+                }
                 .build()
         }
     }
@@ -2315,6 +2391,10 @@ private fun VideoPlayer(
                     // the player resumes at 1.0× — no slow-motion penalty.
                     MediaItem.LiveConfiguration.Builder()
                         .setTargetOffsetMs(LIVE_TARGET_OFFSET_MS)
+                        // Bracket the target, and keep the whole range
+                        // inside the ~24 s window. The previous 14-22 s
+                        // range did not even contain the 25 s target it
+                        // was meant to bound.
                         .setMinOffsetMs(14_000)
                         .setMaxOffsetMs(22_000)
                         .setMinPlaybackSpeed(1.0f)
@@ -2388,6 +2468,12 @@ private fun VideoPlayer(
     // Push state to the mobile remote every 1s; persist resume pos every ~5s.
     LaunchedEffect(Unit) {
         var tick = 0
+        // Rolling counters for the rendered-fps calculation below.
+        var lastRenderedFrames = 0
+        var lastFpsAtMs = 0L
+        // Rolling stall score for the auto-switch trigger (1 Hz ticks).
+        var liveStallScore = 0
+        var liveStallDecay = 0
         while (true) {
             kotlinx.coroutines.delay(1_000)
             // ---- Frame-rate-aware tunneling correction (app-wide) ----
@@ -2407,7 +2493,9 @@ private fun VideoPlayer(
             //             correct-SPEED 50→60 (or 25→60) frame conversion.
             // One-time per channel; the re-prepare is a ~1s blip then
             // correct-speed playback. Applies to EVERY channel, not BBC.
-            if (liveState.value && !tunnelingDecided) {
+            if (liveState.value && !tunnelingDecided &&
+                !com.moviebox.tv.data.LiveTuning.forceNoTunneling
+            ) {
                 val fps = exo.videoFormat?.frameRate ?: 0f
                 if (fps > 0f) {
                     tunnelingDecided = true
@@ -2575,7 +2663,86 @@ private fun VideoPlayer(
                 exo.isPlaying,
             )
             // Feed the Debug pane's realtime metrics.
+            //
+            // fps is REAL rendered frames, not the format's declared rate:
+            // the delta of renderedOutputBufferCount over the tick. The
+            // declared rate says what the stream claims; this says what
+            // actually reached the screen, which is the only number that
+            // can distinguish "playing fine" from "audio with a black
+            // picture". It read a hardcoded 0 until now because nothing
+            // ever passed fps in — a dead gauge is worse than no gauge,
+            // because it looks like evidence.
+            val rendered = runCatching {
+                exo.videoDecoderCounters?.renderedOutputBufferCount ?: 0
+            }.getOrDefault(0)
+            val nowMs = android.os.SystemClock.elapsedRealtime()
+            val dtMs = nowMs - lastFpsAtMs
+            val fpsNow = if (lastFpsAtMs != 0L && dtMs >= 500) {
+                (((rendered - lastRenderedFrames).coerceAtLeast(0)) * 1000L / dtMs).toInt()
+            } else {
+                null
+            }
+            if (fpsNow != null) {
+                lastRenderedFrames = rendered
+                lastFpsAtMs = nowMs
+            } else if (lastFpsAtMs == 0L) {
+                lastRenderedFrames = rendered
+                lastFpsAtMs = nowMs
+            }
+            // ---- Auto-switch trigger ----
+            //
+            // Hooking this to the existing BEHIND_LIVE_WINDOW + hard-stall
+            // compound condition was too narrow: a feed that had already
+            // FAILED a bandwidth probe ran five minutes without ever
+            // satisfying it. So trigger on the symptom the viewer actually
+            // sees — the stream repeatedly not playing, or running on
+            // fumes — accumulated over a rolling window so one ordinary
+            // hiccup can't move anyone off a working feed.
+            if (liveState.value) {
+                val starving = !exo.isPlaying ||
+                    exo.totalBufferedDuration < AUTOSWITCH_LOW_BUFFER_MS
+                if (starving) {
+                    liveStallScore += 1
+                } else if (liveStallScore > 0) {
+                    // Decay twice as slowly as it builds: a feed that
+                    // limps has to genuinely recover to earn its place.
+                    liveStallDecay += 1
+                    if (liveStallDecay >= 2) {
+                        liveStallDecay = 0
+                        liveStallScore -= 1
+                    }
+                }
+                if (liveStallScore >= AUTOSWITCH_STALL_TICKS) {
+                    liveStallScore = 0
+                    android.util.Log.w(
+                        "LiveDiag",
+                        "PLAYER sustained live stalling — asking for a better feed",
+                    )
+                    onBandwidthBound()
+                }
+            }
+
+            // Clear a stale status badge whenever playback is comfortably
+            // healthy.
+            //
+            // The LaunchedEffect(hasRenderedFrame, playing) above only fires
+            // on a state CHANGE. Measured on a 5-minute Sky Sports watch:
+            // `playing` stayed true the entire time while the proxy kept
+            // posting "CDN slow — serving cached playlist…" on each slow
+            // playlist fetch, so nothing ever re-ran the effect and the
+            // badge sat on screen for 213 s of 300 s (71%) over a stream
+            // that was playing fine 98% of the window with a 16.6 s average
+            // buffer. A slow playlist fetch we absorbed is not something the
+            // viewer needs to be told about — only show it when the cushion
+            // is genuinely thin.
+            if (liveState.value &&
+                exo.isPlaying &&
+                exo.totalBufferedDuration >= BADGE_CLEAR_BUFFER_MS
+            ) {
+                com.moviebox.tv.data.live.LiveStatus.clear()
+            }
             com.moviebox.tv.debug.Telemetry.updateRealtime(
+                fps = fpsNow,
                 bufferMs = exo.totalBufferedDuration,
                 bitrateBps = exo.videoFormat?.bitrate?.toLong()?.takeIf { it > 0 } ?: 0L,
                 resolution = exo.videoFormat?.let { f ->
@@ -2788,9 +2955,16 @@ private fun VideoPlayer(
                                         "native (WebView won't help).",
                                 )
                                 stabilisingState.value(
-                                    "Low bandwidth — this channel needs a faster " +
-                                        "connection and may keep buffering",
+                                    "Low bandwidth — looking for a better feed…",
                                 )
+                                // Bandwidth-bound means THIS feed is heavier
+                                // than the connection, not that the match is
+                                // unwatchable: the same fixture is typically
+                                // mirrored across dozens of channels at very
+                                // different bitrates (measured 13380 kbps vs
+                                // 4640 kbps for the same game). Move to one
+                                // that fits instead of buffering forever.
+                                onBandwidthBound()
                                 behindLiveWindow.clear()
                                 // Recover in place; don't escalate to WebView.
                                 runCatching {

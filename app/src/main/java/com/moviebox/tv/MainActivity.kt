@@ -28,12 +28,14 @@ class MainActivity : ComponentActivity() {
         TastePrefs.init(applicationContext)
         UnavailableCatalog.init(applicationContext)
         com.moviebox.tv.data.MissingEpisodeCatalog.init(applicationContext)
+        com.moviebox.tv.data.LiveTuning.init(applicationContext)
         // Spin the mobile-remote server up eagerly. It used to wait until
         // the user navigated to the Remote QR screen, which means anyone
         // diagnosing reconnect issues over adb couldn't drive playback
         // via /api/live/play without first poking the TV's d-pad. Eager
         // start has no side effects when no client has paired.
         com.moviebox.tv.remote.RemoteServerManager.ensureStarted(this)
+        handlePlayIntent(intent)
         setContent {
             MovieBoxTheme {
                 Surface(Modifier.fillMaxSize(), color = Bg) {
@@ -41,6 +43,25 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handlePlayIntent(intent)
+    }
+
+    /**
+     * Deep link from a fired reminder's notification: open straight onto
+     * the channel carrying the match. playScheduleChannel already handles
+     * the cold case — if the live catalog hasn't loaded (very likely,
+     * since the notification may have launched us from dead) it fetches
+     * it first instead of silently no-opping on an empty channel list.
+     */
+    private fun handlePlayIntent(intent: android.content.Intent?) {
+        if (intent?.action != ACTION_PLAY_CHANNEL) return
+        val id = intent.getStringExtra(EXTRA_CHANNEL_ID) ?: return
+        vm.playScheduleChannel(id)
     }
 
     /** Notice TV-remote (D-pad) use so we can suggest the phone remote. */
@@ -129,5 +150,11 @@ class MainActivity : ComponentActivity() {
             }
         }
         return super.dispatchKeyEvent(event)
+    }
+
+    companion object {
+        /** Launch action used by a fired reminder's notification. */
+        const val ACTION_PLAY_CHANNEL = "com.moviebox.tv.PLAY_CHANNEL"
+        const val EXTRA_CHANNEL_ID = "channel_id"
     }
 }

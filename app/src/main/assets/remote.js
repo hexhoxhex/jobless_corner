@@ -745,7 +745,7 @@ async function renderDetailsContent(it) {
   const subParts = [];
   subParts.push(it.isSeries ? "TV" : "Movie");
   if (it.year)   subParts.push(it.year);
-  if (it.rating) subParts.push("★ " + it.rating.toFixed(1));
+  if (it.rating) subParts.push(ic("star","sm") + " " + it.rating.toFixed(1));
   $("#dSub").textContent = subParts.join(" · ");
   $("#dEpisodes").classList.toggle("hidden", !it.isSeries);
 
@@ -769,7 +769,7 @@ async function renderDetailsContent(it) {
     $("#dSub").textContent = [
       it.isSeries ? "TV" : "Movie",
       it.year || null,
-      rating ? "★ " + Number(rating).toFixed(1) : null,
+      rating ? ic("star","sm") + " " + Number(rating).toFixed(1) : null,
     ].filter(Boolean).join(" · ");
     if (d.trailer) showTrailerButton(d.trailer);
     renderCast(d.cast || []);
@@ -1088,9 +1088,16 @@ async function refresh() {
     }
     const volStr = (s.volume ?? "—") + (s.volume != null ? "%" : "");
     if ($("#volPct").textContent !== volStr) $("#volPct").textContent = volStr;
-    if (!volSliding && typeof s.volume === "number" &&
-        Number($("#volSlider").value) !== s.volume) {
-      $("#volSlider").value = s.volume;
+    if (typeof s.volume === "number") {
+      // The TV has caught up with what we asked for — stop shadowing it.
+      if (volPending !== null &&
+          (s.volume === volPending || Date.now() > volPendingUntil)) {
+        volPending = null;
+      }
+      const shadowing = volSliding || volPending !== null;
+      if (!shadowing && Number($("#volSlider").value) !== s.volume) {
+        $("#volSlider").value = s.volume;
+      }
     }
     syncTracks(s);
   } catch (e) { /* ignore */ }
@@ -1239,6 +1246,7 @@ $("#volUp").onclick = () => {
   const next = Math.min(100, cur + 7);
   $("#volSlider").value = next;
   $("#volPct").textContent = next + "%";
+  markVolumePending(next);   // same shadow as the slider, or the poll undoes it
   post("/api/volume?up=1");
 };
 $("#volDown").onclick = () => {
@@ -1246,6 +1254,7 @@ $("#volDown").onclick = () => {
   const next = Math.max(0, cur - 7);
   $("#volSlider").value = next;
   $("#volPct").textContent = next + "%";
+  markVolumePending(next);
   post("/api/volume?down=1");
 };
 
@@ -1258,6 +1267,18 @@ function parseTime(s) {
 
 /* ---------- volume slider ---------- */
 let volSendTimer = null;
+// What we last asked the TV for, and how long to trust it over /api/state.
+// Without this the slider fights the poller: the send is debounced and the TV
+// takes a moment to apply it, but `volSliding` clears the instant you lift
+// your finger — so the next poll writes the OLD volume back, and the one after
+// writes the new one. That is the slider jumping backward then forward while
+// you try to set it.
+let volPending = null;
+let volPendingUntil = 0;
+function markVolumePending(v) {
+  volPending = v;
+  volPendingUntil = Date.now() + 2500;
+}
 $("#volSlider").addEventListener("pointerdown", () => { volSliding = true; });
 $("#volSlider").addEventListener("pointerup",   () => { volSliding = false; });
 $("#volSlider").addEventListener("pointercancel",() => { volSliding = false; });
@@ -1268,6 +1289,7 @@ $("#volSlider").addEventListener("input", (e) => {
   // Debounce the network call — sliding fires `input` many times per second.
   // 60ms is below the perceptible threshold but still drops 90%+ of redundant
   // POSTs on a typical 5-second slide. Lower had glitchier feel on slow Wi-Fi.
+  markVolumePending(v);
   volSendTimer = setTimeout(() => {
     post("/api/volume?set=" + v);
   }, 60);
@@ -1676,11 +1698,236 @@ function selectLiveSubtab(which) {
   });
   $("#liveChannelsPane").classList.toggle("hidden", which !== "channels");
   $("#liveSchedulePane").classList.toggle("hidden", which !== "schedule");
+  $("#liveFollowingPane").classList.toggle("hidden", which !== "following");
   if (which === "schedule" && !liveScheduleLoaded) loadLiveSchedule();
+  if (which === "following") loadFollows();
 }
 document.querySelectorAll("#pane-live .subtab").forEach(b => {
   b.onclick = () => selectLiveSubtab(b.dataset.sub);
 });
+
+/** How many channel pills to show before collapsing the rest behind a
+ *  "+N more" control. Fixtures routinely carry 40-60 mirrors; rendering
+ *  them all turns every row into a wall. */
+const FEED_PILLS_INLINE = 3;
+
+/* ---------- Following (teams / leagues / shows) ----------
+   A follow is a standing query against the live schedule, not a saved
+   channel: "Manchester United" has no channel id — they turn up on
+   whichever feed carries the match that night. The TV owns the matching
+   (FixtureParser + FollowMatcher); this pane only renders it. */
+let followedKeys = new Set();
+let followsData = [];
+
+/** Trim "Manchester United" to something that fits a chip on a phone. */
+function shortSide(name) {
+  const n = String(name || "").trim();
+  return n.length <= 14 ? n : n.slice(0, 13).trimEnd() + "…";
+}
+
+/** "in 25 min" / "in 3h 10m" / "started 40 min ago". */
+function untilText(startUnix) {
+  if (!startUnix) return "";
+  const diff = Math.round(startUnix - Date.now() / 1000);
+  const mins = Math.round(Math.abs(diff) / 60);
+  const body = mins < 60
+    ? mins + " min"
+    : Math.floor(mins / 60) + "h " + (mins % 60) + "m";
+  return diff >= 0 ? "in " + body : body + " ago";
+}
+
+async function loadFollows() {
+  const list = $("#followList");
+  const up = $("#followUpcoming");
+  try {
+    followsData = await get("/api/follows");
+  } catch (e) {
+    list.innerHTML = '<div class="empty">Could not reach the TV.</div>';
+    return;
+  }
+  followedKeys = new Set(followsData.map(f => f.key));
+
+  if (followsData.length === 0) {
+    list.innerHTML = '<div class="empty">Nothing followed yet. Add your team ' +
+      'above, or tap the star next to a fixture in Schedule.</div>';
+  } else {
+    list.innerHTML = "";
+    followsData.forEach(f => {
+      const row = document.createElement("div");
+      row.className = "follow-row";
+      const next = f.next_start
+        ? `${untilText(f.next_start)}${f.next_opponent ? " · vs " + escapeHtml(f.next_opponent) : ""}`
+        : "nothing scheduled today";
+      row.innerHTML = `
+        <div class="fr-main">
+          <div class="fr-label">${escapeHtml(f.label)}</div>
+          <div class="fr-next muted small">${next}</div>
+        </div>
+        <button class="fr-bell${f.remind ? " on" : ""}" data-key="${escapeHtml(f.key)}"
+                title="${f.remind ? "Reminders on" : "Reminders off"}">
+          <svg class="icon sm"><use href="#${f.remind ? "i-bell" : "i-bell-off"}"/></svg>
+        </button>
+        <button class="fr-del ghost icon-only" data-key="${escapeHtml(f.key)}"
+                aria-label="Remove">
+          <svg class="icon sm"><use href="#i-trash"/></svg>
+        </button>`;
+      // Channels carrying the match. Showing ALL of them looked right until
+      // a real fixture turned up on 62 feeds and buried the row — so show a
+      // few and put the rest behind one control. The first-listed feed is
+      // not reliably the best, so the rest stay one tap away rather than
+      // hidden entirely.
+      const chs = f.next_channels || [];
+      if (chs.length > 0) {
+        const pills = document.createElement("div");
+        pills.className = "fr-channels";
+        const mkPill = (ch) => {
+          const b = document.createElement("button");
+          b.className = "fr-ch";
+          b.textContent = ch.name || ch.id;
+          b.title = "Watch on " + (ch.name || ch.id);
+          b.onclick = async () => {
+            try {
+              await post("/api/live/play?id=" + encodeURIComponent(ch.id));
+              showToast("Playing " + (ch.name || ch.id));
+            } catch (e) { showToast("Couldn't play"); }
+          };
+          return b;
+        };
+        chs.slice(0, FEED_PILLS_INLINE).forEach(ch => pills.appendChild(mkPill(ch)));
+        const rest = chs.slice(FEED_PILLS_INLINE);
+        if (rest.length > 0) {
+          const more = document.createElement("button");
+          more.className = "fr-ch more";
+          more.textContent = "+" + rest.length + " more";
+          more.onclick = () => {
+            more.remove();
+            rest.forEach(ch => pills.appendChild(mkPill(ch)));
+          };
+          pills.appendChild(more);
+        }
+        row.querySelector(".fr-main").appendChild(pills);
+      }
+      row.querySelector(".fr-bell").onclick = async (e) => {
+        const btn = e.currentTarget;
+        const on = !btn.classList.contains("on");
+        try {
+          await post("/api/follows/remind?on=" + on + "&key=" +
+                     encodeURIComponent(btn.dataset.key));
+          loadFollows();
+        } catch (err) { showToast("Couldn't save"); }
+      };
+      row.querySelector(".fr-del").onclick = async (e) => {
+        try {
+          await post("/api/follows/delete?key=" +
+                     encodeURIComponent(e.currentTarget.dataset.key));
+          loadFollows();
+          if (liveScheduleData) renderLiveSchedule(liveScheduleData);
+        } catch (err) { showToast("Couldn't remove"); }
+      };
+      list.appendChild(row);
+    });
+  }
+
+  // Everything coming up across all follows, soonest first.
+  try {
+    const items = await get("/api/follows/upcoming");
+    if (!items.length) {
+      up.innerHTML = '<div class="empty">Nothing coming up for your follows.</div>';
+    } else {
+      up.innerHTML = "";
+      items.forEach(it => {
+        const el = document.createElement("div");
+        el.className = "fu-row" + (it.live ? " is-live" : "");
+        const ch = (it.channels || [])[0];
+        el.innerHTML = `
+          <span class="ev-status ${it.live ? "live" : "next"}">${it.live ? "Live" : "Next"}</span>
+          <div class="fu-main">
+            <div class="fu-title">${escapeHtml(it.follow)}${
+              it.opponent ? " <span class=\'muted\'>vs</span> " + escapeHtml(it.opponent) : ""}</div>
+            <div class="fu-sub muted small">${escapeHtml(it.time || "")} · ${untilText(it.start_unix)}${
+              ch ? " · " + escapeHtml(ch.name || ch.id) : ""}</div>
+          </div>`;
+        if (ch) {
+          const b = document.createElement("button");
+          b.className = "fu-play";
+          b.innerHTML = '<svg class="icon sm"><use href="#i-play"/></svg>';
+          b.onclick = async () => {
+            try {
+              await post("/api/live/play?id=" + encodeURIComponent(ch.id));
+              showToast("Playing " + (ch.name || ch.id));
+            } catch (e) { showToast("Couldn't play"); }
+          };
+          el.appendChild(b);
+        }
+        up.appendChild(el);
+      });
+    }
+  } catch (e) { up.innerHTML = ""; }
+}
+
+const followAddBtn = document.getElementById("followAdd");
+const followQEl = document.getElementById("followQ");
+async function addFollowFromInput() {
+  const label = (followQEl.value || "").trim();
+  if (!label) return;
+  try {
+    // No kind= — the TV decides whether this is a team, a competition or
+    // a show by looking at how the name actually appears in the schedule.
+    const r = await post("/api/follows?label=" + encodeURIComponent(label));
+    followQEl.value = "";
+    // AUTO deliberately has no label — the TV resolves it per event, so
+  // there is no single word that would be honest here.
+  const what = { TEAM: "team", COMPETITION: "league", SHOW: "show" }[r && r.kind] || "";
+    showToast("Following " + label + (what ? " (" + what + ")" : ""));
+    loadFollows();
+    if (liveScheduleData) renderLiveSchedule(liveScheduleData);
+  } catch (e) { showToast("Couldn't add"); }
+}
+if (followAddBtn) followAddBtn.onclick = addFollowFromInput;
+if (followQEl) {
+  followQEl.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); addFollowFromInput(); }
+  });
+}
+
+/* ---------- Fired reminder banner ----------
+   Polled rather than pushed: the remote already polls /api/state on a
+   timer, and a reminder that shows up a few seconds late is still a
+   reminder. Not worth a websocket. */
+let lastReminderKey = null;
+async function pollReminder() {
+  let r;
+  try { r = await get("/api/reminders/pending"); } catch (e) { return; }
+  const banner = $("#reminderBanner");
+  if (!r || !r.key) { banner.classList.add("hidden"); return; }
+  if (r.key === lastReminderKey && !banner.classList.contains("hidden")) return;
+  lastReminderKey = r.key;
+  $("#rbTitle").textContent = r.headline || "Starting soon";
+  const mins = Math.round((r.start_unix - Date.now() / 1000) / 60);
+  $("#rbSub").textContent =
+    (mins > 0 ? "starts in " + mins + " min" : "starting now") +
+    (r.channel_name ? " · " + r.channel_name : "");
+  $("#rbWatch").style.display = r.channel_id ? "" : "none";
+  $("#rbWatch").onclick = async () => {
+    try {
+      await post("/api/live/play?id=" + encodeURIComponent(r.channel_id));
+      showToast("Playing " + (r.channel_name || ""));
+    } catch (e) { showToast("Couldn't play"); }
+    dismissReminder();
+  };
+  banner.classList.remove("hidden");
+}
+async function dismissReminder() {
+  $("#reminderBanner").classList.add("hidden");
+  try { await post("/api/reminders/dismiss"); } catch (e) {}
+}
+const rbCloseEl = document.getElementById("rbClose");
+if (rbCloseEl) rbCloseEl.onclick = dismissReminder;
+// Poll immediately as well as on the interval — a reminder that fired
+// while the phone was asleep should be on screen the moment the remote
+// is opened, not up to 20 seconds later.
+pollReminder();
+setInterval(pollReminder, 20000);
 
 /* ---------- Live Schedule ---------- */
 let liveScheduleData = null;
@@ -1711,6 +1958,11 @@ function classifyScheduleCategory(name) {
 
 async function loadLiveSchedule() {
   liveScheduleLoaded = true;
+  // Know what's already followed before the first render, otherwise every
+  // star draws empty until the user happens to open the Following pane.
+  try {
+    followedKeys = new Set((await get("/api/follows")).map(f => f.key));
+  } catch (e) { /* non-fatal — stars just start empty */ }
   const status = $("#liveScheduleStatus");
   const list = $("#liveScheduleList");
   status.textContent = "Loading schedule…";
@@ -1795,18 +2047,28 @@ function renderLiveSchedule(data) {
     const events = (g.events || []).filter(e => {
       let stillOnAir;
       let isLiveNow;
+      let startSort;
       if (typeof e.start_unix === "number" && e.start_unix > 0) {
         // Preferred path — real timestamps, timezone-free.
         stillOnAir = nowUnix < e.start_unix + EVENT_DURATION_SEC;
         isLiveNow = nowUnix >= e.start_unix;
+        startSort = e.start_unix;
       } else {
         // Legacy fallback: raw HH:MM time-of-day. Same 3h grace so a
         // match that started 2h ago still shows.
         const m = /^(\d{1,2}):(\d{2})$/.exec(e.time || "");
-        if (!m) return true; // don't drop unparseable — better safe
+        if (!m) {
+          // Don't drop unparseable — better safe. No usable clock, so
+          // treat it as upcoming and sort it to the end of its block.
+          e._live = false;
+          e._sort = Number.MAX_SAFE_INTEGER;
+          upcomingCount++;
+          return true;
+        }
         const evMinutes = parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
         stillOnAir = evMinutes >= nowMinutes - EVENT_DURATION_SEC / 60;
         isLiveNow = evMinutes <= nowMinutes;
+        startSort = evMinutes * 60;
       }
       if (!stillOnAir) return false;
       if (q) {
@@ -1816,10 +2078,33 @@ function renderLiveSchedule(data) {
       }
       if (isLiveNow) liveCount++;
       else upcomingCount++;
+      // Stashed on the event so the sort below and the LIVE/NEXT badge
+      // don't each have to redo the clock arithmetic.
+      e._live = isLiveNow;
+      e._sort = startSort;
       return true;
+    });
+    // What's on air now, then what's coming — the pane's whole job is
+    // answering "what can I watch right now". Inside the live block the
+    // newest start comes first (it has the most time left to run);
+    // upcoming is soonest-first so the next thing to air tops that half.
+    events.sort((a, b) => {
+      if (a._live !== b._live) return a._live ? -1 : 1;
+      return a._live ? b._sort - a._sort : a._sort - b._sort;
     });
     return { ...g, events };
   }).filter(g => g.events.length > 0);
+
+  // Same rule one level up: a category with something on air outranks a
+  // category that's entirely upcoming, so a live match is never buried
+  // under three blocks that don't start for hours. Ties keep the
+  // catalog's own order (Array#sort is stable).
+  filtered.sort((a, b) => {
+    const aLive = a.events.filter(e => e._live).length;
+    const bLive = b.events.filter(e => e._live).length;
+    if ((aLive > 0) !== (bLive > 0)) return aLive > 0 ? -1 : 1;
+    return bLive - aLive;
+  });
 
   status.textContent = filtered.length
     ? `${todayUtc} (UTC) — ${liveCount} on now, ${upcomingCount} upcoming`
@@ -1834,7 +2119,7 @@ function renderLiveSchedule(data) {
     block.appendChild(head);
     cat.events.forEach(ev => {
       const row = document.createElement("div");
-      row.className = "schedule-event";
+      row.className = "schedule-event" + (ev._live ? " is-live" : "");
       // Channel chips clickable — playing a channel from the schedule
       // does the same as tapping it in the grid. For FIFA World Cup-style
       // events that list 50-100+ mirror feeds, slicing to a few inline
@@ -1842,7 +2127,7 @@ function renderLiveSchedule(data) {
       // <select> dropdown listing them all so the user can pick by name
       // without scrolling a wall of pills.
       const channels = ev.channels || [];
-      const INLINE_CHIPS = 4;
+      const INLINE_CHIPS = FEED_PILLS_INLINE;
       const inline = channels.slice(0, INLINE_CHIPS);
       const overflow = channels.slice(INLINE_CHIPS);
       const chsHtml = inline.map(ch => {
@@ -1856,10 +2141,61 @@ function renderLiveSchedule(data) {
             `<option value="${ch.id}">${escapeHtml(ch.name || ch.id)}</option>`,
           ).join("")}
         </select>`;
+      // Same LIVE (green) / NEXT (grey) language the TV's own schedule
+      // uses, so the two surfaces read identically.
+      const statusHtml = ev._live
+        ? `<span class="ev-status live">Live</span>`
+        : `<span class="ev-status next">Next</span>`;
+      // One star per parsed side. `sides` comes from the TV (FixtureParser)
+      // so the phone never has to guess where "A vs B" splits, and both
+      // surfaces agree on the canonical key a follow is stored under.
+      const sides = ev.sides || [];
+      const followHtml = sides.length === 0 ? "" : sides.map(sd => {
+        const on = followedKeys.has(sd.key);
+        return `<button class="ev-follow${on ? " on" : ""}" data-key="${escapeHtml(sd.key)}"
+                  data-label="${escapeHtml(sd.name)}"
+                  title="${on ? "Following" : "Follow"} ${escapeHtml(sd.name)}">
+                  <svg class="icon sm"><use href="#i-star"/></svg>
+                  <span>${escapeHtml(shortSide(sd.name))}</span>
+                </button>`;
+      }).join("");
+      // Two lines, not one. Time + status + title share the top line so the
+      // title actually gets the width to be readable; follow stars and
+      // channel pills share a wrapping second line. Cramming all five onto
+      // one row overflowed a 375px phone by ~145px and squashed the title
+      // to 50px, which made the whole schedule unusable.
+      const actionsHtml = (followHtml || chsHtml || moreHtml)
+        ? `<div class="se-actions">
+             ${followHtml ? `<span class="ev-follows">${followHtml}</span>` : ""}
+             ${(chsHtml || moreHtml) ? `<span class="chs">${chsHtml}${moreHtml}</span>` : ""}
+           </div>`
+        : "";
       row.innerHTML = `
-        <span class="when">${escapeHtml(ev.time || "")}</span>
-        <span class="what">${escapeHtml(ev.title || "")}</span>
-        <span class="chs">${chsHtml}${moreHtml}</span>`;
+        <div class="se-head">
+          <span class="when">${escapeHtml(ev.time || "")}</span>
+          ${statusHtml}
+          <span class="what">${escapeHtml(ev.title || "")}</span>
+        </div>
+        ${actionsHtml}`;
+      row.querySelectorAll(".ev-follow").forEach(btn => {
+        btn.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          const key = btn.dataset.key, label = btn.dataset.label;
+          try {
+            if (followedKeys.has(key)) {
+              await post("/api/follows/delete?key=" + encodeURIComponent(key));
+              followedKeys.delete(key);
+              btn.classList.remove("on");
+              showToast("Unfollowed " + label);
+            } else {
+              await post("/api/follows?kind=TEAM&label=" + encodeURIComponent(label));
+              followedKeys.add(key);
+              btn.classList.add("on");
+              showToast("Following " + label + " — reminder 20 min before kickoff");
+            }
+          } catch (err) { showToast("Couldn't save"); }
+        });
+      });
       row.querySelectorAll(".ch-pill").forEach(pill => {
         pill.addEventListener("click", async () => {
           try {

@@ -69,8 +69,10 @@ interface FavouriteDao {
         DownloadEntity::class,
         ChannelHealthEntity::class,
         LiveFavouriteEntity::class,
+        FollowEntity::class,
+        ReminderFiredEntity::class,
     ],
-    version = 6,
+    version = 7,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -79,6 +81,8 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun downloads(): DownloadDao
     abstract fun channelHealth(): ChannelHealthDao
     abstract fun liveFavourites(): LiveFavouriteDao
+    abstract fun follows(): FollowDao
+    abstract fun remindersFired(): ReminderFiredDao
 
     companion object {
         @Volatile private var instance: AppDatabase? = null
@@ -106,6 +110,37 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /** v6 → v7: follows (teams/competitions/shows the user wants to be
+         *  reminded about) plus the fired-reminder ledger that keeps a
+         *  reschedule from alerting the same kickoff twice. Additive for
+         *  the same reason as MIGRATION_5_6 — nobody loses history. */
+        private val MIGRATION_6_7 = object : androidx.room.migration.Migration(6, 7) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `follows` (
+                        `key` TEXT NOT NULL,
+                        `label` TEXT NOT NULL,
+                        `kind` TEXT NOT NULL,
+                        `remindMinutes` INTEGER NOT NULL,
+                        `remind` INTEGER NOT NULL,
+                        `addedAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`key`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `reminders_fired` (
+                        `eventKey` TEXT NOT NULL,
+                        `firedAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`eventKey`)
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
         fun get(context: Context): AppDatabase =
             instance ?: synchronized(this) {
                 instance ?: Room.databaseBuilder(
@@ -113,7 +148,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "moviebox.db",
                 )
-                    .addMigrations(MIGRATION_5_6)
+                    .addMigrations(MIGRATION_5_6, MIGRATION_6_7)
                     .fallbackToDestructiveMigration()
                     .build()
                     .also { instance = it }

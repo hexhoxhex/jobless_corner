@@ -74,6 +74,18 @@
     <symbol id="i-star" viewBox="0 0 24 24" fill="currentColor">
       <path d="M12 2l3 6.5 7 1-5 5 1 7-6-3.5-6 3.5 1-7-5-5 7-1z"/>
     </symbol>
+    <symbol id="i-bell" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/>
+      <path d="M13.7 21a2 2 0 0 1-3.4 0"/>
+    </symbol>
+    <symbol id="i-bell-off" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M13.7 21a2 2 0 0 1-3.4 0"/>
+      <path d="M18.6 13A17 17 0 0 1 18 8a6 6 0 0 0-9.3-5"/>
+      <path d="M6.3 6.3A6 6 0 0 0 6 8c0 7-3 9-3 9h14"/>
+      <path d="M2 2l20 20"/>
+    </symbol>
     <symbol id="i-users" viewBox="0 0 24 24" fill="none" stroke="currentColor"
             stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
       <circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.6 2.7-6 6-6s6 2.4 6 6"/>
@@ -261,11 +273,11 @@
     </div>
 
     <!-- Trailer modal: a YouTube embed shown in-page when the user taps
-         Trailer. Closed by the ✕ or tapping the backdrop. -->
+         Trailer. Closed by the close button or tapping the backdrop. -->
     <div id="trailerModal" class="trailer-modal hidden">
       <div class="trailer-backdrop"></div>
       <div class="trailer-box">
-        <button id="trailerClose" class="trailer-close" aria-label="Close">✕</button>
+        <button id="trailerClose" class="trailer-close" aria-label="Close"><svg class="icon"><use href="#i-close"/></svg></button>
         <div id="trailerFrameWrap" class="trailer-frame"></div>
       </div>
     </div>
@@ -328,12 +340,12 @@
            default; JS toggles the row's `data-show-eps` attribute based
            on whether the TV is on an episode (state.playerEp != null). -->
       <button id="epList" class="ghost np-eps np-eps-btn" data-show-eps="false">
-        ☰ All episodes
+        <svg class="icon"><use href="#i-tune"/></svg> All episodes
       </button>
       <div class="row np-eps" data-show-eps="false">
         <button id="epPrev" class="ghost">⏮ Prev ep</button>
         <button id="epNext" class="ghost">Next ep ⏭</button>
-        <button id="npClose" class="ghost">✕ Stop</button>
+        <button id="npClose" class="ghost"><svg class="icon"><use href="#i-close"/></svg> Stop</button>
       </div>
     </div>
     <div class="card" id="volCard" hidden>
@@ -425,6 +437,19 @@
   </section>
 
   <!-- DOWNLOADS -->
+  <!-- Fired reminder. Hidden until /api/reminders/pending returns one. -->
+  <div id="reminderBanner" class="reminder-banner hidden">
+    <svg class="icon"><use href="#i-bell"/></svg>
+    <div class="rb-text">
+      <div class="rb-title" id="rbTitle"></div>
+      <div class="rb-sub muted small" id="rbSub"></div>
+    </div>
+    <button id="rbWatch" class="primary rb-watch">Watch</button>
+    <button id="rbClose" class="ghost icon-only rb-close" aria-label="Dismiss">
+      <svg class="icon"><use href="#i-close"/></svg>
+    </button>
+  </div>
+
   <!-- LIVE TV -->
   <section id="pane-live" class="pane">
     <!-- Two sub-tabs at the top: Channels grid, Schedule grouped by category.
@@ -435,6 +460,9 @@
       </button>
       <button id="liveSubSchedule" class="subtab" data-sub="schedule">
         Schedule
+      </button>
+      <button id="liveSubFollowing" class="subtab" data-sub="following">
+        Following
       </button>
     </div>
 
@@ -463,6 +491,26 @@
       <div id="schedChips" class="chipbar"></div>
       <div class="livestatus muted small" id="liveScheduleStatus"></div>
       <div id="liveScheduleList" class="schedule-list"></div>
+    </div>
+
+    <!-- Following: teams / competitions / shows to be reminded about.
+         The schedule is the data source, so this pane is really a saved
+         query over it rather than a separate catalog. -->
+    <div id="liveFollowingPane" class="hidden">
+      <div class="searchbar">
+        <div class="field">
+          <svg class="icon"><use href="#i-star"/></svg>
+          <input id="followQ" type="text" autocomplete="off"
+                 placeholder="Add a team, league or show…"/>
+        </div>
+        <button id="followAdd" class="primary follow-add">Add</button>
+      </div>
+      <div class="muted small follow-hint">
+        Reminds you 20 minutes before anything you follow starts.
+      </div>
+      <div id="followList" class="follow-list"></div>
+      <h3 class="follow-head">Coming up for you</h3>
+      <div id="followUpcoming" class="follow-upcoming"></div>
     </div>
   </section>
 

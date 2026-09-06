@@ -298,13 +298,23 @@ class RemoteServer(
                 val seen = HashSet<String>()
                 RemoteController.history().forEach {
                     val isSeries = it.season > 0 || it.episode > 0 || it.type == 2
+                    // Some rows stored the PLAYER's display title, which
+                    // carries the episode prefix ("S1E38 · Pursuit of Jade").
+                    // That defeated de-duplication — every episode looked like
+                    // a different show, so one series filled the list with a
+                    // row per episode instead of appearing once. Strip it for
+                    // both the key and what we show.
+                    val showTitle = it.title
+                        .replace(Regex("""^S\d+\s*E\d+\s*[·\-]\s*"""), "")
+                        .trim()
+                        .ifBlank { it.title }
                     // Collapse title variants: strip leading article, season
                     // decorations ("S24", "S1-S5") and non-alphanumerics, so
                     // the same show from different providers folds into one.
                     val dedupeKey = buildString {
                         append(if (isSeries) "s:" else "m:")
                         append(
-                            it.title.lowercase()
+                            showTitle.lowercase()
                                 .replace(Regex("""\bs\d{1,2}(\s*-\s*s?\d{1,2})?\b"""), " ")
                                 .replace(Regex("""^(the|a|an)\s+"""), "")
                                 .replace(Regex("[^a-z0-9]+"), ""),
@@ -317,7 +327,7 @@ class RemoteServer(
                     arr.put(
                         JSONObject()
                             .put("key", it.key)
-                            .put("title", it.title)
+                            .put("title", showTitle)
                             .put("cover", cover)
                             .put("season", it.season)
                             .put("episode", it.episode)
@@ -495,6 +505,29 @@ class RemoteServer(
                             .put("title", e.title)
                             .put("channels", chArr)
                         e.startUnix?.let { ev.put("start_unix", it) }
+                        // Parsed sides + competition, so the phone can offer
+                        // "Follow Hull City" / "Follow Aston Villa" on a row
+                        // without reimplementing the fixture parser in JS.
+                        // One parser, one alias table, one place to fix it.
+                        val fx = com.moviebox.tv.data.live.FixtureParser.parse(e.title)
+                        if (fx.isFixture) {
+                            val sides = JSONArray()
+                            fx.sides.forEach { side ->
+                                sides.put(
+                                    JSONObject()
+                                        .put("name", side)
+                                        .put(
+                                            "key",
+                                            com.moviebox.tv.data.live
+                                                .FixtureParser.canonical(side),
+                                        )
+                                )
+                            }
+                            ev.put("sides", sides)
+                        }
+                        if (fx.competition.isNotBlank()) {
+                            ev.put("competition", fx.competition)
+                        }
                         evArr.put(ev)
                     }
                     arr.put(
@@ -504,6 +537,267 @@ class RemoteServer(
                     )
                 }
                 json(arr.toString())
+            }
+
+            // ---- Follows: teams / competitions / shows to be told about ----
+            uri == "/api/follows" && method == Method.GET -> {
+                val db = com.moviebox.tv.data.local.AppDatabase.get(context)
+                val rows = runBlocking { db.follows().allNow() }
+                // Fall back to the warm cache so a cold app (Live tab never
+                // opened) still reports real fixtures instead of claiming
+                // there is nothing on today.
+                val schedule = com.moviebox.tv.reminders.ReminderWarm
+                    .scheduleOrCached(RemoteController.liveSchedule())
+                val nowSec = System.currentTimeMillis() / 1000
+                val arr = JSONArray()
+                rows.forEach { f ->
+                    // Attach the soonest fixture so the list is useful on its
+                    // own -- "Manchester United, Sat 18:30 vs Arsenal" rather
+                    // than a bare name the user then has to go hunt for.
+                    val next = com.moviebox.tv.data.live.FollowMatcher
+                        .upcoming(listOf(f), schedule, nowSec)
+                        .firstOrNull()
+                    val o = JSONObject()
+                        .put("key", f.key)
+                        .put("label", f.label)
+                        .put("kind", f.kind)
+                        .put("remind", f.remind)
+                        .put("minutes", f.remindMinutes)
+                    if (next != null) {
+                        o.put("next_title", next.event.title)
+                        o.put("next_opponent", next.opponent ?: JSONObject.NULL)
+                        next.event.startUnix?.let { o.put("next_start", it) }
+                        val chArr = JSONArray()
+                        next.event.channels.forEach { ch ->
+                            chArr.put(JSONObject().put("id", ch.id).put("name", ch.name))
+                        }
+                        o.put("next_channels", chArr)
+                    }
+                    arr.put(o)
+                }
+                json(arr.toString())
+            }
+
+            uri == "/api/follows" && method == Method.POST -> {
+                val label = p("label").orEmpty().trim()
+                if (label.isBlank()) {
+                    json(JSONObject().put("ok", false).put("error", "label required").toString())
+                } else {
+                    // No kind= means "work it out per event" (FollowKind.AUTO)
+                    // rather than freezing a guess now -- see FollowKind.
+                    val kind = com.moviebox.tv.data.local.FollowKind.from(p("kind"))
+                    val minutes = p("minutes")?.toIntOrNull()
+                        ?: com.moviebox.tv.data.local.FollowEntity.DEFAULT_LEAD_MINUTES
+                    val key = com.moviebox.tv.data.live.FixtureParser.canonical(label)
+                    val db = com.moviebox.tv.data.local.AppDatabase.get(context)
+                    runBlocking {
+                        db.follows().add(
+                            com.moviebox.tv.data.local.FollowEntity(
+                                key = key,
+                                label = label,
+                                kind = kind.name,
+                                remindMinutes = minutes.coerceIn(0, 24 * 60),
+                                remind = true,
+                                addedAt = System.currentTimeMillis(),
+                            )
+                        )
+                        // Arm alarms for this follow immediately -- the user
+                        // should be covered for tonight without having to
+                        // wait for the next schedule refresh.
+                        com.moviebox.tv.reminders.ReminderScheduler.reschedule(
+                            context,
+                            com.moviebox.tv.reminders.ReminderWarm
+                                .scheduleOrCached(RemoteController.liveSchedule()),
+                        )
+                    }
+                    json(
+                        JSONObject().put("ok", true).put("key", key)
+                            .put("kind", kind.name).toString()
+                    )
+                }
+            }
+
+            uri == "/api/follows/delete" && method == Method.POST -> {
+                val key = p("key").orEmpty()
+                val db = com.moviebox.tv.data.local.AppDatabase.get(context)
+                runBlocking { db.follows().remove(key) }
+                ok()
+            }
+
+            uri == "/api/follows/remind" && method == Method.POST -> {
+                val key = p("key").orEmpty()
+                val on = p("on")?.lowercase() != "false"
+                val db = com.moviebox.tv.data.local.AppDatabase.get(context)
+                runBlocking {
+                    db.follows().setRemind(key, on)
+                    p("minutes")?.toIntOrNull()?.let {
+                        db.follows().setLead(key, it.coerceIn(0, 24 * 60))
+                    }
+                    com.moviebox.tv.reminders.ReminderScheduler.reschedule(
+                        context,
+                        com.moviebox.tv.reminders.ReminderWarm
+                            .scheduleOrCached(RemoteController.liveSchedule()),
+                    )
+                }
+                ok()
+            }
+
+            // Every upcoming fixture across all follows, soonest first.
+            uri == "/api/follows/upcoming" -> {
+                val db = com.moviebox.tv.data.local.AppDatabase.get(context)
+                val rows = runBlocking { db.follows().allNow() }
+                val nowSec = System.currentTimeMillis() / 1000
+                val matches = com.moviebox.tv.data.live.FollowMatcher.upcoming(
+                    rows,
+                    com.moviebox.tv.reminders.ReminderWarm
+                        .scheduleOrCached(RemoteController.liveSchedule()),
+                    nowSec,
+                )
+                val arr = JSONArray()
+                matches.forEach { m ->
+                    val chArr = JSONArray()
+                    m.event.channels.forEach { ch ->
+                        chArr.put(JSONObject().put("id", ch.id).put("name", ch.name))
+                    }
+                    val start = m.event.startUnix ?: 0L
+                    arr.put(
+                        JSONObject()
+                            .put("follow", m.follow.label)
+                            .put("key", m.follow.key)
+                            .put("title", m.event.title)
+                            .put("opponent", m.opponent ?: JSONObject.NULL)
+                            .put("category", m.event.category)
+                            .put("time", m.event.time)
+                            .put("start_unix", start)
+                            .put("live", start in 1..nowSec)
+                            .put("channels", chArr)
+                    )
+                }
+                json(arr.toString())
+            }
+
+            // The most recent fired reminder, so the phone can show the
+            // same banner the TV does.
+            uri == "/api/reminders/pending" -> {
+                val r = com.moviebox.tv.reminders.ReminderScheduler.pending.value
+                if (r == null) {
+                    json("{}")
+                } else {
+                    json(
+                        JSONObject()
+                            .put("key", r.eventKey)
+                            .put("headline", r.headline())
+                            .put("title", r.title)
+                            .put("start_unix", r.startUnix)
+                            .put("channel_id", r.channelId ?: JSONObject.NULL)
+                            .put("channel_name", r.channelName ?: JSONObject.NULL)
+                            .toString()
+                    )
+                }
+            }
+
+            uri == "/api/reminders/dismiss" && method == Method.POST -> {
+                com.moviebox.tv.reminders.ReminderScheduler.clearInApp()
+                ok()
+            }
+
+            // Live playback A/B switch. Tunneled video bypasses ExoPlayer's
+            // render callbacks, so frame counters read zero either way --
+            // the only honest test is to flip it and look at the screen.
+            uri == "/api/debug/tunneling" -> {
+                p("on")?.let {
+                    com.moviebox.tv.data.LiveTuning.setForceNoTunneling(
+                        it.lowercase() == "false" || it == "0",
+                    )
+                }
+                json(
+                    JSONObject()
+                        .put("forceNoTunneling",
+                            com.moviebox.tv.data.LiveTuning.forceNoTunneling)
+                        .toString()
+                )
+            }
+
+            // Which other feeds carry what I am watching, and which of
+            // them is actually healthy?
+            //
+            // A big fixture is mirrored across dozens of channels and the
+            // one the schedule lists first is not necessarily the one that
+            // holds up -- Sky Sports PL measured 13380 kbps and failed
+            // outright while USA Network carried the same match at 4640
+            // kbps with 2x headroom. Each candidate is measured with a
+            // short, bandwidth-capped probe (LiveStreamProxy.probe) so
+            // checking costs live playback almost nothing.
+            //
+            //   /api/live/feeds?id=130           siblings + any results held
+            //   /api/live/feeds?id=130&probe=1   ALSO start probing them all
+            //
+            // Probing runs in the BACKGROUND and this returns immediately
+            // with whatever has landed so far: 52 feeds at ~10 s each is
+            // minutes of work, far too long to hold an HTTP request open.
+            // Poll the same URL to watch the ranking fill in.
+            // Force the auto-switch decision path (sibling lookup ->
+            // probe/cached -> best pick -> switch) without waiting for a
+            // real stall. Shipping an auto-switch that has never been seen
+            // to fire is not shipping a feature.
+            uri == "/api/debug/autoswitch" && method == Method.POST -> {
+                RemoteController.forceAutoSwitch()
+                ok()
+            }
+
+            uri == "/api/live/feeds" -> {
+                val id = p("id").orEmpty().ifBlank {
+                    RemoteController.currentLiveChannelId().orEmpty()
+                }
+                val siblings = RemoteController.siblingFeeds(id).toMutableMap()
+                if (siblings.isEmpty() && id.isNotBlank()) {
+                    siblings[id] = RemoteController.liveChannels()
+                        .firstOrNull { it.id == id }?.name ?: id
+                }
+                if (p("probe") == "1" || p("probe") == "true") {
+                    RemoteController.rankFeeds(id)
+                }
+                val ranker = com.moviebox.tv.data.live.FeedRanker
+                val schedule = com.moviebox.tv.reminders.ReminderWarm
+                    .scheduleOrCached(RemoteController.liveSchedule())
+                val event = schedule.firstOrNull { ev ->
+                    ev.channels.any { it.id == id }
+                }?.title.orEmpty()
+
+                val arr = JSONArray()
+                // Measured feeds first, best headroom at the top; unmeasured
+                // trail behind in catalog order.
+                val sorted = siblings.entries.sortedWith(
+                    compareByDescending<Map.Entry<String, String>> {
+                        ranker.cached(it.key)?.result?.headroom ?: -1f
+                    }
+                )
+                sorted.forEach { (cid, name) ->
+                    val o = JSONObject()
+                        .put("id", cid)
+                        .put("name", name)
+                        .put("current", cid == id)
+                    ranker.cached(cid)?.result?.let { r ->
+                        o.put("ok", r.ok)
+                            .put("playlist_ms", r.playlistMs)
+                            .put("kbps", r.throughputKbps)
+                            .put("declared_kbps", r.declaredKbps)
+                            .put("headroom", String.format("%.2f", r.headroom).toDouble())
+                            .put("host", r.host)
+                            .put("note", r.note)
+                    }
+                    arr.put(o)
+                }
+                json(
+                    JSONObject()
+                        .put("channel", id)
+                        .put("event", event)
+                        .put("probing", ranker.isProbing())
+                        .put("progress", ranker.progress())
+                        .put("min_headroom", ranker.MIN_HEADROOM.toDouble())
+                        .put("feeds", arr)
+                        .toString()
+                )
             }
 
             uri == "/api/live/play" && method == Method.POST -> {
@@ -731,6 +1025,9 @@ class RemoteServer(
                 cur else ""
         })
         .toString()
+
+    /** Cap on feeds probed in one request — each costs a short read. */
+    private val MAX_PROBE_FEEDS = 8
 
     private fun ok() = json("{\"ok\":true}")
 

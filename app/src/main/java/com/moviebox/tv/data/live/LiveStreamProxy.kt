@@ -82,6 +82,22 @@ class LiveStreamProxy(
          *  "stop and play". */
         var lastGoodBody: String? = null,
         var lastGoodAtMs: Long = 0L,
+        /** When the mediaSeq-regression guard below started rejecting, or 0
+         *  while it is accepting. Without this the guard has no way out: it
+         *  rejects anything numbered lower than what it already served, so a
+         *  CDN that RESETS its numbering (new stream instance) traps it
+         *  forever. Observed on Nick: served 23024, CDN restarted at 9905, and
+         *  the proxy served a stale playlist for 30 minutes while the player
+         *  buffered — it would have taken ~13000 segments to climb back. */
+        var regressedSinceMs: Long = 0L,
+        /** Consecutive times we answered from cache because upstream was slow.
+         *  Stale-serving rides out a hiccup, but a CDN that is CONSISTENTLY
+         *  slow never recovers on its own and the guard just hides that:
+         *  measured on Nick, hdesx.cdx-08192.website averaged 10.7 s per
+         *  playlist fetch (one took 30 s) against the ~4-6 s a live playlist
+         *  must refresh in, so playback could never sustain. Forcing a
+         *  re-resolve moved it to another CDN and it played immediately. */
+        var staleServeStreak: Int = 0,
         /** Last few segment URIs we actually served to ExoPlayer (newest
          *  last). When we cross a sibling boundary, scan the new playlist
          *  for any of these — if we find one, the new playlist overlaps
@@ -107,20 +123,45 @@ class LiveStreamProxy(
     )
     private val innerState = ConcurrentHashMap<String, InnerState>()
 
-    private val httpClient: OkHttpClient = OkHttpClient.Builder()
+    /**
+     * Default client for CDN fetches — WITH a real connection pool.
+     *
+     * A live playlist is refetched every few seconds forever. With pooling
+     * disabled every one of those paid a fresh TCP + TLS handshake, and on
+     * this TV's TLS stack that handshake — not the tiny playlist body — is
+     * what the time goes on. Measured against the live CDNs: a fresh
+     * connection costs ~0.58 s of which ~0.40 s is handshake, while the
+     * second request on a kept-alive connection completes in ~0.18 s with a
+     * 0 ms handshake. That is why the same channel is smooth in a browser
+     * (one connection, reused) and stalls here: our fetch times swung between
+     * 0.7 s and 14.7 s, which is handshake variance, and a single slow one
+     * drains the live buffer.
+     */
+    private val pooledClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(8, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
-        // Fresh connection per request (0 idle sockets kept warm). Was
-        // the default pool, but Cloudflare's bot management on
-        // xameleon.phantemlis.top would 200 the first request (master
-        // m3u8) and immediately 403 the next request on the reused
-        // connection (inner playlist), even though headers were
-        // identical — classic session-reuse fingerprint hit. curl from
-        // the same egress does one-shot fresh-connection requests and
-        // never sees 403 on the same URLs, confirming this is
-        // per-connection state, not per-URL policy.
+        .connectionPool(okhttp3.ConnectionPool(6, 5, TimeUnit.MINUTES))
+        .build()
+
+    /**
+     * Fresh connection per request, for the ONE CDN family that requires it.
+     *
+     * Cloudflare's bot management on xameleon.phantemlis.top would 200 the
+     * master and then 403 the inner playlist on the SAME reused connection
+     * with identical headers — per-connection state, not per-URL policy. That
+     * is a real behaviour and this client preserves the workaround; what was
+     * wrong was applying it to every host. phantemlis has since been
+     * deprioritised almost out of use, so the global cost bought us nothing.
+     */
+    private val freshConnClient: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
         .connectionPool(okhttp3.ConnectionPool(0, 1, TimeUnit.SECONDS))
         .build()
+
+    /** Pooling by default; fresh connections only where a CDN demands them. */
+    private fun clientFor(url: String): OkHttpClient =
+        if (hostOf(url).endsWith("phantemlis.top")) freshConnClient else pooledClient
 
     /**
      * Bind the socket. Idempotent — repeated calls are no-ops. Returns true
@@ -201,10 +242,128 @@ class LiveStreamProxy(
      * Also resets [LiveResolver]'s cachedHost so a host that's slowly
      * dying (or that we got stuck on) gets re-discovered.
      */
+    /** One feed's measured health. */
+    data class ProbeResult(
+        val channelId: String,
+        val ok: Boolean,
+        /** Playlist round trip. The first thing that goes bad on a
+         *  struggling feed. */
+        val playlistMs: Long,
+        /** Throughput actually achieved on a real segment, kbps. */
+        val throughputKbps: Int,
+        /** What the feed says it needs, kbps (0 when undeclared). */
+        val declaredKbps: Int,
+        val host: String,
+        val note: String,
+    ) {
+        /** Achieved throughput over required bitrate. Below ~1.3 the feed
+         *  has no margin and will bleed its buffer under any hiccup. */
+        val headroom: Float
+            get() = if (declaredKbps > 0 && throughputKbps > 0) {
+                throughputKbps.toFloat() / declaredKbps
+            } else 0f
+    }
+
+    /**
+     * Measure a channel WITHOUT touching playback.
+     *
+     * The point is to answer "which of the feeds carrying this match is
+     * actually healthy?" while the user keeps watching. Two constraints
+     * shape it:
+     *
+     *  - It must not disturb the player: nothing here goes near ExoPlayer,
+     *    the serving cache, or the rotation state.
+     *  - It must not steal the bandwidth it is measuring. Pulling a full
+     *    13 Mbps probe stream would starve the very playback we are trying
+     *    to protect. So we read at most [PROBE_BYTES] or [PROBE_MS] of ONE
+     *    segment and abort — enough to measure rate, small enough to be
+     *    background noise.
+     */
+    suspend fun probe(channelId: String): ProbeResult {
+        val t0 = System.currentTimeMillis()
+        val master = runCatching { resolver.resolveStream(channelId) }.getOrNull()
+            ?: return ProbeResult(
+                channelId, false, 0, 0, 0, "", "could not resolve",
+            )
+        val host = hostOf(master)
+
+        val parsed = parseMaster(master)
+            ?: return ProbeResult(
+                channelId, false, System.currentTimeMillis() - t0, 0, 0, host,
+                "master unreadable",
+            )
+        val (innerUrl, streamInf) = parsed
+        val declaredKbps = (streamInf?.let { bandwidthOf(it) } ?: 0L).toInt() / 1000
+
+        // Playlist timing.
+        val tPl = System.currentTimeMillis()
+        val plBody = runCatching {
+            clientFor(innerUrl).newCall(buildCdnRequest(innerUrl).build())
+                .execute().use { r ->
+                    if (!r.isSuccessful) null else r.body?.string()
+                }
+        }.getOrNull()
+        val playlistMs = System.currentTimeMillis() - tPl
+        if (plBody.isNullOrBlank()) {
+            return ProbeResult(
+                channelId, false, playlistMs, 0, declaredKbps, host,
+                "playlist failed",
+            )
+        }
+
+        // Newest segment = the one playback would actually be pulling.
+        val segRel = plBody.lineSequence()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() && !it.startsWith("#") }
+            .lastOrNull()
+            ?: return ProbeResult(
+                channelId, false, playlistMs, 0, declaredKbps, host,
+                "no segments listed",
+            )
+        val segUrl = if (segRel.startsWith("http")) segRel else {
+            innerUrl.substringBeforeLast('/') + "/" + segRel
+        }
+
+        var bytes = 0L
+        val tSeg = System.currentTimeMillis()
+        val fetched = runCatching {
+            clientFor(segUrl).newCall(buildCdnRequest(segUrl).build())
+                .execute().use { r ->
+                    if (!r.isSuccessful) return@use false
+                    val stream = r.body?.byteStream() ?: return@use false
+                    val buf = ByteArray(16 * 1024)
+                    while (true) {
+                        val n = stream.read(buf)
+                        if (n <= 0) break
+                        bytes += n
+                        if (bytes >= PROBE_BYTES) break
+                        if (System.currentTimeMillis() - tSeg > PROBE_MS) break
+                    }
+                    true
+                }
+        }.getOrDefault(false)
+        val segMs = (System.currentTimeMillis() - tSeg).coerceAtLeast(1)
+
+        if (!fetched || bytes <= 0) {
+            return ProbeResult(
+                channelId, false, playlistMs, 0, declaredKbps, host,
+                "segment failed",
+            )
+        }
+        val kbps = ((bytes * 8L) / segMs).toInt()  // bytes/ms*8 == kbit/s
+        return ProbeResult(
+            channelId, true, playlistMs, kbps, declaredKbps, host,
+            "measured ${bytes / 1024}KB in ${segMs}ms",
+        )
+    }
+
     fun invalidate(channelId: String) {
         Log.i(DIAG, "PROXY ch=$channelId INVALIDATE (caller-requested)")
         cache.remove(channelId)
         innerState.remove(channelId)
+        // Start the channel with a clean slate — a fresh session gets a
+        // fresh window, and yesterday's dead names must not block it.
+        deadSegments.remove(channelId)
         resolver.resetCachedHost()
     }
 
@@ -252,10 +411,21 @@ class LiveStreamProxy(
             NanoHTTPD.Response.Status.BAD_REQUEST, "text/plain", "bad url")
 
         fun fetchOnce(url: String): okhttp3.Response? = runCatching {
-            httpClient.newCall(
+            clientFor(url).newCall(
                 buildCdnRequest(url).build()
             ).execute()
         }.getOrNull()
+
+        // A segment we already proved is gone never comes back — the live
+        // window only moves forward. Fail it instantly instead of paying
+        // another upstream round trip for a known 403.
+        val segName = originalUrl.substringAfterLast('/').substringBefore('?')
+        if (isDeadSegment(channelId, segName)) {
+            return NanoHTTPD.newFixedLengthResponse(
+                NanoHTTPD.Response.Status.NOT_FOUND,
+                "text/plain", "segment rolled out of the live window",
+            )
+        }
 
         var resp = fetchOnce(originalUrl)
         if (resp == null) {
@@ -269,9 +439,46 @@ class LiveStreamProxy(
         // segment file name carries forward (most CDN siblings reuse
         // the live-edge segment names) the retry succeeds.
         if (resp.code in listOf(401, 403, 410)) {
+            val code = resp.code
             resp.close()
-            Log.w(DIAG, "PROXY ch=$channelId SEG ${resp.code} on " +
-                "${shortSeg(originalUrl)} — invalidating + retry with fresh URL")
+
+            // Two very different failures share these status codes:
+            //
+            //   a) the signed token expired, but the segment is still in
+            //      the live window  -> re-resolve and refetch (below).
+            //   b) the segment has rolled OUT of the window  -> it exists
+            //      on no CDN, and never will again.
+            //
+            // We used to treat every one as (a): nuke the cache, re-resolve
+            // (~4 s), rotate CDN, retry the same name. Observed on CNN, the
+            // same segment 403'd across three rotations
+            // (xameleon -> api.cdnlivetv.tv -> xameleon) while the playlist
+            // itself kept advancing normally -- ~4 s of dead time per
+            // attempt, buffer drained to zero, and the stream wedged.
+            //
+            // The freshest inner playlist is the authority on which is
+            // which: if the name isn't listed any more, it rolled off.
+            // Fail fast with 404 so the player abandons that chunk and
+            // resyncs to the live edge instead of us chasing a ghost.
+            val stillListed = innerState[channelId]?.lastGoodBody
+                ?.contains(segName) ?: true
+            if (!stillListed) {
+                markDeadSegment(channelId, segName)
+                Log.w(
+                    DIAG,
+                    "PROXY ch=$channelId SEG $code on ${shortSeg(originalUrl)} " +
+                        "— rolled out of the live window, failing fast " +
+                        "(no re-resolve, no rotation)",
+                )
+                return NanoHTTPD.newFixedLengthResponse(
+                    NanoHTTPD.Response.Status.NOT_FOUND,
+                    "text/plain", "segment rolled out of the live window",
+                )
+            }
+
+            Log.w(DIAG, "PROXY ch=$channelId SEG $code on " +
+                "${shortSeg(originalUrl)} — token dead but still in window; " +
+                "invalidating + retry with fresh URL")
             cache.remove(channelId)
             val fresh = runBlocking { refreshCache(channelId) }
             if (fresh != null) {
@@ -282,6 +489,18 @@ class LiveStreamProxy(
                         return NanoHTTPD.newFixedLengthResponse(
                             NanoHTTPD.Response.Status.SERVICE_UNAVAILABLE,
                             "text/plain", "segment retry failed",
+                        )
+                    }
+                    // A fresh token that still 4xxs means the segment is
+                    // gone regardless of what the cached playlist claimed.
+                    // Remember it so the next request short-circuits.
+                    if (resp.code in listOf(401, 403, 410)) {
+                        markDeadSegment(channelId, segName)
+                        Log.w(
+                            DIAG,
+                            "PROXY ch=$channelId SEG ${resp.code} on " +
+                                "${shortSeg(originalUrl)} again after refresh " +
+                                "— marking dead",
                         )
                     }
                 }
@@ -296,12 +515,40 @@ class LiveStreamProxy(
             )
         }
         val ct = resp.header("Content-Type") ?: "video/mp2t"
-        val bytes = resp.body?.bytes() ?: ByteArray(0)
-        resp.close()
-        return NanoHTTPD.newFixedLengthResponse(
-            NanoHTTPD.Response.Status.OK, ct,
-            java.io.ByteArrayInputStream(bytes), bytes.size.toLong(),
-        )
+        // STREAM the segment through; do not buffer it first.
+        //
+        // This used to be `resp.body.bytes()` — the whole segment pulled into
+        // a ByteArray before the player saw one byte. Measured: segments are
+        // ~1.9 MB of 4 s video on a stream that must sustain 3.96 Mbps, so
+        // buffering serialised every fetch (CDN download THEN player read)
+        // when the two should overlap, and each segment allocated 1.9 MB on a
+        // device sitting at 37 MB free. Handing over the body stream lets the
+        // player consume bytes as they arrive, which is what a direct fetch
+        // does — and a direct fetch of these same segments measured 5-19 Mbps
+        // against the 3.96 needed.
+        //
+        // NanoHTTPD closes the InputStream when it finishes, and closing
+        // OkHttp's byteStream releases the response — so no explicit close
+        // here, and closing early would truncate the body.
+        val body = resp.body
+        if (body == null) {
+            resp.close()
+            return NanoHTTPD.newFixedLengthResponse(
+                NanoHTTPD.Response.Status.SERVICE_UNAVAILABLE,
+                "text/plain", "empty segment",
+            )
+        }
+        val len = body.contentLength()
+        return if (len >= 0) {
+            NanoHTTPD.newFixedLengthResponse(
+                NanoHTTPD.Response.Status.OK, ct, body.byteStream(), len,
+            )
+        } else {
+            // Length unknown (chunked upstream): stream it on without one.
+            NanoHTTPD.newChunkedResponse(
+                NanoHTTPD.Response.Status.OK, ct, body.byteStream(),
+            )
+        }
     }
 
     /** Carry the OLD segment's last path component into the NEW inner
@@ -317,6 +564,33 @@ class LiveStreamProxy(
         // segments share the same signed query as the playlist.
         val q = freshInnerUrl.substringAfter('?', missingDelimiterValue = "")
         return if (q.isBlank()) "$base/$oldSeg" else "$base/$oldSeg?$q"
+    }
+
+    /**
+     * Segment names proven gone, per channel. Bounded and FIFO-evicted: the
+     * live window only moves forward, so a short memory is enough to break
+     * the retry loop without growing across a long session.
+     */
+    private val deadSegments = ConcurrentHashMap<String, LinkedHashSet<String>>()
+
+    private fun markDeadSegment(channelId: String, seg: String) {
+        if (seg.isBlank()) return
+        val set = deadSegments.getOrPut(channelId) { LinkedHashSet() }
+        synchronized(set) {
+            set.add(seg)
+            while (set.size > DEAD_SEGMENT_MEMORY) {
+                val oldest = set.iterator()
+                if (!oldest.hasNext()) break
+                oldest.next()
+                oldest.remove()
+            }
+        }
+    }
+
+    private fun isDeadSegment(channelId: String, seg: String): Boolean {
+        if (seg.isBlank()) return false
+        val set = deadSegments[channelId] ?: return false
+        return synchronized(set) { set.contains(seg) }
     }
 
     private fun shortSeg(u: String): String =
@@ -357,7 +631,10 @@ class LiveStreamProxy(
      * cache is stale. We always fetch the upstream playlist live (never
      * cache its body) because the segment list is rolling.
      */
-    private fun handleInner(channelId: String): NanoHTTPD.Response {
+    private fun handleInner(
+        channelId: String,
+        allowRotate: Boolean = true,
+    ): NanoHTTPD.Response {
         val entry = ensureCached(channelId)
             ?: return NanoHTTPD.newFixedLengthResponse(
                 NanoHTTPD.Response.Status.SERVICE_UNAVAILABLE,
@@ -401,8 +678,30 @@ class LiveStreamProxy(
             cacheAgeForFast < FRESH_CACHE_STALE_SERVE_MS &&
             state.lastInnerFetchDurationMs >= SLOW_INNER_FETCH_MS
         ) {
+            state.staleServeStreak += 1
+            if (allowRotate && state.staleServeStreak >= MAX_STALE_SERVES) {
+                // This CDN is not having a hiccup, it cannot serve us. Drop the
+                // cached route so the next request re-resolves onto a different
+                // one — the same thing "Restart live" does by hand, which is
+                // what actually recovered this channel during diagnosis.
+                Log.w(DIAG, "PROXY ch=$channelId ROTATE: ${state.staleServeStreak} " +
+                    "consecutive stale serves (prev-dt=" +
+                    "${state.lastInnerFetchDurationMs}ms) — dropping route")
+                LiveStatus.note("↻  Switching to a faster source…")
+                state.staleServeStreak = 0
+                state.lastInnerFetchDurationMs = 0L
+                state.lastGoodBody = null
+                cache.remove(channelId)
+                // Re-enter ONCE with the route gone: the cache miss makes this
+                // pass resolve afresh, landing on a different CDN. allowRotate
+                // is false on the way back in so a channel where every CDN is
+                // slow degrades to the old stale-serve behaviour instead of
+                // recursing.
+                return handleInner(channelId, allowRotate = false)
+            }
             Log.i(DIAG, "PROXY ch=$channelId STALE_SERVE age=${cacheAgeForFast}ms " +
-                "prev-dt=${state.lastInnerFetchDurationMs}ms")
+                "prev-dt=${state.lastInnerFetchDurationMs}ms " +
+                "streak=${state.staleServeStreak}")
             LiveStatus.note("⚠  CDN slow — serving cached playlist…")
             // Reset the slow flag so we don't stale-serve forever; the
             // next fetch attempt (kicked off by the ExoPlayer poll ~5 s
@@ -453,9 +752,34 @@ class LiveStreamProxy(
                 // different sibling. We hand back lastGoodBody so
                 // ExoPlayer keeps consuming what it has.
                 val newMediaSeq = extractMediaSeq(servedBody) ?: -1L
-                if (crossingBoundary &&
+                val regressing = crossingBoundary &&
                     state.lastServedMediaSeq >= 0 &&
-                    newMediaSeq in 0 until state.lastServedMediaSeq) {
+                    newMediaSeq in 0 until state.lastServedMediaSeq
+                // Tell a RESET apart from a desync. A sibling that is merely
+                // behind is a few segments back; a drop to a fraction of the
+                // old number means upstream restarted and is now numbering
+                // from scratch, so the old baseline is meaningless and holding
+                // onto it strands us forever. Re-baseline instead of rejecting.
+                val looksLikeReset = regressing &&
+                    newMediaSeq < state.lastServedMediaSeq - RESET_DROP_SEGMENTS
+                // Escape hatch for everything else: however good the reason,
+                // never reject for longer than this. A stale playlist served
+                // indefinitely is worse than one discontinuity.
+                val now = System.currentTimeMillis()
+                if (regressing && state.regressedSinceMs == 0L) {
+                    state.regressedSinceMs = now
+                }
+                val stuckTooLong = regressing &&
+                    state.regressedSinceMs > 0L &&
+                    now - state.regressedSinceMs > REGRESSION_MAX_MS
+                if (regressing && (looksLikeReset || stuckTooLong)) {
+                    Log.w(DIAG, "PROXY ch=$channelId ACCEPT rebaseline: " +
+                        "was=${state.lastServedMediaSeq} got=$newMediaSeq " +
+                        "(${if (looksLikeReset) "upstream restarted" else "stuck too long"}) " +
+                        "host=${hostOf(entry.innerUrl)}")
+                    state.regressedSinceMs = 0L
+                    state.recentSegments.clear()   // old segments are meaningless now
+                } else if (regressing) {
                     Log.w(DIAG, "PROXY ch=$channelId REJECT regressed " +
                         "rotation: was=${state.lastServedMediaSeq} " +
                         "got=$newMediaSeq host=${hostOf(entry.innerUrl)} — " +
@@ -470,6 +794,8 @@ class LiveStreamProxy(
                 }
 
                 state.rotationPending = false
+                state.regressedSinceMs = 0L
+                state.staleServeStreak = 0
                 state.lastServedFrom = entry.innerUrl
                 state.lastGoodBody = servedBody
                 state.lastGoodAtMs = System.currentTimeMillis()
@@ -869,7 +1195,7 @@ class LiveStreamProxy(
 
     private fun fetchUpstreamInner(url: String): Pair<okhttp3.Response, String> {
         val req = buildCdnRequest(url).build()
-        return httpClient.newCall(req).execute().use { resp ->
+        return clientFor(url).newCall(req).execute().use { resp ->
             val body = resp.body?.string() ?: ""
             // Diagnostic: when the CDN blocks us, dump a snapshot of the
             // request headers + response body preview. Cloudflare bot-
@@ -949,7 +1275,7 @@ class LiveStreamProxy(
         val req = buildCdnRequest(masterUrl).build()
         val t0 = System.currentTimeMillis()
         return runCatching {
-            httpClient.newCall(req).execute().use { resp ->
+            clientFor(masterUrl).newCall(req).execute().use { resp ->
                 val dt = System.currentTimeMillis() - t0
                 if (!resp.isSuccessful) {
                     val cfRay = resp.header("cf-ray").orEmpty()
@@ -968,21 +1294,66 @@ class LiveStreamProxy(
                 Log.i(DIAG, "PROXY master OK dt=${dt}ms host=${hostOf(masterUrl)}")
                 LiveStatus.note("▶  Buffering…")
                 val body = resp.body?.string() ?: return null
+                // Build the FULL variant table, then choose — rather than
+                // taking whichever URL happened to come first.
+                //
+                // This is the only place a rendition choice actually exists.
+                // handleMaster hands ExoPlayer a synthesised master with a
+                // single STREAM-INF, so the player's track selector has
+                // nothing to choose between and its max-bitrate constraint
+                // is a no-op. Whatever we pick here IS the quality.
+                //
+                // Measured on this box: a 7630 kbps 720p rendition drained a
+                // 21 s buffer to 8 s in ten seconds (consuming faster than
+                // the link fills) and periodically stuck; the lighter rungs
+                // of the same channels held ~18-20 s indefinitely.
                 var streamInf: String? = null
                 var rel: String? = null
                 var sawSegmentTag = false
+                val variants = ArrayList<Triple<Long, String, String>>() // bw, infLine, url
+                var pendingInf: String? = null
                 for (rawLine in body.lineSequence()) {
                     val line = rawLine.trim()
                     when {
-                        line.startsWith("#EXT-X-STREAM-INF") -> streamInf = line
+                        line.startsWith("#EXT-X-STREAM-INF") -> {
+                            streamInf = line
+                            pendingInf = line
+                        }
                         // Media-playlist markers: if the body carries these
                         // AND no STREAM-INF, the resolved URL is itself the
                         // media (variant) playlist, not a master.
                         line.startsWith("#EXTINF") ||
                             line.startsWith("#EXT-X-TARGETDURATION") ||
                             line.startsWith("#EXT-X-MEDIA-SEQUENCE") -> sawSegmentTag = true
-                        line.isNotEmpty() && !line.startsWith("#") && rel == null -> rel = line
+                        line.isNotEmpty() && !line.startsWith("#") -> {
+                            if (rel == null) rel = line
+                            val inf = pendingInf
+                            if (inf != null) {
+                                variants.add(Triple(bandwidthOf(inf), inf, line))
+                                pendingInf = null
+                            }
+                        }
                     }
+                }
+                // Prefer the richest rendition that still fits under the
+                // ceiling; if every rung is above it (some channels only
+                // publish one heavy variant) take the lightest available
+                // rather than refusing to play.
+                if (variants.size > 1) {
+                    val underCap = variants.filter { it.first in 1..MAX_VARIANT_BPS }
+                    val chosen = underCap.maxByOrNull { it.first }
+                        ?: variants.minByOrNull { it.first }
+                    if (chosen != null) {
+                        rel = chosen.third
+                        streamInf = chosen.second
+                    }
+                    Log.i(
+                        DIAG,
+                        "PROXY master variants=" +
+                            variants.joinToString { "${it.first / 1000}k" } +
+                            " cap=${MAX_VARIANT_BPS / 1000}k chose=" +
+                            "${(chosen?.first ?: 0) / 1000}k host=${hostOf(masterUrl)}",
+                    )
                 }
                 // MEDIA playlist (segments listed directly, no STREAM-INF):
                 // the resolved URL IS the inner playlist. Several CDNs in the
@@ -1014,6 +1385,12 @@ class LiveStreamProxy(
         }.getOrNull()
     }
 
+    /** BANDWIDTH=... off a #EXT-X-STREAM-INF line; 0 when absent. */
+    private fun bandwidthOf(streamInf: String): Long {
+        val m = Regex("""BANDWIDTH=(\d+)""").find(streamInf) ?: return 0L
+        return m.groupValues[1].toLongOrNull() ?: 0L
+    }
+
     private data class CacheEntry(
         val masterUrl: String,
         val innerUrl: String,
@@ -1022,6 +1399,24 @@ class LiveStreamProxy(
     )
 
     companion object {
+        /**
+         * Rendition ceiling for live, applied where the choice actually
+         * exists (see parseMaster). ~4.5 Mbps is what this box sustains:
+         * measured, the 7.6-9 Mbps rungs drain the buffer faster than the
+         * link refills it, while rungs at or below this held ~18-20 s of
+         * buffer with near-zero rebuffering.
+         */
+        const val MAX_VARIANT_BPS = 4_500_000L
+
+        /** How many rolled-off segment names to remember per channel. */
+        private const val DEAD_SEGMENT_MEMORY = 64
+
+        /** Probe reads at most this much of one segment... */
+        private const val PROBE_BYTES = 512L * 1024
+        /** ...or this long, whichever comes first. Keeps a health check
+         *  from stealing the bandwidth it is trying to measure. */
+        private const val PROBE_MS = 2_500L
+
         private const val TAG = "LiveStreamProxy"
         /** Single-stream diagnostic tag. Grep `adb logcat | grep LiveDiag`
          *  to see every recovery event in chronological order across the
@@ -1045,6 +1440,11 @@ class LiveStreamProxy(
          *  slow and enables stale-while-revalidate on the NEXT request.
          *  4 s picks up genuine hiccups (normal fetches are 200-800 ms)
          *  without triggering on transient jitter. */
+        /** Stale-serves in a row before we stop believing the CDN will
+         *  recover and re-resolve onto another one. Three keeps a genuine
+         *  blip invisible while capping the damage at ~15 s. */
+        private const val MAX_STALE_SERVES: Int = 3
+
         private const val SLOW_INNER_FETCH_MS: Long = 4_000L
 
         /** Cache age ceiling for the stale-while-revalidate stale-serve.
@@ -1098,6 +1498,18 @@ class LiveStreamProxy(
         // dlhd.st's browser player is served to desktop Chrome tabs
         // (that's the origin flow we're impersonating), so this UA also
         // matches what the "working in browser" comparison presented.
+        /** A backwards jump larger than this is upstream RESTARTING its
+         *  numbering, not a sibling lagging a few segments behind. Real
+         *  desyncs are a handful of segments; the observed reset was
+         *  23024 -> 9905. */
+        private const val RESET_DROP_SEGMENTS = 50L
+
+        /** Never reject a playlist for longer than this, whatever the reason.
+         *  Serving a frozen playlist indefinitely (which is what "keep the
+         *  last good body" becomes when the guard can never clear) looks to
+         *  the viewer like the channel buffering forever. */
+        private const val REGRESSION_MAX_MS = 20_000L
+
         private const val CHROME_UA =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
                 "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"

@@ -6,6 +6,16 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Match reminders. USE_EXACT_ALARM is the install-granted variant for
+         apps whose user-facing job includes alarms/reminders; without an
+         exact alarm a "20 minutes before kickoff" ping can drift by tens of
+         minutes under doze and arrive after the match started.
+         ReminderScheduler still checks canScheduleExactAlarms() and degrades
+         to an inexact alarm rather than throwing if it's ever refused. -->
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <!-- Alarms don't survive a reboot; BootReceiver flags a rebuild. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- Used by ExoPlayer's setWakeMode(WAKE_MODE_NETWORK). Holds a
          partial wake lock + Wi-Fi lock during playback so the TV's
          PowerManager doesn't fire its bedtime / DreamX screensaver
@@ -61,6 +71,20 @@
             android:exported="false"
             android:process=":crash"
             android:theme="@style/Theme.MovieBoxTV" />
+
+        <!-- Fired match/show reminder. Not exported: only our own
+             AlarmManager PendingIntent triggers it. -->
+        <receiver
+            android:name=".reminders.ReminderReceiver"
+            android:exported="false" />
+
+        <receiver
+            android:name=".reminders.BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
 
         <service
             android:name=".download.DownloadService"
