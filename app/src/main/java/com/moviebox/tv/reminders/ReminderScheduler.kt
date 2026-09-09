@@ -76,6 +76,9 @@ object ReminderScheduler {
         val matches = FollowMatcher.upcoming(follows, events, nowSec)
         var scheduled = 0
         var fired = 0
+        // Built once and shared across every match in this pass.
+        val concurrency = com.moviebox.tv.data.live.EventChannelPicker
+            .concurrencyMap(events, nowSec)
         for (m in matches) {
             if (scheduled >= MAX_ALARMS) break
             val start = m.event.startUnix ?: continue
@@ -83,14 +86,23 @@ object ReminderScheduler {
             if (db.remindersFired().wasFired(key)) continue
 
             val fireAt = start - m.follow.remindMinutes * 60L
+            // NOT channels.first(). The catalog lists a channel against
+            // every event it carries that day, so the first entry is
+            // routinely a generic feed ("Sky Sports Main Event", "TSN5")
+            // that is showing one of the OTHER fixtures when the reminder
+            // fires — which is exactly the "it opened a channel without my
+            // game on it" complaint. Pick the feed least likely to be
+            // showing something else. See EventChannelPicker.
+            val channel = com.moviebox.tv.data.live.EventChannelPicker
+                .best(m.event, events, concurrency)
             val payload = ReminderPayload(
                 eventKey = key,
                 followLabel = m.follow.label,
                 title = m.event.title,
                 opponent = m.opponent,
                 startUnix = start,
-                channelId = m.event.channels.firstOrNull()?.id,
-                channelName = m.event.channels.firstOrNull()?.name,
+                channelId = channel?.id,
+                channelName = channel?.name,
             )
 
             when {

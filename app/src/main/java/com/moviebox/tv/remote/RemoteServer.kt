@@ -567,10 +567,17 @@ class RemoteServer(
                         o.put("next_title", next.event.title)
                         o.put("next_opponent", next.opponent ?: JSONObject.NULL)
                         next.event.startUnix?.let { o.put("next_start", it) }
+                        // Best-first, same rule the reminder uses, so the
+                        // phone and the alert never disagree about which
+                        // feed is actually on the game.
                         val chArr = JSONArray()
-                        next.event.channels.forEach { ch ->
-                            chArr.put(JSONObject().put("id", ch.id).put("name", ch.name))
-                        }
+                        com.moviebox.tv.data.live.EventChannelPicker
+                            .rank(next.event, schedule)
+                            .forEach { ch ->
+                                chArr.put(
+                                    JSONObject().put("id", ch.id).put("name", ch.name)
+                                )
+                            }
                         o.put("next_channels", chArr)
                     }
                     arr.put(o)
@@ -654,11 +661,19 @@ class RemoteServer(
                     nowSec,
                 )
                 val arr = JSONArray()
+                val sched2 = com.moviebox.tv.reminders.ReminderWarm
+                    .scheduleOrCached(RemoteController.liveSchedule())
+                val conc2 = com.moviebox.tv.data.live.EventChannelPicker
+                    .concurrencyMap(sched2, nowSec)
                 matches.forEach { m ->
                     val chArr = JSONArray()
-                    m.event.channels.forEach { ch ->
-                        chArr.put(JSONObject().put("id", ch.id).put("name", ch.name))
-                    }
+                    com.moviebox.tv.data.live.EventChannelPicker
+                        .rank(m.event, sched2, conc2)
+                        .forEach { ch ->
+                            chArr.put(
+                                JSONObject().put("id", ch.id).put("name", ch.name)
+                            )
+                        }
                     val start = m.event.startUnix ?: 0L
                     arr.put(
                         JSONObject()

@@ -98,6 +98,51 @@ class LiveResolver(
         }.onFailure {
             android.util.Log.w("LiveDiag", "RESOLVER init seed FAILED: ${it.message}")
         }
+
+        // Seed the alternateless set too.
+        //
+        // Without this, cold start re-pays a pass that CANNOT succeed. The
+        // systemic-dead cooldown above IS restored, so we again avoid
+        // phantemlis — but we have forgotten which channels live only there,
+        // so those burn a guaranteed-to-fail first pass before the dead-end
+        // escape falls back to phantemlis anyway. Measured on Nicktoons
+        // (xameleon-only) from a force-stopped app: avoid pass fails at 3 s,
+        // then three re-resolves (6.3 s + 4.2 s + 3.4 s) and 24.9 s to first
+        // frame — against 8.5 s once the map is warm.
+        //
+        // Which CDN family carries a channel is a property of the upstream
+        // catalog, not of this session, so it is worth remembering across
+        // restarts. Re-learned after [ALTERNATELESS_MEMORY_MS] in case an
+        // alternate appears.
+        runCatching {
+            val prefs = App.instance
+                .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val raw = prefs.getString(KEY_ALTERNATELESS, "").orEmpty()
+            val now = System.currentTimeMillis()
+            var seeded = 0
+            raw.split(',').forEach { entry ->
+                val parts = entry.split(':')
+                if (parts.size != 2) return@forEach
+                val ch = parts[0]
+                val seenAt = parts[1].toLongOrNull() ?: return@forEach
+                if (ch.isBlank()) return@forEach
+                if (now - seenAt < ALTERNATELESS_MEMORY_MS) {
+                    alternatelessUntil[ch] = now + ALTERNATELESS_TTL_MS
+                    seeded++
+                }
+            }
+            if (seeded > 0) {
+                android.util.Log.w(
+                    "LiveDiag",
+                    "RESOLVER init: seeded $seeded alternateless channel(s) — " +
+                        "they skip the doomed avoid pass",
+                )
+            }
+        }.onFailure {
+            android.util.Log.w(
+                "LiveDiag", "RESOLVER alternateless seed FAILED: ${it.message}",
+            )
+        }
     }
 
     private fun persistSystemicDead(now: Long) {
@@ -285,6 +330,7 @@ class LiveResolver(
                 // pass entirely. See [alternatelessUntil].
                 alternatelessUntil[channelId] =
                     System.currentTimeMillis() + ALTERNATELESS_TTL_MS
+                persistAlternateless(channelId)
                 reportSuccess(channelId)  // clears the per-channel blacklist
                 val second = coroutineScope {
                     val fallbackProbes = mutableListOf<Deferred<Pair<String, String>?>>()
@@ -339,6 +385,43 @@ class LiveResolver(
         com.moviebox.tv.debug.ProviderHealth.failure(
             "donis", "resolve failed (all daddy endpoints × all player paths)")
         null
+    }
+
+    /**
+     * Record that [channelId] is reachable only via the avoided family, so
+     * the next cold start skips the doomed pass. Bounded to
+     * [MAX_ALTERNATELESS] entries, newest wins, so this can never grow into
+     * an unbounded preference blob.
+     */
+    private fun persistAlternateless(channelId: String) {
+        runCatching {
+            val prefs = App.instance
+                .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val now = System.currentTimeMillis()
+            val entries = LinkedHashMap<String, Long>()
+            prefs.getString(KEY_ALTERNATELESS, "").orEmpty()
+                .split(',')
+                .forEach { e ->
+                    val p = e.split(':')
+                    if (p.size == 2 && p[0].isNotBlank()) {
+                        p[1].toLongOrNull()?.let { t ->
+                            if (now - t < ALTERNATELESS_MEMORY_MS) entries[p[0]] = t
+                        }
+                    }
+                }
+            entries.remove(channelId)
+            entries[channelId] = now
+            while (entries.size > MAX_ALTERNATELESS) {
+                val oldest = entries.keys.firstOrNull() ?: break
+                entries.remove(oldest)
+            }
+            prefs.edit()
+                .putString(
+                    KEY_ALTERNATELESS,
+                    entries.entries.joinToString(",") { "${it.key}:${it.value}" },
+                )
+                .apply()
+        }
     }
 
     /** Await the first [Deferred] whose result is non-null. Returns null if
@@ -673,6 +756,15 @@ class LiveResolver(
 
         private const val PREFS: String = "live_resolver"
         private const val KEY_PHANTEMLIS_DEAD: String = "phantemlis_dead_ms"
+        private const val KEY_ALTERNATELESS: String = "alternateless_channels"
+
+        /** How long a channel is remembered as single-CDN across restarts.
+         *  Upstream CDN topology changes on the order of days, not minutes,
+         *  so a day of memory is safe and re-learned after it lapses. */
+        private const val ALTERNATELESS_MEMORY_MS: Long = 24L * 60 * 60 * 1000
+
+        /** Cap on remembered channels — keeps the pref a fixed small size. */
+        private const val MAX_ALTERNATELESS: Int = 64
 
         /** Wall-clock until which [SYSTEMIC_DEAD_SUFFIX] is globally avoided.
          *  Process-global + volatile: shared across channels, and (unlike

@@ -455,6 +455,73 @@ private fun ScheduleView(state: UiState, vm: MainViewModel, isTv: Boolean) {
         buckets.map { (k, v) -> k to v.sortedBy { it.startUnix ?: Long.MAX_VALUE } }
     }
 
+    // Say WHY there is nothing here.
+    //
+    // This view used to render a bare LazyColumn over `grouped`, so an empty
+    // list drew literally nothing — no spinner, no message, no error. The
+    // only loading/error handling upstream is gated on `liveChannels`, but
+    // channels and the schedule are fetched separately: channels can load
+    // while the schedule is still in flight or has failed outright. The
+    // result was a permanently blank Schedule tab that looked exactly like
+    // "there are no events today", which is what got reported as "the
+    // schedule is empty". Three distinct states, three distinct messages.
+    if (grouped.isEmpty()) {
+        Box(Modifier.fillMaxSize(), Alignment.Center) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                when {
+                    // Still fetching.
+                    state.liveLoading -> {
+                        CircularProgressIndicator(color = Accent)
+                        Text(
+                            "Loading schedule…",
+                            color = TextMuted, fontSize = 12.sp,
+                            modifier = Modifier.padding(top = 12.dp),
+                        )
+                    }
+                    // Fetched, but the feed gave us nothing.
+                    state.liveSchedule.isEmpty() -> {
+                        Text(
+                            "No schedule available right now",
+                            color = TextPrimary, fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            state.liveError
+                                ?: "The published schedule came back empty.",
+                            color = TextMuted, fontSize = 12.sp,
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                        Box(
+                            Modifier.padding(top = 12.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(Accent)
+                                .clickable { vm.loadLive(force = true) }
+                                .padding(horizontal = 18.dp, vertical = 10.dp),
+                        ) {
+                            Text(
+                                "Retry", color = Color.White,
+                                fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                            )
+                        }
+                    }
+                    // We HAVE events; they are all outside the on-air window.
+                    else -> {
+                        Text(
+                            "Nothing on air right now",
+                            color = TextPrimary, fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            "${state.liveSchedule.size} events are published but " +
+                                "have already finished.",
+                            color = TextMuted, fontSize = 12.sp,
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                    }
+                }
+            }
+        }
+        return
+    }
+
     LazyColumn(
         contentPadding = PaddingValues(
             start = if (isTv) 32.dp else 16.dp,

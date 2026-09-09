@@ -1271,6 +1271,18 @@ class LiveStreamProxy(
         }
     }
 
+    /**
+     * NOTE (tried and REVERTED 2026-09-07): retrying the master fetch on a
+     * 5xx before re-resolving looked like an easy win — a re-resolve costs
+     * 3-4 s and re-asking the URL costs ~1 s. Measured over 7 cold starts it
+     * did NOT pay: phantemlis holds the `500 Error fetching index playlist`
+     * for seconds at a time rather than blipping, so the retry almost never
+     * rescued the fetch and simply added ~1.3 s per occurrence before the
+     * re-resolve happened anyway. One run reached 30.1 s with 3 retries.
+     * Start time tracks the upstream 500 COUNT almost exactly (0 500s ->
+     * 15.8 s; 3-4 500s -> 26-28 s or no start at all), which is the honest
+     * shape of the problem: it is the origin, not our retry policy.
+     */
     private fun parseMaster(masterUrl: String): Pair<String, String?>? {
         val req = buildCdnRequest(masterUrl).build()
         val t0 = System.currentTimeMillis()
@@ -1406,6 +1418,8 @@ class LiveStreamProxy(
          * link refills it, while rungs at or below this held ~18-20 s of
          * buffer with near-zero rebuffering.
          */
+        /** Re-asks of the SAME master URL after a 5xx, before falling back
+         *  to a full (3-4 s) re-resolve. */
         const val MAX_VARIANT_BPS = 4_500_000L
 
         /** How many rolled-off segment names to remember per channel. */
