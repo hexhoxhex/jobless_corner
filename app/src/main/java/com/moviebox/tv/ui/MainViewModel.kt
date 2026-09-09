@@ -622,7 +622,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 liveLoadedAt = android.os.SystemClock.elapsedRealtime()
                 _state.update {
                     it.copy(
-                        liveChannels = c, liveSchedule = s, liveLoading = false,
+                        liveChannels = c.ifEmpty { it.liveChannels },
+                        // Same rule as the cold-load path: an empty result
+                        // from a flaky host must not erase a good catalog.
+                        liveSchedule = s.ifEmpty { it.liveSchedule },
+                        liveLoading = false,
                     )
                 }
                 // Every schedule refresh is a chance for a followed team's
@@ -1216,12 +1220,30 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             // anything otherwise (the SPA + the TV's UI both read from
             // `state.liveSchedule` which is set by the same loadLive flow
             // the user usually triggers via the LIVE tab).
-            val schedule = runCatching { liveRepo.schedule() }.getOrNull().orEmpty()
+            // .orEmpty() here used to WIPE a perfectly good schedule.
+            //
+            // raw.githubusercontent.com 503s intermittently (measured: 1 of 3
+            // consecutive requests, the other two returning the full 113 KB).
+            // A failed fetch became an empty list, which was then written
+            // straight into state — so simply playing a channel during a
+            // wobble replaced 231 loaded events with 0 and the Schedule tab
+            // went blank until something reloaded it. That is the "why is the
+            // schedule empty" report.
+            //
+            // Rule: a failed fetch is not the same as "there is nothing".
+            // Keep what we already have and let the next refresh replace it.
+            val fetched = runCatching { liveRepo.schedule() }.getOrNull()
+            val schedule = if (!fetched.isNullOrEmpty()) {
+                fetched
+            } else {
+                _state.value.liveSchedule
+            }
             _state.update { it.copy(liveChannels = channels, liveSchedule = schedule) }
             android.util.Log.i(
                 "LiveDiag",
                 "VM playScheduleChannel cold-load: channels=${channels.size} " +
-                    "schedule=${schedule.size}",
+                    "schedule=${schedule.size}" +
+                    if (fetched.isNullOrEmpty()) " (schedule fetch failed — kept previous)" else "",
             )
             val ch = channels.firstOrNull { it.id == channelId } ?: return@launch
             playChannel(ch)

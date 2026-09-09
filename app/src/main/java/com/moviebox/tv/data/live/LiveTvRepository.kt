@@ -41,7 +41,35 @@ class LiveTvRepository {
     @Volatile private var cachedHealth: Map<String, HealthEntry>? = null
     @Volatile private var cachedHealthAt: Long = 0L
 
-    private suspend fun fetch(url: String): String = withContext(Dispatchers.IO) {
+    /**
+     * Fetch a catalog file, retrying a 5xx.
+     *
+     * raw.githubusercontent.com returns intermittent 503s — measured 1 in 3
+     * consecutive requests, with the other two serving the full file. A
+     * single retry turns almost all of those into a success, which matters
+     * because a failed catalog fetch used to surface as an empty channel
+     * list or an empty schedule.
+     */
+    private suspend fun fetch(url: String): String {
+        var last: Throwable? = null
+        repeat(FETCH_ATTEMPTS) { attempt ->
+            try {
+                return fetchOnce(url)
+            } catch (t: Throwable) {
+                last = t
+                val retriable = (t.message ?: "").contains("HTTP 5")
+                if (!retriable || attempt == FETCH_ATTEMPTS - 1) throw t
+                android.util.Log.w(
+                    "LiveDiag",
+                    "CATALOG ${t.message} — retry ${attempt + 1}/${FETCH_ATTEMPTS - 1}",
+                )
+                kotlinx.coroutines.delay(FETCH_RETRY_MS)
+            }
+        }
+        throw last ?: IllegalStateException("fetch failed: $url")
+    }
+
+    private suspend fun fetchOnce(url: String): String = withContext(Dispatchers.IO) {
         http.newCall(Request.Builder().url(url).get().build()).execute().use { r ->
             if (!r.isSuccessful) error("HTTP ${r.code} fetching $url")
             r.body?.string() ?: error("empty body from $url")
@@ -185,6 +213,10 @@ class LiveTvRepository {
     }
 
     companion object {
+        /** Total tries for a catalog file (1 initial + 2 retries). */
+        private const val FETCH_ATTEMPTS = 3
+        private const val FETCH_RETRY_MS = 700L
+
         private const val REPO = "hexhoxhex/mkurugenzi_viewer"
         private const val BRANCH = "main"
         private const val BASE =
