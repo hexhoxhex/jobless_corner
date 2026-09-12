@@ -745,6 +745,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun playChannel(ch: Channel) {
+        // Deliberately picking a channel always gets a fresh attempt, even
+        // if its source was declared down a moment ago. Automatic retries
+        // do NOT reset that back-off — see LiveStreamProxy.clearSourceDown.
+        runCatching { liveProxy.clearSourceDown(ch.id) }
         // Record the view so live TV shows up in viewing history — channels
         // were previously never recorded anywhere, leaving the "TV stations"
         // side of history empty. Kept out of WatchHistory on purpose: a

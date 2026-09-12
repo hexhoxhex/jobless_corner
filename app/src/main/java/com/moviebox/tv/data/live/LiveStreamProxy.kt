@@ -364,6 +364,13 @@ class LiveStreamProxy(
         // Start the channel with a clean slate — a fresh session gets a
         // fresh window, and yesterday's dead names must not block it.
         deadSegments.remove(channelId)
+        // NOTE: deliberately does NOT clear the source-down back-off.
+        // invalidate() is called on the AUTOMATIC retry path, so clearing it
+        // here let every auto-retry wipe the back-off and the resolve/503
+        // loop resumed within seconds — the honest "source is down" message
+        // appeared and was then overwritten by "Preparing player…" again.
+        // Only an explicit user re-selection should give a dead source a
+        // fresh chance; see [clearSourceDown].
         resolver.resetCachedHost()
     }
 
@@ -808,6 +815,10 @@ class LiveStreamProxy(
                 resolver.reportSuccess(channelId)
 
                 val dt = System.currentTimeMillis() - tStart
+                // Real playlist data reached the player — the source is
+                // alive, whatever it did a moment ago.
+                sourceDownStreak.remove(channelId)
+                sourceDownUntil.remove(channelId)
                 Log.i(DIAG, "PROXY ch=$channelId inner OK attempt=$attempt " +
                     "dt=${dt}ms disc=$discInserted host=${hostOf(entry.innerUrl)} " +
                     "mediaSeq=$newMediaSeq " +
@@ -920,6 +931,30 @@ class LiveStreamProxy(
         }
         Log.w(DIAG, "PROXY ch=$channelId GIVE_UP code=$lastResponseCode " +
             "cacheAge=${cacheAge}ms (returning 503)")
+        // An authoritative 4xx on the INNER playlist counts toward the
+        // source-down streak too.
+        //
+        // The first version of this only counted resolve/master failures,
+        // which missed the exact case observed on Nicktoons: the master
+        // fetch SUCCEEDS and the inner playlist answers 403 (authDead) every
+        // time, so ensureCached kept succeeding, the streak kept resetting,
+        // and the loop ran forever with an optimistic badge. The token the
+        // CDN hands us simply is not accepted; re-resolving produces another
+        // one that is refused the same way.
+        if (lastResponseCode in listOf(401, 403, 410)) {
+            val streak = (sourceDownStreak[channelId] ?: 0) + 1
+            sourceDownStreak[channelId] = streak
+            if (streak >= SOURCE_DOWN_STREAK) {
+                sourceDownUntil[channelId] =
+                    System.currentTimeMillis() + SOURCE_DOWN_COOLDOWN_MS
+                Log.w(
+                    DIAG,
+                    "PROXY ch=$channelId source DOWN (inner $lastResponseCode x$streak) " +
+                        "— backing off ${SOURCE_DOWN_COOLDOWN_MS / 1000}s",
+                )
+                LiveStatus.note("✗  This channel's source is down — try another")
+            }
+        }
         // Out of retries AND no fresh cache. 503 = "retry me" rather than
         // "give up" so ExoPlayer doesn't burn its own retry budget on
         // this one.
@@ -1236,13 +1271,68 @@ class LiveStreamProxy(
      *  find a cache populated by the background refresh that's still
      *  running on the IO dispatcher. */
     private fun ensureCached(channelId: String): CacheEntry? {
+        // NOTE: a cache hit does NOT reset the source-down streak. The
+        // observed failure has a WORKING master and a 403 inner playlist, so
+        // resetting here wiped every inner-403 increment on the next call
+        // and the back-off could never engage. The streak is cleared only
+        // when an inner fetch actually succeeds (see "inner OK").
         cache[channelId]?.let { return it }
-        return runBlocking {
+        // A source that is genuinely down must not be retried forever.
+        //
+        // Observed on Nicktoons: the CDN answered `503 Backend fetch failed`
+        // to EVERY master fetch, and each attempt first paid a ~4 s resolve.
+        // The proxy simply looped — resolve, 503, resolve, 503 — while the
+        // badge said "Preparing player…" indefinitely. The channel has no
+        // schedule siblings either, so auto-switch had nothing to offer
+        // ("AUTOSWITCH no siblings"). The user was left staring at a
+        // hopeful message that would never come true.
+        //
+        // After [SOURCE_DOWN_STREAK] consecutive failures, stop re-resolving
+        // for a cooldown and fail FAST instead. That lets ExoPlayer's retry
+        // budget actually run out, so the player reports an error the user
+        // can act on, rather than spinning forever.
+        val downSince = sourceDownUntil[channelId] ?: 0L
+        if (System.currentTimeMillis() < downSince) return null
+
+        val entry = runBlocking {
             kotlinx.coroutines.withTimeoutOrNull(ENSURE_CACHED_TIMEOUT_MS) {
                 refreshCache(channelId)
             }
         }
+        if (entry != null) {
+            sourceDownStreak.remove(channelId)
+            return entry
+        }
+        val streak = (sourceDownStreak[channelId] ?: 0) + 1
+        sourceDownStreak[channelId] = streak
+        if (streak >= SOURCE_DOWN_STREAK) {
+            sourceDownUntil[channelId] =
+                System.currentTimeMillis() + SOURCE_DOWN_COOLDOWN_MS
+            Log.w(
+                DIAG,
+                "PROXY ch=$channelId source DOWN after $streak consecutive " +
+                    "failures — backing off ${SOURCE_DOWN_COOLDOWN_MS / 1000}s " +
+                    "and reporting offline",
+            )
+            // Say something true instead of "Preparing player…".
+            LiveStatus.note("✗  This channel's source is down — try another")
+        }
+        return null
     }
+
+    /** Give a channel's source a clean slate. Called when the USER picks
+     *  the channel, so a deliberate retry is always honoured even while a
+     *  back-off is active. */
+    fun clearSourceDown(channelId: String) {
+        sourceDownStreak.remove(channelId)
+        sourceDownUntil.remove(channelId)
+    }
+
+    /** Consecutive resolve/master failures, per channel. */
+    private val sourceDownStreak = ConcurrentHashMap<String, Int>()
+
+    /** Wall-clock until which we stop re-resolving a dead source. */
+    private val sourceDownUntil = ConcurrentHashMap<String, Long>()
 
     /** Re-resolve donis for this channel; populate the cache. Serialized
      *  per-channel via a Mutex so two concurrent refreshes don't double-fire
@@ -1421,6 +1511,17 @@ class LiveStreamProxy(
         /** Re-asks of the SAME master URL after a 5xx, before falling back
          *  to a full (3-4 s) re-resolve. */
         const val MAX_VARIANT_BPS = 4_500_000L
+
+        /** Consecutive resolve/master failures before we declare the
+         *  source down and stop hammering it. Four is roughly 20-25 s of
+         *  trying, which is long enough to ride out a transient blip and
+         *  short enough that the user is not left guessing. */
+        private const val SOURCE_DOWN_STREAK = 4
+
+        /** How long to stop re-resolving a source we have declared down.
+         *  Short enough that a recovered channel comes back on the next
+         *  attempt without an app restart. */
+        private const val SOURCE_DOWN_COOLDOWN_MS = 60_000L
 
         /** How many rolled-off segment names to remember per channel. */
         private const val DEAD_SEGMENT_MEMORY = 64
