@@ -491,6 +491,9 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                 },
                 onBack = { vm.back() },
                 modifier = Modifier.fillMaxSize(),
+                onPlaying = { backend ->
+                    vm.onWebPlayerPlaying(state.currentLiveChannel.id, backend)
+                },
             )
         } else if (play != null && play.mediaUrl.isNotBlank()) {
             VideoPlayer(
@@ -618,7 +621,13 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
         //     even if we didn't get the surface callback.
         //   - buffering==false AND playLoading==false — we're not in any
         //     "loading" state per ExoPlayer's own semantics.
+        // NOT while the WebView player is in charge. Every input below is
+        // ExoPlayer state, and ExoPlayer renders nothing once the WebView
+        // takes over — so this stayed true forever and drew a 60%-black
+        // "Starting…" layer permanently over a web player that could be
+        // playing underneath it. The web player has its own status UI.
         val showFullscreenLoader = play != null && play.mediaUrl.isNotBlank() &&
+            !state.useLiveWebPlayer &&
             !hasRenderedFrame && !playing &&
             (state.playLoading || buffering)
         if (showFullscreenLoader) {
@@ -2651,12 +2660,30 @@ private fun VideoPlayer(
                         android.util.Log.w(
                             "VodDiag",
                             "VOD STALL pos frozen at $pos for " +
-                                "${(now - vodStallSince) / 1000}s — recovery #$vodStallStrikes",
+                                "${(now - vodStallSince) / 1000}s — recovery #$vodStallStrikes " +
+                                "buffered=${(exo.bufferedPosition - pos).coerceAtLeast(0)}ms",
                         )
                         com.moviebox.tv.debug.Telemetry.onFreeze()
                         when (vodStallStrikes) {
+                            // 1. Transient hiccup: re-prepare what we have.
                             1 -> runCatching { exo.prepare() }
-                            2 -> if (!downgradeState.value()) vodStallStrikes++
+                            // 2. Get a FRESH stream URL and resume here.
+                            //
+                            // These URLs are token-signed and short-lived —
+                            // VixSrc mints a token per request and a feature
+                            // film outlives it, which is the same expiry that
+                            // used to end Spider-Man at 89 min of 121 (see
+                            // the STATE_ENDED path below, where re-resolving
+                            // resumed it instantly). A bare prepare() re-uses
+                            // the DEAD url, so on an expired stream strike 1
+                            // could never work and the viewer sat through the
+                            // whole escalation — 20 s frozen per strike —
+                            // before anything that could actually help ran.
+                            // Same provider, same position, new token.
+                            2 -> reloadState.value(pos)
+                            // 3. Still stuck: it looks bandwidth-bound.
+                            3 -> if (!downgradeState.value()) vodStallStrikes++
+                            // 4. Nothing worked — try a different source.
                             else -> failoverState.value()
                         }
                         vodStallSince = 0L

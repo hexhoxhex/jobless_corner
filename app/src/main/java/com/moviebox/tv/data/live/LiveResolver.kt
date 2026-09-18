@@ -259,7 +259,7 @@ class LiveResolver(
                     }
                 }
             }
-            for (path in PLAYER_PATHS) {
+            for (path in playerPathsFor(channelId)) {
                 probes += async {
                     runCatching { tryPlayerPath(channelId, path) }.getOrNull()
                         ?.let { it to "dlhd:$path" }
@@ -342,7 +342,7 @@ class LiveResolver(
                             }
                         }
                     }
-                    for (path in PLAYER_PATHS) {
+                    for (path in playerPathsFor(channelId)) {
                         fallbackProbes += async {
                             runCatching { tryPlayerPath(channelId, path) }
                                 .getOrNull()?.let { it to "dlhd:$path" }
@@ -598,20 +598,40 @@ class LiveResolver(
      *  null and get skipped. The primary win is the /plus/ path, which
      *  routes Kenya-reachable via vinix.inproviszon.st. */
     private suspend fun tryPlayerPath(channelId: String, path: String): String? {
+        val t0 = System.currentTimeMillis()
         val wrapper = "https://dlhd.st/$path/stream-$channelId.php"
         val referer = "https://dlhd.st/watch.php?id=$channelId"
+        var finalWrapper = wrapper
         val iframeUrl = runCatching {
             val req = Request.Builder().url(wrapper)
                 .header("Referer", referer)
                 .header("User-Agent", CHROME_ANDROID_UA)
                 .build()
-            client.newCall(req).execute().use { r ->
-                if (!r.isSuccessful) return@use null
+            pageClient.newCall(req).execute().use { r ->
+                if (!r.isSuccessful) {
+                    logPath(channelId, path, t0, "wrapper HTTP ${r.code}")
+                    return@use null
+                }
+                finalWrapper = r.request.url.toString()
                 val body = r.body?.string().orEmpty()
                 IFRAME_RE.find(body)?.groupValues?.get(1)
-                    ?.takeIf { "dlhd.st" !in it && "dlhd.pk" !in it }
+                    ?.takeIf { "dlhd." !in it && "dlive." !in it }
             }
-        }.getOrNull() ?: return null
+        }.getOrElse {
+            logPath(channelId, path, t0, "wrapper ${it.javaClass.simpleName}")
+            null
+        } ?: return null
+
+        // Walk the embed chain headlessly first. epiembeds (and whatever
+        // else adopts the same scheme) hides the stream behind an XOR-
+        // decoded array and sits one iframe BELOW the host the wrapper
+        // names (flyembed.click -> epiembeds.online). Decoding that here
+        // costs a couple of plain GETs instead of a ~10 MB WebView that
+        // routinely lost the race to the fast-but-dead phantemlis answer.
+        walkEmbed(iframeUrl, finalWrapper, depth = 0)?.let { (url, how) ->
+            logPath(channelId, path, t0, "OK via $how -> ${hostFromUrl(url)}")
+            return url
+        }
 
         // Extract the m3u8 URL from the iframe body. Three resolver shapes:
         //   - atob-encoded (hamis on PLAYER 1/3): `window.atob('<b64>')`
@@ -665,6 +685,104 @@ class LiveResolver(
         // after a faster daddyN answer has already resolved.
         return JsIframeResolver.resolve(iframeUrl, wrapper)
     }
+
+    private val pageClient: OkHttpClient by lazy { playerClient() }
+
+    /** /hub/ maps an EVENT feed to a generic channel (8042 -> tntsports1-uk:
+     *  a working stream of the wrong content), so event feeds never race it.
+     *  24/7 channels keep it — there it returns the matching feed. */
+    private fun playerPathsFor(channelId: String): List<String> =
+        if (LiveEventFeeds.isEvent(channelId)) PLAYER_PATHS.filter { it != "hub" }
+        else PLAYER_PATHS
+
+    private fun logPath(channelId: String, path: String, t0: Long, outcome: String) {
+        android.util.Log.i(
+            "LiveDiag",
+            "RESOLVER ch=$channelId dlhd:$path ${System.currentTimeMillis() - t0}ms $outcome",
+        )
+    }
+
+    /**
+     * Follow an embed page down to a stream URL. Tries, in order: atob'd
+     * URL, literal m3u8, XOR-array obfuscation, then one nested iframe
+     * (recursing, max depth 2). Returns the URL and how it was found.
+     */
+    private fun walkEmbed(
+        pageUrl: String,
+        referer: String,
+        depth: Int,
+    ): Pair<String, String>? {
+        val raw = runCatching {
+            val req = Request.Builder().url(pageUrl)
+                .header("Referer", referer)
+                .header("User-Agent", CHROME_ANDROID_UA)
+                .build()
+            pageClient.newCall(req).execute().use { r ->
+                if (!r.isSuccessful) null else r.body?.string()
+            }
+        }.getOrNull() ?: return null
+        // getembed.live writes its stream as a JSON string literal —
+        // `["https:\/\/cdn1.obstreamx.click\/live\/<key>.m3u8"]` — and
+        // M3U8_DIRECT_RE needs literal slashes, so the real Manchester
+        // United feed was invisible to us even though it sat in plain text.
+        val body = raw.replace("\\/", "/")
+
+        // The CDN token is bound to the page that embedded it:
+        // cdn1.obstreamx.click answers 200 with `Origin: getembed.live` and
+        // 403 without. The proxy's hard-coded origin map only knew the old
+        // families, so record the origin of the page we actually pulled the
+        // URL from; buildCdnRequest overlays it for that host.
+        fun found(url: String, how: String): Pair<String, String> {
+            val origin = runCatching {
+                val u = java.net.URI(pageUrl)
+                "${u.scheme}://${u.host}"
+            }.getOrNull()
+            val host = hostFromUrl(url)
+            if (origin != null && host != null) {
+                CapturedHeaders.record(
+                    host,
+                    mapOf("Origin" to origin, "Referer" to "$origin/"),
+                )
+            }
+            return url to how
+        }
+
+        B64_RE.find(body)?.groupValues?.get(1)?.let { b64 ->
+            runCatching {
+                Base64.decode(b64, Base64.DEFAULT).toString(Charsets.UTF_8)
+            }.getOrNull()?.takeIf { ".m3u8" in it }?.let { return found(it, "atob") }
+        }
+        M3U8_DIRECT_RE.find(body)?.value?.let { return found(it, "direct") }
+        decodeXorArray(body)?.let { return found(it, "xor") }
+
+        if (depth < 2) {
+            val nested = ANY_IFRAME_RE.find(body)?.groupValues?.get(1)
+                ?.let { absolutize(it, pageUrl) }
+                ?.takeIf { "dlhd." !in it && "dlive." !in it }
+            if (nested != null) {
+                walkEmbed(nested, pageUrl, depth + 1)?.let { (u, how) ->
+                    return u to "nested/$how"
+                }
+            }
+        }
+        return null
+    }
+
+    /** `((n ^ k) - s + 256) & 255` over the embedded array, then look for
+     *  an m3u8 in the decoded source. */
+    private fun decodeXorArray(body: String): String? {
+        val m = XOR_ARRAY_RE.find(body) ?: return null
+        val nums = m.groupValues[1].split(',').mapNotNull { it.trim().toIntOrNull() }
+        val k = m.groupValues[2].toIntOrNull() ?: return null
+        val sub = m.groupValues[3].toIntOrNull() ?: return null
+        val sb = StringBuilder(nums.size)
+        for (n in nums) sb.append((((n xor k) - sub + 256) and 255).toChar())
+        return M3U8_DIRECT_RE.find(sb)?.value
+    }
+
+    private fun absolutize(src: String, base: String): String? = runCatching {
+        java.net.URI(base).resolve(src.trim()).toString()
+    }.getOrNull()
 
     private fun tryEndpoint(
         host: String, channelId: String, daddySuffix: String,
@@ -811,8 +929,33 @@ class LiveResolver(
          *  use JS-heavy players we can't decode headlessly today but their
          *  target hosts are recorded so a future resolver upgrade can cover
          *  more CDN diversity without touching this file. */
+        // 2026-09-13: the wrapper page (now dlive.sx, which dlhd.st
+        // redirects to) offers SEVEN players. Measured on channel 8042
+        // (Manchester United) while every donis answer pointed at a
+        // phantemlis origin returning 503:
+        //   /hub/     -> flyembed.click -> epiembeds.online
+        //                -> epidd.hundxvision.co.uk   HTTP 200  (WORKS)
+        //   /stream/  -> getembed.live (different obfuscation, not decoded)
+        //   /cast/ /watch/ /plus/ /casting/ -> just wrap /stream/
+        //   /player/  -> HTTP 404 (gone)
+        // /hub/ goes first: it is the route that is actually serving.
         private val PLAYER_PATHS = listOf(
-            "stream", "cast", "watch", "plus", "casting", "player",
+            "hub", "stream", "cast", "watch", "plus", "casting",
+        )
+
+        /** epiembeds-style obfuscation: `var _x=[n,n,...],_k=63,_s=225;`
+         *  decoded as `((n ^ k) - s + 256) & 255` and eval'd. The decoded
+         *  source contains the m3u8 URL literally. */
+        private val XOR_ARRAY_RE = Regex(
+            """=\[([0-9,\s]{40,})\],\s*_?\w+=(\d+),\s*_?\w+=(\d+)""",
+        )
+
+        /** Any iframe src, absolute or relative. [IFRAME_RE] only matches
+         *  absolute URLs, which is why players that iframe a relative
+         *  `/stream/stream-N.php` were silently skipped. */
+        private val ANY_IFRAME_RE = Regex(
+            """<iframe[^>]+src=["']([^"']+)["']""",
+            RegexOption.IGNORE_CASE,
         )
 
         /** `<iframe src="...">` src attribute — first match only. Used both
@@ -866,6 +1009,26 @@ class LiveResolver(
         private const val CHROME_ANDROID_UA =
             "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 " +
                 "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+
+        /**
+         * Client for the player-wrapper and embed PAGE fetches only.
+         *
+         * [defaultClient]'s 3 s call ceiling was set when these pages were
+         * small ("/plus paths in ~1.5-2 s"). The wrappers now weigh ~640 KB
+         * (chat + ad payload) and took 3-8 s to fetch, so every player route
+         * died at the ceiling before its iframe was even read — the resolver
+         * never reached a working CDN and fell back to the dead one. The
+         * donis endpoint keeps the tight client; only these page walks get
+         * room. 8 s still fits inside the proxy's 10 s resolve budget with
+         * ~2 s left for the master fetch.
+         */
+        private fun playerClient(): OkHttpClient = OkHttpClient.Builder()
+            .connectTimeout(3, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(7, java.util.concurrent.TimeUnit.SECONDS)
+            .callTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .build()
 
         private fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
             // Tight timeouts: the resolver now races 11 candidates (5 daddyN

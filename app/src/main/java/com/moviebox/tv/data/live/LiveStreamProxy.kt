@@ -136,11 +136,25 @@ class LiveStreamProxy(
      * (one connection, reused) and stalls here: our fetch times swung between
      * 0.7 s and 14.7 s, which is handshake variance, and a single slow one
      * drains the live buffer.
+     *
+     * HTTP/1.1 ONLY. The live CDNs (api.cdnlivetv.tv, epidd, obstreamx) all
+     * negotiate h2, and OkHttp then multiplexes EVERY request to that host —
+     * the segment being downloaded, the next playlist poll, a feed probe —
+     * onto ONE TCP connection. These origins throttle per connection (they
+     * push viewers to P2P), so the whole channel was squeezed through one
+     * throttled pipe and the tiny playlist poll queued behind a 4.5 MB
+     * segment. Measured on DAZN LaLiga, same origin, order h2/h1/h1/h2:
+     * h2 = 1077-1359 kbps with playlist polls averaging 21.9-24.7 s under
+     * load; h1.1 = 1866-2425 kbps with polls averaging 286-313 ms. On the TV
+     * that showed up as `inner attempt N timeout` (49-63 s) while the stream
+     * sat frozen 81-93% of the time. With h1.1 each concurrent request gets
+     * its own kept-alive connection from the pool.
      */
     private val pooledClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(8, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
         .connectionPool(okhttp3.ConnectionPool(6, 5, TimeUnit.MINUTES))
+        .protocols(listOf(okhttp3.Protocol.HTTP_1_1))
         .build()
 
     /**
@@ -320,16 +334,25 @@ class LiveStreamProxy(
                 channelId, false, playlistMs, 0, declaredKbps, host,
                 "no segments listed",
             )
+        // Duration of that newest segment, from the #EXTINF just before it.
+        val segDurationSec = plBody.lineSequence()
+            .map { it.trim() }
+            .filter { it.startsWith("#EXTINF:") }
+            .lastOrNull()
+            ?.removePrefix("#EXTINF:")?.substringBefore(',')?.toDoubleOrNull()
+            ?: 0.0
         val segUrl = if (segRel.startsWith("http")) segRel else {
             innerUrl.substringBeforeLast('/') + "/" + segRel
         }
 
         var bytes = 0L
+        var segLength = -1L
         val tSeg = System.currentTimeMillis()
         val fetched = runCatching {
             clientFor(segUrl).newCall(buildCdnRequest(segUrl).build())
                 .execute().use { r ->
                     if (!r.isSuccessful) return@use false
+                    segLength = r.body?.contentLength() ?: -1L
                     val stream = r.body?.byteStream() ?: return@use false
                     val buf = ByteArray(16 * 1024)
                     while (true) {
@@ -351,11 +374,43 @@ class LiveStreamProxy(
             )
         }
         val kbps = ((bytes * 8L) / segMs).toInt()  // bytes/ms*8 == kbit/s
+        // No declared bitrate? Work out what the feed really needs from the
+        // segment itself: its full size over its duration.
+        //
+        // Nearly every feed that works today (epidd, obstreamx, cdnlivetv)
+        // serves a MEDIA playlist with no #EXT-X-STREAM-INF, so there is no
+        // BANDWIDTH to read. declaredKbps stayed 0, headroom came out 0, and
+        // FeedRanker.best() filtered every one of them out — auto-switch
+        // logged "found no feed clearing headroom 1.3 among 28" while 4 of
+        // the 6 probed feeds were usable. Content-Length is the size of the
+        // whole segment (measured: 4734780 B for a 10.0 s cdnlivetv segment =
+        // 3788 kbps required), so this is the real requirement, not a guess.
+        val requiredKbps = if (declaredKbps > 0) declaredKbps
+            else if (segLength > 0 && segDurationSec > 0.5) {
+                ((segLength * 8.0) / 1000.0 / segDurationSec).toInt()
+            } else 0
+        val how = if (declaredKbps > 0) "declared" else if (requiredKbps > 0) "from segment" else "unknown"
         return ProbeResult(
-            channelId, true, playlistMs, kbps, declaredKbps, host,
-            "measured ${bytes / 1024}KB in ${segMs}ms",
+            channelId, true, playlistMs, kbps, requiredKbps, host,
+            "measured ${bytes / 1024}KB in ${segMs}ms, needs ${requiredKbps}kbps ($how)",
         )
     }
+
+    /**
+     * Resolve [channelId] straight into the serving cache and return the
+     * master URL, or null if no source answered.
+     *
+     * Channel start used to resolve TWICE. The ViewModel pre-resolved via
+     * [LiveResolver.resolveStream] to "prime" the proxy, but that result was
+     * never stored anywhere the proxy reads — it only decided whether a URL
+     * existed — so the player's first /master found an empty cache and ran
+     * the whole race again. Measured on 7 starts: every one paid two full
+     * races back to back (e.g. Viaplay Sports 1: 3.9 s race discarded, then a
+     * 5.0 s race, first frame 11.3 s). Resolving here fills the cache, so the
+     * player's first /master is a hit and the start costs one race.
+     */
+    suspend fun prime(channelId: String): String? =
+        refreshCache(channelId)?.masterUrl
 
     fun invalidate(channelId: String) {
         Log.i(DIAG, "PROXY ch=$channelId INVALIDATE (caller-requested)")
@@ -1349,7 +1404,26 @@ class LiveStreamProxy(
             }
             val masterUrl = resolver.resolveStream(channelId) ?: return@withLock null
             // Fetch master once to learn the inner URL + STREAM-INF line.
-            val (innerUrl, streamInf) = parseMaster(masterUrl) ?: return@withLock null
+            val parsed = parseMaster(masterUrl)
+            if (parsed == null) {
+                // Tell the resolver the CDN failed at the MASTER.
+                //
+                // Only an inner-playlist 401/403/410 used to reach
+                // reportAuthFailure, and that call is the ONLY thing that
+                // arms the global "avoid the dead family" cooldown. The
+                // current outage fails one step earlier — the master returns
+                // `503 Backend fetch failed` — so the cooldown was never
+                // armed. Channel 8042 happened to carry an older inner-403 and
+                // correctly took the working /hub/ route; every other channel
+                // kept picking the dead origin even when a healthy alternate
+                // had already come back from the race (measured: ch 1023 got
+                // an akamaized URL at 2.9 s and still "won" on phantemlis at
+                // 5.1 s). The resolver ignores hosts outside the dead family,
+                // and single-CDN channels stay exempt via alternateless.
+                runCatching { resolver.reportAuthFailure(channelId, hostOf(masterUrl)) }
+                return@withLock null
+            }
+            val (innerUrl, streamInf) = parsed
             val entry = CacheEntry(
                 masterUrl = masterUrl,
                 innerUrl = innerUrl,
@@ -1599,7 +1673,13 @@ class LiveStreamProxy(
         // backoff — so a socket timeout on the localhost proxy is still
         // recoverable via retry, whereas the premature 503 was pushing
         // the user onto AUTO_FAILOVER unnecessarily.
-        private const val ENSURE_CACHED_TIMEOUT_MS: Long = 10_000L
+        // 14 s (was 10 s). The working embed routes are slower than the dead
+        // donis answer: measured resolves on the TV of 9.1, 10.7, 13.7 and
+        // 14.3 s. Every one past 10 s returned 503 to the player, stalled
+        // it, and set auto-switch off — which then walked the viewer AWAY
+        // from the feed that had been working. ExoPlayer waits 20 s on this
+        // proxy (PlayerScreen setReadTimeoutMs), so 14 s is still inside it.
+        private const val ENSURE_CACHED_TIMEOUT_MS: Long = 14_000L
         /** Keep this many recent segment URIs per channel so we can detect
          *  overlap when the proxy crosses a sibling boundary. ExoPlayer's
          *  live buffer is ~60 s at 4 s segments → ~15 segments, so 20 is

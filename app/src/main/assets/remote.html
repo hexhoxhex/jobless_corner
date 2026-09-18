@@ -319,13 +319,20 @@
       <!-- Tapping the hero opens the playing title's details (cast, overview,
            trailer, other episodes) without interrupting playback. -->
       <div class="np-hero np-hero-tap" id="npHero" role="button" tabindex="0">
-        <img id="npCover" class="np-cover" alt="" onerror="this.style.visibility='hidden'"/>
+        <img id="npCover" class="np-cover" alt="" onerror="npCoverFallback()"/>
+        <!-- Shown instead of the poster when the title has no artwork, so the
+             hero never collapses into a bare line of text. -->
+        <div id="npCoverPh" class="np-cover np-cover-ph" hidden aria-hidden="true">
+          <svg class="icon lg"><use href="#i-play"/></svg>
+        </div>
         <div class="np-hero-meta">
           <div class="np-title" id="npTitle">Nothing playing</div>
           <div class="np-ep" id="npEp" hidden></div>
           <div class="np-info-hint" id="npInfoHint" hidden>Tap for info</div>
         </div>
       </div>
+      <!-- Synopsis of what is playing. Tap to expand past three lines. -->
+      <div id="npDesc" class="np-desc" hidden></div>
       <!-- Scrubber: drag to seek the TV's playback. Pattern mirrors the
            volume slider below — input drives a live preview, the actual
            seek fires on `change` (mouse/touch up) so we don't spam the
@@ -352,9 +359,16 @@
       <button id="epList" class="ghost np-eps np-eps-btn" data-show-eps="false">
         <svg class="icon"><use href="#i-tune"/></svg> All episodes
       </button>
+      <!-- Prev/Next belong to a series only. -->
       <div class="row np-eps" data-show-eps="false">
         <button id="epPrev" class="ghost">⏮ Prev ep</button>
         <button id="epNext" class="ghost">Next ep ⏭</button>
+      </div>
+      <!-- Stop applies to anything on screen, so it lives OUTSIDE the
+           episode row. It used to sit inside it and inherited that row's
+           visibility: hidden for whatever the remote considered "not a
+           series". Stopping a film is not a series-only action. -->
+      <div class="row">
         <button id="npClose" class="ghost"><svg class="icon"><use href="#i-close"/></svg> Stop</button>
       </div>
     </div>

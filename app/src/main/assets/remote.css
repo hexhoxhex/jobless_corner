@@ -966,6 +966,17 @@ button.icon-btn { flex: 0 0 auto; padding: 8px 10px; }
   display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
 .np-hero .np-ep { margin-top: 6px; font-size: .85rem;
   color: var(--accent, #e5484d); font-weight: 600; }
+.np-cover-ph {
+  display: flex; align-items: center; justify-content: center;
+  color: var(--muted, #9aa4b2); background: var(--surface-3, #10141c); }
+.np-cover-ph[hidden] { display: none; }
+.np-desc {
+  margin: 0 0 14px; font-size: .88rem; line-height: 1.45;
+  color: var(--muted, #9aa4b2); cursor: pointer;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+  overflow: hidden; }
+.np-desc.expanded { display: block; }
+.np-desc[hidden] { display: none; }
 
 /* ---- Continue Watching cards ---- */
 .list .cw-item { padding: 10px; align-items: center; gap: 12px; }

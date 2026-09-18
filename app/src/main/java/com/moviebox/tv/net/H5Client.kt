@@ -45,8 +45,59 @@ object H5Client {
     // last-resort try when the org path returns no usable stream. If a
     // channel returns url:"" via .org, try .ph — for movies the user has
     // access to via cookies/auth pushed from the WebView it may unlock.
-    const val PROXY_BASE = "https://themoviebox.org"
+    /** Where the site lived when this build shipped. Only a starting point:
+     *  the real origin is whatever it redirects to today, learned at warm
+     *  time by [noteSiteBase] and remembered across launches.
+     *
+     *  2026-09-18: themoviebox.org now 301s to officialmoviebox.com and
+     *  moviebox.ph to movieboxhd.net. The session token (`mb_token`) is
+     *  minted on the NEW host, and the warm harvested cookies from a fixed
+     *  list of the OLD hosts, so it collected nothing and every
+     *  `/subject/search` came back `400 PARAMS_ERROR "invalid token"` — an
+     *  empty home screen, with search surviving only on the backup providers.
+     *  Domains here rotate; treat the configured one as a hint, never a fact. */
+    private const val DEFAULT_PROXY_BASE = "https://themoviebox.org"
     const val PROXY_FALLBACK_BASE = "https://moviebox.ph"
+
+    private const val SITE_PREFS = "h5_site"
+    private const val KEY_SITE_BASE = "site_base"
+
+    @Volatile private var discoveredBase: String? = null
+
+    /** The site's origin as of the last page load we actually followed. */
+    val PROXY_BASE: String
+        get() = discoveredBase ?: loadSiteBase() ?: DEFAULT_PROXY_BASE
+
+    private fun loadSiteBase(): String? = runCatching {
+        com.moviebox.tv.App.instance
+            .getSharedPreferences(SITE_PREFS, android.content.Context.MODE_PRIVATE)
+            .getString(KEY_SITE_BASE, null)
+            ?.takeIf { it.startsWith("https://") }
+            ?.also { discoveredBase = it }
+    }.getOrNull()
+
+    /** Record the origin a real page load ended on, redirects included. */
+    fun noteSiteBase(finalUrl: String?) {
+        val host = runCatching { java.net.URI(finalUrl).host }.getOrNull()
+        if (host.isNullOrBlank()) return
+        val base = "https://$host"
+        if (base == discoveredBase) return
+        discoveredBase = base
+        android.util.Log.i("H5", "site base -> $base")
+        runCatching {
+            com.moviebox.tv.App.instance
+                .getSharedPreferences(SITE_PREFS, android.content.Context.MODE_PRIVATE)
+                .edit().putString(KEY_SITE_BASE, base).apply()
+        }
+    }
+
+    /** Hosts worth harvesting cookies from, current origin first. */
+    fun cookieHosts(): List<String> {
+        val out = LinkedHashSet<String>()
+        runCatching { java.net.URI(PROXY_BASE).host }.getOrNull()?.let { out.add(it) }
+        out.addAll(listOf("themoviebox.org", "moviebox.ph", "h5-api.aoneroom.com"))
+        return out.toList()
+    }
 
     /** Detail-path slugs in our catalog don't exist, so we synthesise one. The
      *  proxy's `/subject/play` ignores it as long as it's present and matches
@@ -54,7 +105,7 @@ object H5Client {
      *  detail call is plugged in when we have one. */
     private const val SYNTHETIC_DETAIL_PATH_SUFFIX = "-aXXxxXXxxXX"
 
-    private const val PAGE_REFERER = "$PROXY_BASE/"
+    private val PAGE_REFERER: String get() = "$PROXY_BASE/"
     /** Browser User-Agent — themoviebox.org's edge inspects this. */
     private const val BROWSER_UA =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
@@ -254,13 +305,10 @@ object H5Client {
             .header("User-Agent", BROWSER_UA)
             .header("Accept", accept)
             .header("Referer", PAGE_REFERER)
-            .header("X-Client-Token", Crypto.clientToken(ts))
-            .header("x-tr-signature", sig)
             .header("X-Client-Info", X_CLIENT_INFO)
-            .header("X-Client-Status", "0")
             .header("x-request-lang", "en")
             .get()
-        effectiveBearer()?.let { builder.header("Authorization", "Bearer $it") }
+        applyAuth(builder, ts, sig)
         return client.newCall(builder.build()).execute().use { r ->
             absorbXUser(r.header("x-user"))
             if (!r.isSuccessful) error("H5 ${r.code} on $path")
@@ -289,19 +337,69 @@ object H5Client {
             .header("Accept", "application/json")
             .header("Content-Type", contentType)
             .header("Referer", PAGE_REFERER)
-            .header("X-Client-Token", Crypto.clientToken(ts))
-            .header("x-tr-signature", sig)
             .header("X-Client-Info", X_CLIENT_INFO)
             .header("x-request-lang", "en")
-            .header("X-Client-Status", "0")
             .post(jsonBody.toRequestBody(contentType.toMediaType()))
-        effectiveBearer()?.let { builder.header("Authorization", "Bearer $it") }
+        applyAuth(builder, ts, sig)
         return client.newCall(builder.build()).execute().use { r ->
             absorbXUser(r.header("x-user"))
+            val text = r.body?.string().orEmpty()
             android.util.Log.i("H5", "POST $path -> ${r.code} (bearer=${if (bearer.isNullOrBlank()) "NO" else "YES"})")
-            if (!r.isSuccessful) error("H5 ${r.code} on $path")
-            r.body?.string().orEmpty()
+            if (!r.isSuccessful) {
+                // "invalid token" means our session is stale — which is what a
+                // domain rotation looks like from here. Re-mint in the
+                // background so the next call works, instead of serving a
+                // half-empty catalog until the app is updated.
+                if (r.code == 400 && text.contains("invalid token", ignoreCase = true)) {
+                    onInvalidToken()
+                }
+                error("H5 ${r.code} on $path")
+            }
+            text
         }
+    }
+
+    /**
+     * Authenticate a request the way the site itself does.
+     *
+     * Captured from the site's own bundle (2026-09-18):
+     *
+     *     Authorization: i.value ? `Bearer ${i.value}` : "",
+     *     ...i.value ? {} : {"X-Client-Token": BA()},
+     *
+     * The client token goes out ONLY when there is no bearer, and nothing is
+     * signed any more — `x-tr-signature` and `X-Client-Status` are gone.
+     * Sending the extra header alongside a perfectly good bearer is what the
+     * backend now rejects. Measured against the live API with the same body
+     * and one valid token: bearer alone -> 200 with 13 results; bearer PLUS
+     * X-Client-Token -> 400 "invalid token"; no bearer -> 400. That single
+     * extra header was emptying the entire catalog — home rows blank, search
+     * falling through to the backup providers only.
+     */
+    private fun applyAuth(builder: Request.Builder, ts: Long, signature: String) {
+        val tok = effectiveBearer()
+        if (!tok.isNullOrBlank()) {
+            builder.header("Authorization", "Bearer $tok")
+            return
+        }
+        builder.header("X-Client-Token", Crypto.clientToken(ts))
+            .header("x-tr-signature", signature)
+            .header("X-Client-Status", "0")
+    }
+
+    /** At most one re-mint per this window; the WebView mint is not free. */
+    private const val RE_MINT_INTERVAL_MS = 60_000L
+
+    @Volatile private var lastReMintAt = 0L
+
+    /** Throttled re-mint of the session token. */
+    private fun onInvalidToken() {
+        val now = System.currentTimeMillis()
+        if (now - lastReMintAt < RE_MINT_INTERVAL_MS) return
+        lastReMintAt = now
+        android.util.Log.w("H5", "server rejected our token — re-minting the session")
+        resetSession()
+        runCatching { H5PlayResolver.warmSession() }
     }
 
     /** Refresh the bearer when a response rotates the JWT. */

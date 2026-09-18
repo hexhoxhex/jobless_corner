@@ -70,9 +70,15 @@ object H5PlayResolver {
                     settings.userAgentString = BROWSER_UA
                     webViewClient = WebViewClient()
                 }
-                wv.loadUrl("https://themoviebox.org/")
+                wv.loadUrl(H5Client.PROXY_BASE + "/")
                 fun harvest() {
-                    for (host in listOf("moviebox.ph", "themoviebox.org", "h5-api.aoneroom.com")) {
+                    // Harvest from where the page ACTUALLY ended up. The site
+                    // rotates domains (themoviebox.org -> officialmoviebox.com
+                    // on 2026-09-18) and mints mb_token on the new host, so a
+                    // fixed host list silently collects nothing and the whole
+                    // catalog drops to "invalid token".
+                    runCatching { wv.url }.getOrNull()?.let { H5Client.noteSiteBase(it) }
+                    for (host in H5Client.cookieHosts()) {
                         cm.getCookie("https://$host/")?.let { H5Client.pushCookies(host, it) }
                     }
                     runCatching { wv.stopLoading(); wv.loadUrl("about:blank"); wv.destroy() }
@@ -81,8 +87,10 @@ object H5PlayResolver {
                 val poll = object : Runnable {
                     override fun run() {
                         elapsed += WARM_POLL_MS
-                        val minted = cm.getCookie("https://themoviebox.org/")
-                            ?.contains("mb_token") == true
+                        val current = runCatching { wv.url }.getOrNull()
+                            ?.takeIf { it.startsWith("http") }
+                            ?: (H5Client.PROXY_BASE + "/")
+                        val minted = cm.getCookie(current)?.contains("mb_token") == true
                         if (minted) {
                             Log.i(TAG, "warmSession: mb_token minted after ${elapsed}ms")
                             harvest()

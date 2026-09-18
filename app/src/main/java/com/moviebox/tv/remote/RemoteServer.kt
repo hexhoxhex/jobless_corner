@@ -85,8 +85,8 @@ class RemoteServer(
         // the box during development — no more asking the user to tap
         // the channel by hand on every rebuild.
         if (dev == null && (ip == "127.0.0.1" || ip == "::1")) {
-            dev = RemoteAccess.pair(code = null, ip = ip, label = "loopback (adb)")
-                .also { RemoteAccess.setRole(it.token, RemoteAccess.Role.SUPERUSER) }
+            // One shared record, not a new persisted device per request.
+            dev = RemoteAccess.loopbackDevice(ip)
         }
         if (!RemoteAccess.canAccess(dev)) {
             return newFixedLengthResponse(
@@ -755,6 +755,14 @@ class RemoteServer(
             // probe/cached -> best pick -> switch) without waiting for a
             // real stall. Shipping an auto-switch that has never been seen
             // to fire is not shipping a feature.
+            // Force the WebView player for whatever channel is on screen.
+            // Diagnostics: lets the fallback be tested directly instead of
+            // waiting for the native cascade to give up.
+            uri == "/api/debug/webplayer" && method == Method.POST -> {
+                RemoteController.forceWebPlayer()
+                ok()
+            }
+
             uri == "/api/debug/autoswitch" && method == Method.POST -> {
                 RemoteController.forceAutoSwitch()
                 ok()
@@ -1033,6 +1041,10 @@ class RemoteServer(
         .put("type", RemoteController.nowPlayingType)
         .put("year", RemoteController.nowPlayingYear ?: JSONObject.NULL)
         .put("cover", RemoteController.nowPlayingCover ?: "")
+        // Whether this is a series, and its synopsis — the Now Playing card
+        // shows the description, and hides episode controls on a movie.
+        .put("isSeries", RemoteController.nowPlayingIsSeries)
+        .put("description", RemoteController.nowPlayingDescription)
         // Subtitle tracks + current selection for the phone's CC menu.
         .put("subtitles", JSONArray().apply {
             RemoteController.availableSubtitles.forEach { (code, name) ->

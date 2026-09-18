@@ -125,6 +125,23 @@ object RemoteController {
     val nowPlayingSubjectId: String? get() = vm?.state?.value?.detailItem?.subjectId
     val nowPlayingType: Int get() = vm?.state?.value?.detailItem?.type?.code ?: 0
     val nowPlayingYear: Int? get() = vm?.state?.value?.detailItem?.year
+
+    /** Is the thing on screen a SERIES? The remote used to infer this from
+     *  the type code and had it wrong (`type === 1` is MOVIE; TV_SERIES is
+     *  2), so every film offered "All episodes" and Prev/Next episode —
+     *  buttons that do nothing for a movie. Answer it here, where the real
+     *  type lives, instead of making the phone guess. */
+    val nowPlayingIsSeries: Boolean get() {
+        val st = vm?.state?.value ?: return false
+        return st.details?.isSeries ?: (st.detailItem?.type?.isSeries == true)
+    }
+
+    /** Synopsis of what is playing, for the remote's Now Playing card. */
+    val nowPlayingDescription: String get() {
+        val st = vm?.state?.value ?: return ""
+        return st.details?.description?.takeIf { it.isNotBlank() }
+            ?: st.detailItem?.overview.orEmpty()
+    }
     /** Poster of what's playing, so the remote's Now Playing screen can show
      *  cover art instead of a bare title. Falls back to the in-process
      *  cover map (for a Continue-Watching resume that went straight to the
@@ -359,6 +376,9 @@ object RemoteController {
 
     /** Channel id currently on screen, for defaulting /api/live/feeds. */
     fun currentLiveChannelId(): String? = vm?.state?.value?.currentLiveChannel?.id
+
+    /** Switch the current live channel to the WebView player (diagnostics). */
+    fun forceWebPlayer() = main.post { vm?.forceFallbackToWebPlayer() }
 
     /** Exercise the auto-switch path on demand (diagnostics). */
     fun forceAutoSwitch() { vm?.autoSwitchFeed("manual") }

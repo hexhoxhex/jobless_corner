@@ -722,6 +722,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
          *  settle before we give up on it. */
         const val AUTO_SWITCH_COOLDOWN_MS = 2 * 60 * 1000L
 
+        /** Rest after an attempt that found no better feed. */
+        const val AUTO_SWITCH_FAILED_COOLDOWN_MS = 5 * 60 * 1000L
+
         /** Probes to run when a stall forces a decision with no fresh
          *  measurements. Bounded so recovery stays quick. */
         const val AUTO_SWITCH_PROBE_LIMIT = 6
@@ -840,9 +843,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             com.moviebox.tv.debug.Telemetry.onPlayStart(
                 kind = "live", title = ch.displayName, channelId = ch.id,
             )
+            // Resolve INTO the proxy cache. Calling the resolver directly
+            // here threw the answer away and made the proxy race again on
+            // the player's first /master — two full resolves per start.
             val resolved = runCatching {
                 kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                    liveResolver.resolveStream(ch.id)
+                    liveProxy.prime(ch.id)
                 }
             }.getOrNull()
             // Prefer the proxy URL (which transparently refreshes tokens
@@ -1027,8 +1033,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      *  failed [MAX_RESOLVE_FAILURES_BEFORE_WEBVIEW] times in a row, which
      *  for the default 30-second base means ~10 minutes of unable-to-resolve
      *  before we give up on the native player and try the iframe pages. */
+    /** The WebView player has media segments flowing for [channelId]. */
+    fun onWebPlayerPlaying(channelId: String, backendIndex: Int) {
+        android.util.Log.i(
+            "LiveDiag",
+            "WEB_PLAYING ch=$channelId backend=$backendIndex",
+        )
+        com.moviebox.tv.debug.Telemetry.onWebPlayerPlaying()
+        com.moviebox.tv.data.live.LiveStatus.clear()
+        viewModelScope.launch {
+            runCatching {
+                channelHealthDao.recordSuccess(channelId, System.currentTimeMillis())
+            }
+        }
+    }
+
     fun fallbackToWebPlayer() {
         if (_state.value.currentLiveChannel == null) return
+        com.moviebox.tv.debug.Telemetry.onWebPlayerStart()
         android.util.Log.w(
             "LiveDiag",
             "VM ch=${_state.value.currentLiveChannel?.id} FALLBACK_WEB " +
@@ -1046,6 +1068,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      *  10-failure threshold of [shouldFallbackToWebPlayer]. */
     fun forceFallbackToWebPlayer() {
         if (_state.value.currentLiveChannel == null) return
+        com.moviebox.tv.debug.Telemetry.onWebPlayerStart()
         android.util.Log.w(
             "LiveDiag",
             "VM ch=${_state.value.currentLiveChannel?.id} FORCE_FALLBACK_WEB " +
@@ -1116,6 +1139,48 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      *  if the user invokes it before the LIVE tab has loaded, we load the
      *  catalog first, then play. Without that, hitting the API from cold
      *  silently no-ops because `liveChannels` is empty. */
+    /**
+     * Build a playable channel from a SCHEDULE reference when the catalog
+     * doesn't have it.
+     *
+     * The live site creates dedicated feeds per event (ids 8041-8044 for
+     * Manchester United vs Manchester City, 5008 for UFC) and the schedule
+     * lists them, but the catalog scraper only captures the fixed 24/7
+     * list — it has no ids >= 5000 at all. So tapping one of those feeds
+     * hit `firstOrNull { it.id == channelId } ?: return` and silently did
+     * nothing. Measured on that fixture: 48 channels offered, 21 of them
+     * unplayable; across the whole schedule, 351 of 715 channel references
+     * were dead buttons. Worse, the missing ones were the event feeds that
+     * were actually serving while the 24/7 channels we did have all routed
+     * to a dead origin.
+     *
+     * The resolver only needs the id, so id + name from the schedule is a
+     * complete enough channel to play.
+     */
+    private fun channelFromSchedule(
+        channelId: String,
+        schedule: List<com.moviebox.tv.data.live.ScheduleEvent>,
+    ): com.moviebox.tv.data.live.Channel? {
+        val ref = schedule.asSequence()
+            .flatMap { it.channels.asSequence() }
+            .firstOrNull { it.id == channelId }
+            ?: return null
+        com.moviebox.tv.data.live.LiveEventFeeds.mark(ref.id)
+        android.util.Log.i(
+            "LiveDiag",
+            "VM ch=$channelId not in catalog — playing schedule feed '${ref.name}'",
+        )
+        return com.moviebox.tv.data.live.Channel(
+            id = ref.id,
+            name = ref.name,
+            streamUrl = null,
+            status = "ok",
+            logo = null,
+            group = "Live event",
+            tvgId = null,
+        )
+    }
+
     /** Measure a feed without touching playback. See LiveStreamProxy.probe. */
     suspend fun probeChannel(channelId: String) = liveProxy.probe(channelId)
 
@@ -1143,6 +1208,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** Feeds auto-switch already tried and that disappointed. */
     private val autoSwitchTried = mutableSetOf<String>()
     private var lastAutoSwitchAt = 0L
+    @Volatile private var autoSwitchInFlight = false
+    private var lastAutoSwitchFailedAt = 0L
 
     /**
      * The current feed can't sustain playback — move to a mirror that can.
@@ -1156,6 +1223,31 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun autoSwitchFeed(reason: String) {
         val current = _state.value.currentLiveChannel?.id ?: return
         val now = android.os.SystemClock.elapsedRealtime()
+        // One attempt at a time, and a long rest after an attempt that found
+        // nothing.
+        //
+        // Only a SUCCESSFUL switch used to arm the cooldown. When no mirror
+        // qualified, the attempt returned without it, so on a dying stream
+        // the stall trigger fired every ~25 s and every firing probed up to
+        // six more feeds — each a 3-4 s resolve against the same failing
+        // origin. Measured on Sky Sports Premier League (phantemlis, 11 of 17
+        // masters HTTP 500): 7 fruitless attempts in 3 minutes, all of it
+        // extra load on a stream already stalled 86% of the time. "No better
+        // feed exists" does not change in half a minute.
+        if (autoSwitchInFlight) {
+            android.util.Log.i("LiveDiag", "AUTOSWITCH skipped (attempt in flight) reason=$reason")
+            return
+        }
+        if (lastAutoSwitchFailedAt != 0L &&
+            now - lastAutoSwitchFailedAt < AUTO_SWITCH_FAILED_COOLDOWN_MS
+        ) {
+            android.util.Log.i(
+                "LiveDiag",
+                "AUTOSWITCH suppressed (nothing better found " +
+                    "${(now - lastAutoSwitchFailedAt) / 1000}s ago) reason=$reason",
+            )
+            return
+        }
         if (now - lastAutoSwitchAt < AUTO_SWITCH_COOLDOWN_MS) {
             android.util.Log.i(
                 "LiveDiag", "AUTOSWITCH suppressed (cooldown) reason=$reason",
@@ -1167,7 +1259,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             android.util.Log.i("LiveDiag", "AUTOSWITCH no siblings for $current")
             return
         }
+        autoSwitchInFlight = true
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+          try {
             val ranker = com.moviebox.tv.data.live.FeedRanker
             val exclude = autoSwitchTried + current
             var pick = ranker.best(siblings.keys, exclude, names = siblings)
@@ -1182,11 +1276,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 pick = ranker.best(siblings.keys, exclude, names = siblings)
             }
             if (pick == null) {
+                lastAutoSwitchFailedAt = android.os.SystemClock.elapsedRealtime()
                 android.util.Log.w(
                     "LiveDiag",
                     "AUTOSWITCH found no feed clearing headroom " +
                         "${com.moviebox.tv.data.live.FeedRanker.MIN_HEADROOM} " +
-                        "among ${siblings.size}",
+                        "among ${siblings.size} — resting " +
+                        "${AUTO_SWITCH_FAILED_COOLDOWN_MS / 60_000} min",
                 )
                 return@launch
             }
@@ -1204,6 +1300,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
                 playScheduleChannel(pick.channelId)
             }
+          } finally {
+            autoSwitchInFlight = false
+          }
         }
     }
 
@@ -1211,10 +1310,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun resetAutoSwitch() {
         autoSwitchTried.clear()
         lastAutoSwitchAt = 0L
+        lastAutoSwitchFailedAt = 0L
     }
 
     fun playScheduleChannel(channelId: String) {
         val cached = _state.value.liveChannels.firstOrNull { it.id == channelId }
+            ?: channelFromSchedule(channelId, _state.value.liveSchedule)
         if (cached != null) {
             playChannel(cached); return
         }
@@ -1249,7 +1350,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     "schedule=${schedule.size}" +
                     if (fetched.isNullOrEmpty()) " (schedule fetch failed — kept previous)" else "",
             )
-            val ch = channels.firstOrNull { it.id == channelId } ?: return@launch
+            val ch = channels.firstOrNull { it.id == channelId }
+                ?: channelFromSchedule(channelId, schedule)
+            if (ch == null) {
+                android.util.Log.w(
+                    "LiveDiag",
+                    "VM playScheduleChannel: $channelId is in neither the catalog " +
+                        "nor the schedule — nothing to play",
+                )
+                com.moviebox.tv.data.live.LiveStatus.note(
+                    "✗  That channel isn't available right now",
+                )
+                return@launch
+            }
             playChannel(ch)
         }
     }
@@ -1692,12 +1805,49 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         _state.update { it.copy(detailLoading = false) }
                     }
                 } else {
-                    _state.update {
-                        it.copy(
-                            availability =
-                                if (workingId != null) Availability.AVAILABLE
-                                else Availability.UNAVAILABLE,
+                    // Before saying "Not available", ask the SAME cascade the
+                    // Play button uses.
+                    //
+                    // The probe above only tries the source this subjectId is
+                    // keyed to (repo.resolvePlay), while pressing Play walks
+                    // every provider (repo.resolvePlayAnyProvider) and stops
+                    // at the first that answers. So a title that plays fine
+                    // through a fallback was still labelled
+                    // "Not available — pick from search". Measured on
+                    // Spider-Man (2002): the aoneroom resolve times out (its
+                    // internal search hit the 30 s ceiling) while VixSrc
+                    // serves the film in ~3 s — the user watched it, and the
+                    // detail page called it unavailable. The label has to
+                    // answer what the viewer is actually asking — "will this
+                    // play?" — not "does one particular source carry it?".
+                    val playable = workingId != null || runCatching {
+                        repo.resolvePlayAnyProvider(
+                            subjectId = resolvedId,
+                            title = title,
+                            year = cur.detailItem?.year,
+                            isSeries = isSeries,
+                            resolution = quality,
+                            season = if (isSeries) s1 else null,
+                            episode = if (isSeries) 1 else null,
+                            dub = dub,
+                        ).mediaUrl.isNotBlank()
+                    }.getOrDefault(false)
+                    val now = _state.value
+                    if (now.detailItem?.subjectId == resolvedId &&
+                        now.screen == Screen.DETAIL
+                    ) {
+                        android.util.Log.i(
+                            "VodDiag",
+                            "precheck $resolvedId playable=$playable " +
+                                "(cascade consulted=${workingId == null})",
                         )
+                        _state.update {
+                            it.copy(
+                                availability =
+                                    if (playable) Availability.AVAILABLE
+                                    else Availability.UNAVAILABLE,
+                            )
+                        }
                     }
                 }
             }

@@ -68,6 +68,8 @@ fun LiveWebPlayer(
     onAllPathsFailed: (String) -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
+    /** A backend is demonstrably playing (media segments are flowing). */
+    onPlaying: (backendIndex: Int) -> Unit = {},
 ) {
     // Try all available backend paths, up to a hard cap. The first three
     // (stream / cast / watch) all route to the donis infrastructure in
@@ -76,11 +78,17 @@ fun LiveWebPlayer(
     // casting / player) that route to DIFFERENT hosts entirely
     // (junkieembeds.pages.dev, wikisport.club, ksohls.ru) and can rescue
     // the channel.
+    // /player/ now 404s and /hub/ exists; keep this list in step with the
+    // native resolver's measured set.
     val paths = remember(channel.id) {
         channel.playerPaths.ifEmpty {
-            listOf("stream", "cast", "watch", "plus", "casting", "player")
+            listOf("stream", "hub", "cast", "watch", "plus", "casting")
         }.take(6)
     }
+    // Set from the network layer whenever a media segment is requested.
+    val lastMediaAt = remember(channel.id) { java.util.concurrent.atomic.AtomicLong(0L) }
+    val playingRef = rememberUpdatedState(onPlaying)
+    var webPlaying by remember(channel.id) { mutableStateOf(false) }
     // The "canonical" dlhd entry is /watch.php?id=X — the URL the user
     // hits when they tap a channel in a browser on dlhd.pk. The scraper
     // records the six /{path}/stream-X.php ALTERNATES (which are
@@ -89,8 +97,11 @@ fun LiveWebPlayer(
     // 54.php doesn't — they're independent pages with different inner
     // players + session setup. Try the canonical entry FIRST, then fall
     // through the alternates as before.
+    // dlhd.st (not dlhd.pk): both now redirect to dlive.sx, and dlhd.st is
+    // the base the native resolver already uses, so the two paths follow the
+    // same domain rotation instead of drifting apart.
     val canonical = remember(channel.id) {
-        "https://dlhd.pk/watch.php?id=${channel.id}"
+        "https://$WRAPPER_HOST/watch.php?id=${channel.id}"
     }
     val totalSlots = paths.size + 1  // canonical + alternates
     var pathIndex by remember(channel.id) { mutableIntStateOf(0) }
@@ -100,7 +111,7 @@ fun LiveWebPlayer(
     // Slot 0 = canonical entry; slots 1..N = the alternate iframe pages.
     val url = if (pathIndex == 0) canonical
         else paths.getOrNull(pathIndex - 1)?.let {
-            "https://dlhd.pk/${it}/stream-${channel.id}.php"
+            "https://$WRAPPER_HOST/${it}/stream-${channel.id}.php"
         }
 
     Box(modifier.fillMaxSize().background(Color.Black)) {
@@ -113,6 +124,7 @@ fun LiveWebPlayer(
                         "Couldn't reach \"${channel.displayName}\".",
                     )
                 },
+                lastMediaAt = lastMediaAt,
                 modifier = Modifier.fillMaxSize(),
             )
         }
@@ -129,10 +141,34 @@ fun LiveWebPlayer(
         // and recreated three times in ~21 s, never giving stream/54
         // long enough to render). Give the first backend 25 s; later
         // backends keep the shorter 8 s as a fast cycle-through.
+        // Backend rotation on a fixed budget.
+        //
+        // NOTE (2026-09-13): a version of this stayed on a backend while media
+        // segments were being requested. It was REVERTED. On event feed 8044
+        // that signal reported "playing" for 48 s while a screenshot showed the
+        // full site page — banners, a popup ad, an "I'm not a robot" check —
+        // and no video. Something on the page pulls segments regardless, so
+        // "segments flowing" does not mean a picture is visible, and letting it
+        // decide would park viewers on an ad page instead of moving on. The
+        // segment count is still reported (onPlaying -> telemetry) as
+        // unverified diagnostic data only; it does not drive rotation.
         LaunchedEffect(pathIndex) {
+            lastMediaAt.set(0L)
+            webPlaying = false
             val budget = if (pathIndex == 0) FIRST_BACKEND_TIMEOUT_MS
                 else NEXT_BACKEND_TIMEOUT_MS
-            kotlinx.coroutines.delay(budget)
+            val startedAt = System.currentTimeMillis()
+            var reported = false
+            while (System.currentTimeMillis() - startedAt < budget) {
+                kotlinx.coroutines.delay(1_000)
+                val last = lastMediaAt.get()
+                if (!reported && last > 0L &&
+                    System.currentTimeMillis() - last < MEDIA_STALE_MS
+                ) {
+                    reported = true
+                    playingRef.value(pathIndex)
+                }
+            }
             if (pathIndex < totalSlots - 1) pathIndex += 1
             else failedRef.value(
                 "\"${channel.displayName}\" isn't streaming right now.",
@@ -194,9 +230,9 @@ fun LiveWebPlayer(
             }
         }
 
-        // Small bottom-centred loading hint. Stays unobtrusive — if the
-        // video starts the user won't really see it; if it doesn't they
-        // know we're not just frozen.
+        // Small bottom-centred loading hint — hidden once media is actually
+        // flowing, instead of claiming "trying alternate source" over a
+        // stream that is playing.
         Column(
             Modifier.align(Alignment.BottomCenter).padding(bottom = 28.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -225,6 +261,8 @@ fun LiveWebPlayer(
 private fun WebViewBox(
     url: String,
     onMainFrameError: () -> Unit,
+    /** Wall-clock ms of the most recent media-segment request, 0 = none. */
+    lastMediaAt: java.util.concurrent.atomic.AtomicLong,
     modifier: Modifier = Modifier,
 ) {
     val onMainFrameErrorState = rememberUpdatedState(onMainFrameError)
@@ -253,14 +291,36 @@ private fun WebViewBox(
                     override fun shouldOverrideUrlLoading(
                         view: WebView?, request: WebResourceRequest?,
                     ): Boolean {
-                        // Block navigation away from the embed host.
-                        val host = request?.url?.host ?: return false
-                        return host !in setOf(
-                            "dlhd.pk", "donis.jimpenopisonline.online",
-                            "out-1.welovetocare.shop",
-                            "junkieembeds.pages.dev",
-                            "wikisport.info", "tv-bu1.blogspot.com",
-                        )
+                        // Follow REDIRECTS, block click-through popups.
+                        //
+                        // This used to allow only a fixed list of hosts.
+                        // The site rotates domains (dlhd.pk and dlhd.st now
+                        // both redirect to dlive.sx), and a redirect to a
+                        // host missing from the list was simply blocked, so
+                        // the fallback player could not load its first page
+                        // at all. Server redirects are the site moving; the
+                        // navigations worth blocking are ad click-throughs,
+                        // which are not redirects.
+                        val r = request ?: return false
+                        if (!r.isForMainFrame) return false
+                        return !r.isRedirect
+                    }
+
+                    override fun shouldInterceptRequest(
+                        view: WebView?, request: WebResourceRequest?,
+                    ): android.webkit.WebResourceResponse? {
+                        // Observe only — never alter the response.
+                        //
+                        // The video lives inside cross-origin iframes, so no
+                        // script we inject can see the <video> element. But
+                        // every request, in every frame, passes through here.
+                        // A live HLS player that is actually playing keeps
+                        // pulling segments; a black anti-bot page does not.
+                        val u = request?.url?.toString() ?: return null
+                        if (isMediaSegment(u)) {
+                            lastMediaAt.set(System.currentTimeMillis())
+                        }
+                        return null
                     }
                     override fun onPageStarted(
                         view: WebView?,
@@ -349,6 +409,24 @@ private fun WebViewBox(
  *  Adscore handshake (~5-10 s) plus the iframe player's first frame
  *  (~3-5 s) — easily exceeds 15 s, so we budget 25 s here. */
 private const val FIRST_BACKEND_TIMEOUT_MS: Long = 25_000L
+
+/** Base host for wrapper pages. Redirects to the site's current domain. */
+private const val WRAPPER_HOST = "dlhd.st"
+
+/** No media segment for this long after playback started = stalled. Live HLS
+ *  segments here are 3-6 s, so 20 s is several missed segments in a row. */
+private const val MEDIA_STALE_MS: Long = 20_000L
+
+/** A request that is almost certainly video/audio payload rather than page
+ *  furniture. Includes segments disguised as images on TikTok's CDN, which is
+ *  how the epiembeds route delivers them. */
+private fun isMediaSegment(url: String): Boolean {
+    val path = url.substringBefore('?').lowercase()
+    return path.endsWith(".ts") || path.endsWith(".m4s") ||
+        path.endsWith(".aac") || path.endsWith(".m4a") ||
+        path.endsWith(".m4v") || path.endsWith(".mp4") ||
+        "~tplv-" in path
+}
 
 /** Subsequent backends inherit the Chrome process already warmed by the
  *  first attempt, so a quick 8 s cycle is enough to give each a chance

@@ -1004,9 +1004,33 @@ async function refresh() {
     $("#volCard").hidden = !active;
     // Cover art in the hero.
     const cover = $("#npCover");
+    const coverPh = $("#npCoverPh");
     if (cover) {
-      if (s.cover) { cover.src = s.cover; cover.style.visibility = "visible"; }
-      else { cover.removeAttribute("src"); cover.style.visibility = "hidden"; }
+      if (s.cover) {
+        if (cover.getAttribute("src") !== s.cover) cover.src = s.cover;
+        cover.hidden = false;
+        if (coverPh) coverPh.hidden = true;
+      } else {
+        // No artwork: show the placeholder rather than an invisible gap.
+        cover.removeAttribute("src");
+        cover.hidden = true;
+        if (coverPh) coverPh.hidden = false;
+      }
+    }
+    // Synopsis. Skipped when the TV has none (live channels, mostly).
+    const desc = $("#npDesc");
+    if (desc) {
+      const text = (s.description || "").trim();
+      if (desc.dataset.text !== text) {
+        desc.dataset.text = text;      // avoid re-writing on every 1 s poll
+        desc.textContent = text;
+        desc.classList.remove("expanded");
+      }
+      desc.hidden = !text;
+      if (!desc.dataset.bound) {
+        desc.dataset.bound = "1";
+        desc.onclick = () => desc.classList.toggle("expanded");
+      }
     }
     $("#npTitle").textContent = s.title || "Nothing playing";
     // Remember what's playing so the hero can open its details on tap.
@@ -1076,7 +1100,13 @@ async function refresh() {
     // Previously the picker was gated on s.episode != null and stayed
     // hidden for those titles, locking the user into whatever the
     // subject-level resource happened to be.
-    const playingSeries = s.subjectId && (s.type === 1 || s.season != null || s.episode != null);
+    // SubjectType codes are MOVIE(1) and TV_SERIES(2), so `type === 1` was
+    // backwards: every FILM showed "All episodes" and the Prev/Next episode
+    // row, which do nothing on a movie. The TV now states isSeries outright;
+    // the type check stays as a fallback for an older TV build, fixed to 2.
+    const playingSeries = !!s.subjectId &&
+      (s.isSeries === true || s.type === 2 ||
+       s.season != null || s.episode != null);
     const showEps = playingSeries ? "true" : "false";
     document.querySelectorAll(".np-eps").forEach(el => { el.dataset.showEps = showEps; });
     // Cache the title for the Live channel grid render so the
@@ -1102,6 +1132,14 @@ async function refresh() {
     }
     syncTracks(s);
   } catch (e) { /* ignore */ }
+}
+
+/** Poster failed to load (dead URL): fall back to the placeholder tile. */
+function npCoverFallback() {
+  const img = document.getElementById("npCover");
+  const ph = document.getElementById("npCoverPh");
+  if (img) img.hidden = true;
+  if (ph) ph.hidden = false;
 }
 
 /** Render the quality + audio + subtitle pickers when there's an active

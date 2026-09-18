@@ -37,6 +37,25 @@ object Telemetry {
     @Volatile private var currentKind:  String = "none"   // "live" | "vod" | "none"
     @Volatile private var currentChannelId: String? = null
     @Volatile private var currentFps: Int = 0
+
+    /** "native" (ExoPlayer) or "web" (WebView fallback). */
+    @Volatile private var currentPlayer: String = "native"
+
+    /** When the WebView player first showed media flowing, 0 = not yet. */
+    @Volatile private var webPlayingSince: Long = 0L
+
+    /** The WebView fallback took over for the current channel. */
+    fun onWebPlayerStart() {
+        currentPlayer = "web"
+        currentFps = 0
+        webPlayingSince = 0L
+    }
+
+    /** The WebView player is demonstrably pulling media segments. */
+    fun onWebPlayerPlaying() {
+        currentPlayer = "web"
+        if (webPlayingSince == 0L) webPlayingSince = System.currentTimeMillis()
+    }
     @Volatile private var currentDroppedRatio: Float = 0f
     @Volatile private var currentBufferMs: Long = 0L
     @Volatile private var currentBitrateBps: Long = 0L
@@ -59,6 +78,16 @@ object Telemetry {
         currentKind = kind
         currentTitle = title
         currentChannelId = channelId
+        // Per-stream gauges belong to the stream. They used to survive a
+        // channel change, so a channel that went to the WebView player (where
+        // the ExoPlayer ticker never runs) reported the PREVIOUS channel's
+        // fps of 25 — which read as "playing instantly" and was false.
+        currentFps = 0
+        currentBufferMs = 0L
+        currentBitrateBps = 0L
+        currentResolution = ""
+        currentPlayer = "native"
+        webPlayingSince = 0L
         lastStateChangeAt = SystemClock.elapsedRealtime()
         channelId?.let { id ->
             channelStats.compute(id) { _, prev ->
@@ -198,6 +227,8 @@ object Telemetry {
         sb.append(",\"bitrateBps\":").append(currentBitrateBps)
         sb.append(",\"resolution\":").append(quote(currentResolution))
         sb.append(",\"rating\":").append(quote(rating))
+        sb.append(",\"player\":").append(quote(currentPlayer))
+        sb.append(",\"webPlaying\":").append(webPlayingSince > 0L)
         sb.append('}')
         // channels
         sb.append(",\"channels\":[")
