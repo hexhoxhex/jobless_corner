@@ -25,8 +25,8 @@ android {
         // ExoPlayer codec support; covers virtually all Android TV devices.
         minSdk = 26
         targetSdk = 35
-        versionCode = 275
-        versionName = "0.1.265"
+        versionCode = 276
+        versionName = "0.1.266"
 
         // Ship only the ABIs real devices use. The universal APK carried four
         // (arm64-v8a, armeabi-v7a, x86, x86_64) = ~40 MB, and that size was
@@ -100,6 +100,10 @@ dependencies {
     implementation(project(":shared"))
 
     implementation(libs.androidx.core.ktx)
+    // Background schedule sync for reminders (survives app close + reboot).
+    implementation(libs.androidx.work.runtime.ktx)
+    // Android TV launcher "Watch Next" row.
+    implementation(libs.androidx.tvprovider)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.activity.compose)

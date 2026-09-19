@@ -2468,8 +2468,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val saveEp = if (play.episode > 0) play.episode else null
         val key = WatchHistoryEntity.keyOf(subjectId, saveSe, saveEp)
         viewModelScope.launch {
-            watchDao.upsert(
-                WatchHistoryEntity(
+            val row = WatchHistoryEntity(
                     key = key,
                     subjectId = subjectId,
                     title = item?.title ?: play.title,
@@ -2489,8 +2488,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     updatedAt = System.currentTimeMillis(),
                     genres = item?.genres?.joinToString(",").orEmpty(),
                     year = item?.year,
-                )
             )
+            watchDao.upsert(row)
+            // Mirror it onto the TV home screen's "Continue watching" row so
+            // the last thing watched is one click from the launcher, the way
+            // the big apps do it. One entry, replaced each time.
+            runCatching {
+                com.moviebox.tv.tv.WatchNext.publish(getApplication(), row)
+            }
         }
     }
 

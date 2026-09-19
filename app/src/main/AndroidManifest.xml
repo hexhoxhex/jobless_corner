@@ -16,6 +16,9 @@
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <!-- Alarms don't survive a reboot; BootReceiver flags a rebuild. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Writes the last-watched title into the TV launcher's "Continue
+         watching" row. Only ever touches rows this app created. -->
+    <uses-permission android:name="com.android.providers.tv.permission.WRITE_EPG_DATA" />
     <!-- Used by ExoPlayer's setWakeMode(WAKE_MODE_NETWORK). Holds a
          partial wake lock + Wi-Fi lock during playback so the TV's
          PowerManager doesn't fire its bedtime / DreamX screensaver

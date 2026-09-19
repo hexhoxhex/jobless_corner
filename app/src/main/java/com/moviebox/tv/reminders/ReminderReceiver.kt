@@ -48,8 +48,13 @@ class ReminderReceiver : BroadcastReceiver() {
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
-        Log.i("Reminders", "boot — reminders will rebuild on next app start")
+        Log.i("Reminders", "boot — rebuilding reminders")
         context.getSharedPreferences("reminders", Context.MODE_PRIVATE)
             .edit().putBoolean("needs_rebuild", true).apply()
+        // Rebuild NOW rather than waiting for someone to open the app. The
+        // flag above is kept as the belt-and-braces path, but on its own it
+        // meant a TV that restarted and sat on its home screen never alerted
+        // again — and that is the normal state of a TV.
+        ScheduleSyncWorker.syncNow(context)
     }
 }

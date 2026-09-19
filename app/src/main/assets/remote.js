@@ -2069,7 +2069,12 @@ const SCHED_CATEGORIES = [
   { id: "other",     label: "Other",    match: () => true },
 ];
 
-function classifyScheduleCategory(name) {
+function classifyScheduleCategory(name, kind) {
+  // A football league is sport by definition. The regex below matches on
+  // words in the heading ("league", "liga", "cup"), which "EFL", "Serie A",
+  // "Ligue 1" and "Bundesliga" do not contain as whole words — so without
+  // this they'd be filed under "Other" the moment grouping moved to leagues.
+  if (kind === "league" || kind === "sport") return "sports";
   const s = String(name || "");
   for (const cat of SCHED_CATEGORIES) {
     if (cat.id === "all" || cat.id === "other") continue;
@@ -2101,6 +2106,62 @@ async function loadLiveSchedule() {
   liveScheduleData = data;
   renderScheduleChips(data);
   renderLiveSchedule(data);
+}
+
+/** Load the viewer's leagues into Settings. Built-ins are shown too, so
+ *  it's clear what already exists before someone adds a duplicate. */
+async function loadLeagues() {
+  const wrap = document.getElementById("leagueList");
+  if (!wrap) return;
+  let data;
+  try { data = await get("/api/leagues"); }
+  catch (e) { wrap.textContent = "Could not reach the TV."; return; }
+  const leagues = (data && data.leagues) || [];
+  wrap.innerHTML = "";
+  leagues.forEach(l => {
+    const chip = document.createElement("div");
+    chip.className = "chip" + (l.custom ? " active" : "");
+    chip.textContent = l.custom ? l.name + "  ✕" : l.name;
+    if (l.custom) {
+      chip.title = "Remove " + l.name;
+      chip.onclick = async () => {
+        await post("/api/leagues/delete?key=" + encodeURIComponent(l.key));
+        toast("Removed " + l.name);
+        loadLeagues();
+        // The schedule is grouped server-side, so it has to be refetched
+        // for the change to show.
+        liveScheduleLoaded = false;
+        if (!$("#liveSchedulePane").classList.contains("hidden")) loadLiveSchedule();
+      };
+    }
+    wrap.appendChild(chip);
+  });
+  const custom = leagues.filter(l => l.custom).length;
+  const st = document.getElementById("leagueStatus");
+  if (st) {
+    st.textContent = custom
+      ? custom + " of your own — tap one to remove it"
+      : "Built-in leagues shown; yours will appear here.";
+  }
+}
+
+const leagueAddEl = document.getElementById("leagueAdd");
+if (leagueAddEl) {
+  leagueAddEl.onclick = async () => {
+    const nameEl = document.getElementById("leagueName");
+    const patEl = document.getElementById("leaguePatterns");
+    const name = (nameEl.value || "").trim();
+    if (!name) { toast("Give the league a name"); return; }
+    const qs = "?name=" + encodeURIComponent(name) +
+      "&patterns=" + encodeURIComponent((patEl.value || "").trim());
+    const r = await post("/api/leagues" + qs);
+    if (r && r.ok === false) { toast("Couldn't add that"); return; }
+    nameEl.value = ""; patEl.value = "";
+    toast("Added " + name);
+    loadLeagues();
+    liveScheduleLoaded = false;
+    if (!$("#liveSchedulePane").classList.contains("hidden")) loadLiveSchedule();
+  };
 }
 
 function renderScheduleChips(data) {
@@ -2164,7 +2225,7 @@ function renderLiveSchedule(data) {
   const cat = liveScheduleCategory;
   // Prep: keep each category, filter its events, drop empty categories.
   const filtered = data.map(g => {
-    const groupMeta = classifyScheduleCategory(g.category);
+    const groupMeta = classifyScheduleCategory(g.category, g.kind);
     if (cat !== "all" && groupMeta !== cat) return { ...g, events: [] };
     const events = (g.events || []).filter(e => {
       let stillOnAir;

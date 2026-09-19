@@ -49,6 +49,12 @@ class App : Application(), ImageLoaderFactory {
                 // the case a reminder is for. No-ops when nothing is
                 // followed, so it costs an idle install nothing.
                 runCatching { com.moviebox.tv.reminders.ReminderWarm.run(this@App) }
+                // And keep them armed when nobody opens the app again:
+                // a reboot wipes alarms, and tomorrow's fixtures are not
+                // in today's schedule. See ScheduleSyncWorker.
+                runCatching {
+                    com.moviebox.tv.reminders.ScheduleSyncWorker.schedule(this@App)
+                }
             }
         }.apply { isDaemon = true }.start()
     }

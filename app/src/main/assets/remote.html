@@ -458,6 +458,27 @@
       <h3 class="card-h">Languages to hide</h3>
       <div id="prefLangs" class="chips"></div>
     </div>
+
+    <!-- Leagues: the schedule groups football by league, and this is where
+         someone adds one of their own (e.g. "Eliteserien", or a grouping
+         that collects the competitions they care about). -->
+    <div class="card">
+      <h3 class="card-h">Leagues</h3>
+      <p class="muted small" style="margin-top:0">
+        The schedule groups football by league. Add your own to pull the
+        competitions you follow into their own heading.
+      </p>
+      <div id="leagueList" class="chips"></div>
+      <div class="row" style="margin-top:12px; gap:8px">
+        <input id="leagueName" type="text" placeholder="League name"
+               autocomplete="off" style="flex:1 1 auto; min-width:0" />
+        <button id="leagueAdd" class="primary">Add</button>
+      </div>
+      <input id="leaguePatterns" type="text" autocomplete="off"
+             style="width:100%; margin-top:8px"
+             placeholder="Optional: words to match, comma separated" />
+      <div id="leagueStatus" class="muted small" style="margin-top:8px"></div>
+    </div>
   </section>
 
   <!-- DOWNLOADS -->

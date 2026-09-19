@@ -59,6 +59,22 @@ class MainActivity : ComponentActivity() {
      * it first instead of silently no-opping on an empty channel list.
      */
     private fun handlePlayIntent(intent: android.content.Intent?) {
+        if (intent?.action == ACTION_RESUME) {
+            // Someone picked us out of the TV launcher's "Continue watching"
+            // row. Everything needed to resume travels in the intent, so this
+            // works from cold with no catalog loaded.
+            val subjectId = intent.getStringExtra(EXTRA_SUBJECT_ID) ?: return
+            vm.remotePlay(
+                subjectId = subjectId,
+                title = intent.getStringExtra(EXTRA_TITLE).orEmpty(),
+                coverUrl = intent.getStringExtra(EXTRA_COVER),
+                type = intent.getIntExtra(EXTRA_TYPE, 0),
+                season = intent.getIntExtra(EXTRA_SEASON, 0).takeIf { it > 0 },
+                episode = intent.getIntExtra(EXTRA_EPISODE, 0).takeIf { it > 0 },
+                year = intent.getIntExtra(EXTRA_YEAR, 0).takeIf { it > 0 },
+            )
+            return
+        }
         if (intent?.action != ACTION_PLAY_CHANNEL) return
         val id = intent.getStringExtra(EXTRA_CHANNEL_ID) ?: return
         vm.playScheduleChannel(id)
@@ -156,5 +172,16 @@ class MainActivity : ComponentActivity() {
         /** Launch action used by a fired reminder's notification. */
         const val ACTION_PLAY_CHANNEL = "com.moviebox.tv.PLAY_CHANNEL"
         const val EXTRA_CHANNEL_ID = "channel_id"
+
+        /** Launch action from the TV home screen's "Continue watching" row.
+         *  See [com.moviebox.tv.tv.WatchNext]. */
+        const val ACTION_RESUME = "com.moviebox.tv.RESUME"
+        const val EXTRA_SUBJECT_ID = "subject_id"
+        const val EXTRA_TITLE = "title"
+        const val EXTRA_COVER = "cover"
+        const val EXTRA_TYPE = "type"
+        const val EXTRA_SEASON = "season"
+        const val EXTRA_EPISODE = "episode"
+        const val EXTRA_YEAR = "year"
     }
 }

@@ -478,12 +478,52 @@ class RemoteServer(
 
             uri == "/api/live/schedule" -> {
                 val schedule = RemoteController.liveSchedule()
-                // Bucket by category and time-sort within each so the SPA can
-                // render directly.
+                // Bucket by LEAGUE for football, by the catalog's own category
+                // for everything else, then time-sort within each.
+                //
+                // A day is ~800 events over ~170 competitions and the catalog
+                // files nearly every fixture under one heading ("All Soccer
+                // Events", 419 of them), so the Premier League match someone
+                // came for sat buried among Romanian Liga II and J1 League.
+                // Tennis and college volleyball keep their own headings —
+                // leagues only mean something for football.
+                val leagues = com.moviebox.tv.data.live.LeagueCatalog
+                val sports = com.moviebox.tv.data.live.SportCatalog
+                // Football splits by league; every other sport collapses onto
+                // ONE heading. The catalog publishes "Ice Hockey OHL",
+                // "Ice Hockey (NHL", "Ice Hockey USHL" and "Ice Hockey
+                // Women's College Ice Hockey" as four separate blocks for one
+                // sport, and hides both cars and bikes under "Motorsport";
+                // merging them is what makes the list scannable. Anything the
+                // rules don't recognise (4 of 794 on a measured day: Climbing,
+                // Gymnastics, Rodeo…) keeps the catalog's own heading rather
+                // than being forced into a bucket it doesn't belong in.
+                val groupSport = HashMap<String, String>()
                 val byCat = LinkedHashMap<String, MutableList<com.moviebox.tv.data.live.ScheduleEvent>>()
-                for (e in schedule) byCat.getOrPut(e.category) { mutableListOf() }.add(e)
+                for (e in schedule) {
+                    val sport = sports.sportFor(e.title, e.category)
+                    val group = when {
+                        sport == com.moviebox.tv.data.live.SportCatalog.FOOTBALL ->
+                            leagues.groupFor(e.title, e.category).ifBlank { e.category }
+                        sport != null -> sport
+                        else -> e.category
+                    }
+                    sport?.let { groupSport[group] = it }
+                    byCat.getOrPut(group) { mutableListOf() }.add(e)
+                }
+                // Football leagues first (the viewer's own ahead of ours),
+                // then "Other leagues", then the remaining sports in
+                // SportCatalog order, then anything unrecognised.
+                val leagueOrder = leagues.all().map { it.name }
+                val ordered = LinkedHashMap<String, MutableList<com.moviebox.tv.data.live.ScheduleEvent>>()
+                leagueOrder.forEach { name -> byCat[name]?.let { ordered[name] = it } }
+                byCat[leagues.OTHER.name]?.let { ordered[leagues.OTHER.name] = it }
+                byCat.entries
+                    .filter { it.key !in ordered }
+                    .sortedBy { sports.rank(groupSport[it.key]) }
+                    .forEach { ordered[it.key] = it.value }
                 val arr = JSONArray()
-                byCat.forEach { (cat, events) ->
+                ordered.forEach { (cat, events) ->
                     val evArr = JSONArray()
                     events.sortedBy { it.time }.forEach { e ->
                         val chArr = JSONArray()
@@ -527,16 +567,89 @@ class RemoteServer(
                         }
                         if (fx.competition.isNotBlank()) {
                             ev.put("competition", fx.competition)
+                            leagues.leagueFor(fx.competition)?.let { lg ->
+                                ev.put("league", lg.key)
+                                ev.put("leagueName", lg.name)
+                            }
                         }
                         evArr.put(ev)
                     }
+                    // "kind" so the SPA's filter chips don't have to guess
+                    // from the heading text. Its "Sports" chip matches on
+                    // words like "league"/"liga", which "EFL", "Bundesliga",
+                    // "Serie A" and "Ligue 1" all fail — those groups would
+                    // have dropped into "Other" the moment we grouped by
+                    // league.
+                    val isLeague = cat == leagues.OTHER.name ||
+                        leagueOrder.contains(cat)
+                    val sport = groupSport[cat]
                     arr.put(
                         JSONObject()
                             .put("category", cat)
+                            .put(
+                                "kind",
+                                when {
+                                    isLeague -> "league"
+                                    sport != null -> "sport"
+                                    else -> "category"
+                                },
+                            )
+                            .put("sport", sport ?: JSONObject.NULL)
                             .put("events", evArr)
                     )
                 }
                 json(arr.toString())
+            }
+
+            // ---- Leagues: how the schedule is grouped ----
+            uri == "/api/leagues" && method == Method.GET -> {
+                val lc = com.moviebox.tv.data.live.LeagueCatalog
+                val arr = JSONArray()
+                lc.all().forEach { l ->
+                    arr.put(
+                        JSONObject()
+                            .put("key", l.key)
+                            .put("name", l.name)
+                            .put("custom", l.custom)
+                            .put("patterns", JSONArray(l.patterns)),
+                    )
+                }
+                json(
+                    JSONObject()
+                        .put("leagues", arr)
+                        .put("otherName", lc.OTHER.name)
+                        .toString(),
+                )
+            }
+
+            uri == "/api/leagues" && method == Method.POST -> {
+                // patterns are optional: with none, the name itself is the
+                // match, which is what someone adding "Eliteserien" means.
+                val name = p("name").orEmpty()
+                val pats = p("patterns").orEmpty()
+                    .split(',')
+                    .map { it.trim() }
+                    .filter { it.isNotEmpty() }
+                val added = com.moviebox.tv.data.live.LeagueCatalog
+                    .addCustom(name, pats)
+                if (added == null) {
+                    json("{\"ok\":false,\"error\":\"name required\"}")
+                } else {
+                    json(
+                        JSONObject()
+                            .put("ok", true)
+                            .put("key", added.key)
+                            .put("name", added.name)
+                            .put("patterns", JSONArray(added.patterns))
+                            .toString(),
+                    )
+                }
+            }
+
+            uri == "/api/leagues/delete" && method == Method.POST -> {
+                val removed = com.moviebox.tv.data.live.LeagueCatalog
+                    .removeCustom(p("key").orEmpty())
+                json("{\"ok\":$removed}")
             }
 
             // ---- Follows: teams / competitions / shows to be told about ----
