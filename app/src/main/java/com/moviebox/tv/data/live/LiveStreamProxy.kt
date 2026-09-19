@@ -1361,6 +1361,29 @@ class LiveStreamProxy(
         val streak = (sourceDownStreak[channelId] ?: 0) + 1
         sourceDownStreak[channelId] = streak
         if (streak >= SOURCE_DOWN_STREAK) {
+            // Before declaring the channel dead, try once more on a FRESH
+            // route. The back-off used to sleep the whole channel for a
+            // minute on the strength of one failing origin — and measured on
+            // 2026-09-19 the prober resolved that same channel successfully
+            // (1.57x headroom) while the player sat in that sleep. The
+            // channel was serviceable; only the route we had cached was not.
+            // Dropping the resolver's cached host makes the next race start
+            // from scratch rather than re-picking what just failed.
+            resolver.resetCachedHost()
+            val rescued = runBlocking {
+                kotlinx.coroutines.withTimeoutOrNull(ENSURE_CACHED_TIMEOUT_MS) {
+                    refreshCache(channelId)
+                }
+            }
+            if (rescued != null) {
+                sourceDownStreak.remove(channelId)
+                Log.i(
+                    DIAG,
+                    "PROXY ch=$channelId rescued on a fresh route after " +
+                        "$streak failures — not backing off",
+                )
+                return rescued
+            }
             sourceDownUntil[channelId] =
                 System.currentTimeMillis() + SOURCE_DOWN_COOLDOWN_MS
             Log.w(

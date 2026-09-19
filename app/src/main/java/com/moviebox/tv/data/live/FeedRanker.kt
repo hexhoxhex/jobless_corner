@@ -54,14 +54,39 @@ object FeedRanker {
         results[r.channelId] = Ranked(r, System.currentTimeMillis())
     }
 
+    /** A fixture that kicked off this long ago may still be on air. */
+    private const val ON_AIR_BEFORE_SEC = 3 * 60 * 60L
+
+    /** ...and one starting this soon is close enough to count. */
+    private const val ON_AIR_AFTER_SEC = 30 * 60L
+
     /**
-     * Every channel carrying whatever [channelId] is carrying. Union across
-     * the events that list it, so a channel showing two fixtures returns
-     * the mirrors of both.
+     * Channels carrying what [channelId] is showing RIGHT NOW.
+     *
+     * This used to union every event that listed the channel, across the
+     * whole day. A sports channel carries four or five different things
+     * between breakfast and midnight, so "siblings" came back as the feeds
+     * of unrelated fixtures — and auto-switch moved a viewer watching
+     * football onto a motorsport feed, while the prober answered questions
+     * about the wrong match entirely (measured 2026-09-19: probing TNT
+     * Sports 1 UK during a Premier League game returned the mirrors of a
+     * motorcycle race, and a viewer ended up on sailing). Only events on
+     * air now can tell us anything about what the viewer is watching; when
+     * none is, we know nothing and say so with an empty map.
      */
-    fun siblingsOf(channelId: String, schedule: List<ScheduleEvent>): Map<String, String> {
+    fun siblingsOf(
+        channelId: String,
+        schedule: List<ScheduleEvent>,
+        nowSec: Long = System.currentTimeMillis() / 1000,
+    ): Map<String, String> {
         val out = LinkedHashMap<String, String>()
-        schedule.filter { ev -> ev.channels.any { it.id == channelId } }
+        schedule.asSequence()
+            .filter { ev -> ev.channels.any { it.id == channelId } }
+            .filter { ev ->
+                val start = ev.startUnix ?: return@filter false
+                start <= nowSec + ON_AIR_AFTER_SEC &&
+                    start >= nowSec - ON_AIR_BEFORE_SEC
+            }
             .forEach { ev -> ev.channels.forEach { out[it.id] = it.name } }
         return out
     }

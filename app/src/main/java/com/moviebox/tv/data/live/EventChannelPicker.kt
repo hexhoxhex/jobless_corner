@@ -50,16 +50,49 @@ object EventChannelPicker {
      * Note the deliberate ordering: being on the RIGHT MATCH beats being on
      * the sturdiest stream. A flawless feed of the wrong game is a failure.
      */
+    /**
+     * Does the fixture's label for this channel contradict the channel
+     * directory?
+     *
+     * The source disagrees with itself. Measured 2026-09-19: its fixture
+     * list attached id 125 to a Premier League match under the label
+     * "Astro Premier League", while its OWN channel directory calls id 125
+     * "Astro Supersport 3" — and that channel was showing a drama, not
+     * football. Where the two names cannot be reconciled, the fixture's
+     * claim about that feed has already been shown to be unreliable.
+     *
+     * Deliberately forgiving: one name containing the other ("USA Network"
+     * vs "USA Network HD") is a spelling difference, not a contradiction.
+     */
+    fun conflictsWithCatalog(
+        ref: ScheduleChannelRef,
+        catalogNames: Map<String, String>,
+    ): Boolean {
+        val catalog = catalogNames[ref.id]?.let(LeagueCatalog::normalise)
+            ?.takeIf { it.isNotBlank() } ?: return false
+        val listed = LeagueCatalog.normalise(ref.name).takeIf { it.isNotBlank() }
+            ?: return false
+        return !catalog.contains(listed) && !listed.contains(catalog)
+    }
+
     fun rank(
         event: ScheduleEvent,
         schedule: List<ScheduleEvent>,
         concurrency: Map<String, Int>? = null,
+        /** id -> the channel directory's name. Empty = check skipped. */
+        catalogNames: Map<String, String> = emptyMap(),
     ): List<ScheduleChannelRef> {
         val around = event.startUnix ?: return event.channels
         val conc = concurrency ?: concurrencyMap(schedule, around)
         val original = event.channels.withIndex().associate { (i, c) -> c.id to i }
         return event.channels.sortedWith(
-            compareBy<ScheduleChannelRef> { conc[it.id] ?: 1 }
+            // A contradicted label comes FIRST in the ordering because it is
+            // the strongest "this is not your game" signal measured so far —
+            // stronger than concurrency, which only says a channel is busy.
+            compareBy<ScheduleChannelRef> {
+                if (conflictsWithCatalog(it, catalogNames)) 1 else 0
+            }
+                .thenBy { conc[it.id] ?: 1 }
                 .thenBy { ChannelLanguage.preference(it.name) }
                 .thenByDescending { FeedRanker.cached(it.id)?.result?.headroom ?: 0f }
                 .thenBy { original[it.id] ?: 0 }
@@ -71,5 +104,7 @@ object EventChannelPicker {
         event: ScheduleEvent,
         schedule: List<ScheduleEvent>,
         concurrency: Map<String, Int>? = null,
-    ): ScheduleChannelRef? = rank(event, schedule, concurrency).firstOrNull()
+        catalogNames: Map<String, String> = emptyMap(),
+    ): ScheduleChannelRef? =
+        rank(event, schedule, concurrency, catalogNames).firstOrNull()
 }

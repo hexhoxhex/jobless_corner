@@ -722,8 +722,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
          *  settle before we give up on it. */
         const val AUTO_SWITCH_COOLDOWN_MS = 2 * 60 * 1000L
 
-        /** Rest after an attempt that found no better feed. */
-        const val AUTO_SWITCH_FAILED_COOLDOWN_MS = 5 * 60 * 1000L
+        /** Rest after an attempt that found no better feed.
+         *
+         *  90 s, not 5 min. The long rest was set to stop runaway probing,
+         *  but on a live match the feed pool changes minute to minute and a
+         *  five-minute silence is most of a half. [autoSwitchFeed]'s urgent
+         *  path skips this entirely. */
+        const val AUTO_SWITCH_FAILED_COOLDOWN_MS = 90 * 1000L
 
         /** Probes to run when a stall forces a decision with no fresh
          *  measurements. Bounded so recovery stays quick. */
@@ -1244,7 +1249,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * measured yet it probes first, which costs a few seconds but beats
      * switching blind to a feed that may be worse.
      */
-    fun autoSwitchFeed(reason: String) {
+    fun autoSwitchFeed(reason: String, urgent: Boolean = false) {
         val current = _state.value.currentLiveChannel?.id ?: return
         val now = android.os.SystemClock.elapsedRealtime()
         // One attempt at a time, and a long rest after an attempt that found
@@ -1262,7 +1267,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             android.util.Log.i("LiveDiag", "AUTOSWITCH skipped (attempt in flight) reason=$reason")
             return
         }
-        if (lastAutoSwitchFailedAt != 0L &&
+        // ...but "nothing better a while ago" must not gag a switch when the
+        // feed has since DIED or started starving. Measured on a Premier
+        // League match: the stall trigger fired three times while the buffer
+        // sat under a second, and each firing was answered with
+        // "AUTOSWITCH suppressed (nothing better found 118s/173s/216s ago)".
+        // The viewer watched a frozen picture while the one mechanism that
+        // could rescue them was resting.
+        if (!urgent &&
+            lastAutoSwitchFailedAt != 0L &&
             now - lastAutoSwitchFailedAt < AUTO_SWITCH_FAILED_COOLDOWN_MS
         ) {
             android.util.Log.i(

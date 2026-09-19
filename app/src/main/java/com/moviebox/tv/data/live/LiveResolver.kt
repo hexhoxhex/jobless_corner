@@ -229,7 +229,34 @@ class LiveResolver(
      * catalog's `stream_url` (which may itself 403 if the IP-bind hypothesis
      * holds, but it's still the right next step before giving up).
      */
-    suspend fun resolveStream(channelId: String): String? = withContext(Dispatchers.IO) {
+    /**
+     * Resolve with a deadline.
+     *
+     * The wrapper pages have grown slow — measured 8 s, 10.9 s and 11.5 s on
+     * one channel, with one attempt dying on the client's own 14 s ceiling.
+     * Every recovery pays that twice (once here, once when the player
+     * retries), so a viewer whose stream hiccups waits half a minute before
+     * anything can help them. Past this budget the answer is worth less than
+     * the delay: give up and let the caller fail over to a sibling feed.
+     */
+    suspend fun resolveStream(channelId: String): String? {
+        val started = System.currentTimeMillis()
+        return kotlinx.coroutines.withTimeoutOrNull(RESOLVE_BUDGET_MS) {
+            resolveStreamUnbounded(channelId)
+        } ?: run {
+            android.util.Log.w(
+                "LiveDiag",
+                "RESOLVER ch=$channelId gave up after " +
+                    "${System.currentTimeMillis() - started}ms (budget " +
+                    "${RESOLVE_BUDGET_MS}ms) — caller should try another feed",
+            )
+            null
+        }
+    }
+
+    private suspend fun resolveStreamUnbounded(
+        channelId: String,
+    ): String? = withContext(Dispatchers.IO) {
         val t0 = System.currentTimeMillis()
         LiveStatus.note("▶  Fetching streams…")
         // Race every known resolver strategy IN PARALLEL and take the FIRST
@@ -1022,6 +1049,11 @@ class LiveResolver(
          * room. 8 s still fits inside the proxy's 10 s resolve budget with
          * ~2 s left for the master fetch.
          */
+        /** Longest a single resolve may run before the caller moves on.
+         *  Sits under LiveStreamProxy.ENSURE_CACHED_TIMEOUT_MS (14 s) so the
+         *  master + inner fetches still have room inside that ceiling. */
+        private const val RESOLVE_BUDGET_MS = 9_000L
+
         private fun playerClient(): OkHttpClient = OkHttpClient.Builder()
             .connectTimeout(3, java.util.concurrent.TimeUnit.SECONDS)
             .readTimeout(7, java.util.concurrent.TimeUnit.SECONDS)

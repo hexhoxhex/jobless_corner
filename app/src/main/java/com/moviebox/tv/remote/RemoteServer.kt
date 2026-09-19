@@ -489,6 +489,8 @@ class RemoteServer(
                 // leagues only mean something for football.
                 val leagues = com.moviebox.tv.data.live.LeagueCatalog
                 val sports = com.moviebox.tv.data.live.SportCatalog
+                val catalogNames = RemoteController.liveChannels()
+                    .associate { it.id to it.displayName }
                 // Football splits by league; every other sport collapses onto
                 // ONE heading. The catalog publishes "Ice Hockey OHL",
                 // "Ice Hockey (NHL", "Ice Hockey USHL" and "Ice Hockey
@@ -528,8 +530,19 @@ class RemoteServer(
                     events.sortedBy { it.time }.forEach { e ->
                         val chArr = JSONArray()
                         e.channels.forEach { ch ->
+                            // Show the DIRECTORY's name, and mark the rows
+                            // where the fixture's own label contradicts it —
+                            // those are the feeds that turn out not to be
+                            // carrying the match.
+                            val catalogName = catalogNames[ch.id]
+                            val clash = com.moviebox.tv.data.live.EventChannelPicker
+                                .conflictsWithCatalog(ch, catalogNames)
                             chArr.put(
-                                JSONObject().put("id", ch.id).put("name", ch.name)
+                                JSONObject()
+                                    .put("id", ch.id)
+                                    .put("name", catalogName ?: ch.name)
+                                    .put("listedAs", ch.name)
+                                    .put("conflict", clash)
                             )
                         }
                         // startUnix is the authoritative event start time
@@ -685,7 +698,12 @@ class RemoteServer(
                         // feed is actually on the game.
                         val chArr = JSONArray()
                         com.moviebox.tv.data.live.EventChannelPicker
-                            .rank(next.event, schedule)
+                            .rank(
+                                next.event,
+                                schedule,
+                                catalogNames = RemoteController.liveChannels()
+                                    .associate { it.id to it.displayName },
+                            )
                             .forEach { ch ->
                                 chArr.put(
                                     JSONObject().put("id", ch.id).put("name", ch.name)
@@ -781,7 +799,11 @@ class RemoteServer(
                 matches.forEach { m ->
                     val chArr = JSONArray()
                     com.moviebox.tv.data.live.EventChannelPicker
-                        .rank(m.event, sched2, conc2)
+                        .rank(
+                            m.event, sched2, conc2,
+                            catalogNames = RemoteController.liveChannels()
+                                .associate { it.id to it.displayName },
+                        )
                         .forEach { ch ->
                             chArr.put(
                                 JSONObject().put("id", ch.id).put("name", ch.name)
@@ -896,9 +918,21 @@ class RemoteServer(
                 val ranker = com.moviebox.tv.data.live.FeedRanker
                 val schedule = com.moviebox.tv.reminders.ReminderWarm
                     .scheduleOrCached(RemoteController.liveSchedule())
-                val event = schedule.firstOrNull { ev ->
+                // The event ON NOW, not the first one in the file that ever
+                // listed this channel. That unscoped lookup labelled a live
+                // Premier League feed with a fixture that had finished hours
+                // earlier — the same "this isn't the game I asked for"
+                // confusion the sibling scoping fixes, printed as a heading.
+                val nowSec = System.currentTimeMillis() / 1000
+                val listing = schedule.filter { ev ->
                     ev.channels.any { it.id == id }
-                }?.title.orEmpty()
+                }
+                val event = (
+                    listing.firstOrNull { ev ->
+                        val start = ev.startUnix ?: return@firstOrNull false
+                        start <= nowSec + 30 * 60 && start >= nowSec - 3 * 60 * 60
+                    } ?: listing.firstOrNull()
+                )?.title.orEmpty()
 
                 val arr = JSONArray()
                 // Measured feeds first, best headroom at the top; unmeasured

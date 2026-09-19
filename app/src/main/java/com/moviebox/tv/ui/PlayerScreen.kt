@@ -581,7 +581,9 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                         true // rebuild scheduled — skip the WebView fallback
                     } else false
                 },
-                onBandwidthBound = { vm.autoSwitchFeed("bandwidth-bound") },
+                onBandwidthBound = { urgent ->
+                    vm.autoSwitchFeed("bandwidth-bound", urgent = urgent)
+                },
                 onCodecFlapping = {
                     state.currentLiveChannel?.id?.let {
                         vm.markChannelAsCodecFlapping(it)
@@ -1675,7 +1677,9 @@ private fun VideoPlayer(
      *  being torn down + rebuilt too often on a live stream. */
     onCodecFlapping: () -> Unit = {},
     /** Fired when this feed is measurably heavier than the connection. */
-    onBandwidthBound: () -> Unit = {},
+    /** The feed cannot keep up. [urgent] when playback has actually
+     *  stalled, as opposed to a pre-emptive thin-buffer check. */
+    onBandwidthBound: (urgent: Boolean) -> Unit = {},
     /** Fired the first time AUDIO_TRACK_INIT_FAILED hits on a live
      *  channel. Caller is expected to mark the channel as needing
      *  tunneling OFF and bump a rebuild revision; the next prepare
@@ -2781,7 +2785,7 @@ private fun VideoPlayer(
                         "LiveDiag",
                         "PLAYER sustained live stalling — asking for a better feed",
                     )
-                    onBandwidthBound()
+                    onBandwidthBound(true)
                 }
 
                 // Chronically thin buffer, measured BEFORE anything freezes.
@@ -2807,7 +2811,7 @@ private fun VideoPlayer(
                         "PLAYER buffer stuck under ${THIN_BUFFER_MS}ms for " +
                             "${THIN_BUFFER_TICKS}s — pre-emptive feed check",
                     )
-                    onBandwidthBound()
+                    onBandwidthBound(false)
                 }
             }
 
@@ -3053,7 +3057,7 @@ private fun VideoPlayer(
                                 // different bitrates (measured 13380 kbps vs
                                 // 4640 kbps for the same game). Move to one
                                 // that fits instead of buffering forever.
-                                onBandwidthBound()
+                                onBandwidthBound(true)
                                 behindLiveWindow.clear()
                                 // Recover in place; don't escalate to WebView.
                                 runCatching {
