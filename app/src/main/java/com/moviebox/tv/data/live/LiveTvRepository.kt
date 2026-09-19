@@ -98,10 +98,57 @@ class LiveTvRepository {
             return cached
         }
         val body = fetch(SCHEDULE_URL)
-        val parsed = scheduleAdapter.fromJson(body) ?: emptyList()
+        val parsed = (scheduleAdapter.fromJson(body) ?: emptyList()).map { ev ->
+            // The upstream schedule is scraped out of HTML and keeps its
+            // entities, so "Brighton &amp; Hove Albion" reached the screen
+            // spelled exactly like that on both the TV and the phone. Decode
+            // once, here, where the schedule enters the app — every surface
+            // downstream (rows, follows, reminders, the fixture parser) then
+            // works with the text a person would actually write.
+            ev.copy(
+                title = decodeEntities(ev.title),
+                category = decodeEntities(ev.category),
+            )
+        }
         cachedSchedule = parsed
         cachedScheduleAt = now
         return parsed
+    }
+
+    /**
+     * Turn HTML entities back into characters.
+     *
+     * Deliberately small and explicit rather than [android.text.Html]: that
+     * also parses markup, and a title like "Match <b>LIVE</b>" would come
+     * back with the tags silently eaten. Here anything unrecognised is left
+     * exactly as it was.
+     */
+    private fun decodeEntities(s: String): String {
+        if ('&' !in s) return s
+        val sb = StringBuilder(s.length)
+        var i = 0
+        while (i < s.length) {
+            val c = s[i]
+            if (c != '&') { sb.append(c); i++; continue }
+            val end = s.indexOf(';', i + 1)
+            if (end < 0 || end - i > 10) { sb.append(c); i++; continue }
+            val name = s.substring(i + 1, end)
+            val replacement = when {
+                name == "amp" -> "&"
+                name == "lt" -> "<"
+                name == "gt" -> ">"
+                name == "quot" -> "\""
+                name == "apos" || name == "#39" -> "'"
+                name == "nbsp" -> " "
+                name.startsWith("#x") || name.startsWith("#X") ->
+                    name.drop(2).toIntOrNull(16)?.let { String(Character.toChars(it)) }
+                name.startsWith("#") ->
+                    name.drop(1).toIntOrNull()?.let { String(Character.toChars(it)) }
+                else -> null
+            }
+            if (replacement == null) { sb.append(c); i++ } else { sb.append(replacement); i = end + 1 }
+        }
+        return sb.toString()
     }
 
     /** Distinct group names, in catalog order. Useful for the filter chips. */

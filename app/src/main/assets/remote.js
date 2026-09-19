@@ -2280,13 +2280,21 @@ function renderLiveSchedule(data) {
 
   // Same rule one level up: a category with something on air outranks a
   // category that's entirely upcoming, so a live match is never buried
-  // under three blocks that don't start for hours. Ties keep the
-  // catalog's own order (Array#sort is stable).
+  // under three blocks that don't start for hours.
+  //
+  // Beyond that, KEEP THE SERVER'S ORDER (Array#sort is stable). It used to
+  // rank by how many live events a group had, which quietly defeated the
+  // whole point of grouping by league: "Other leagues" carries ~300 of a
+  // day's ~800 fixtures, so it always had the most live ones and sat pinned
+  // above every named league. A Premier League match — the thing someone
+  // opened the pane to find — rendered below hundreds of rows of Hungarian
+  // NB1 and Croatian 1. HNL. The server already orders leagues first, then
+  // the other sports; respect it.
   filtered.sort((a, b) => {
-    const aLive = a.events.filter(e => e._live).length;
-    const bLive = b.events.filter(e => e._live).length;
-    if ((aLive > 0) !== (bLive > 0)) return aLive > 0 ? -1 : 1;
-    return bLive - aLive;
+    const aLive = a.events.some(e => e._live);
+    const bLive = b.events.some(e => e._live);
+    if (aLive !== bLive) return aLive ? -1 : 1;
+    return 0;
   });
 
   status.textContent = filtered.length

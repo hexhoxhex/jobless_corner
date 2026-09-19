@@ -976,10 +976,34 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         // Threshold: 3 refreshes. Well before MAX_RESOLVE_FAILURES_-
         // BEFORE_WEBVIEW (25) so we swap BEFORE the user gets dumped
         // on the Adscore-blocked WebView.
-        if (liveResolveFailures == AUTO_FAILOVER_AFTER) {
+        // A 5xx means the origin is refusing, so move to a sibling feed on
+        // the FIRST failure rather than re-preparing a dead source twice more
+        // to satisfy a counter. Other errors (token expiry, a dropped
+        // segment) still get the full in-place cascade, because those really
+        // do recover in place.
+        val hardDown = lastErrorWasSourceDown
+        lastErrorWasSourceDown = false
+        if (liveResolveFailures == AUTO_FAILOVER_AFTER ||
+            (hardDown && liveResolveFailures == 1)
+        ) {
+            if (hardDown) {
+                android.util.Log.w(
+                    "LiveDiag",
+                    "AUTO_FAILOVER ch=$chId early — upstream returned 5xx",
+                )
+            }
             viewModelScope.launch { tryAutoFailoverLive(chId) }
         }
         return true
+    }
+
+    /** Set by the player when the last live error was an upstream 5xx.
+     *  Read and cleared by [refreshLiveStream]. */
+    @Volatile private var lastErrorWasSourceDown = false
+
+    /** The player saw the origin refuse with a 5xx. */
+    fun noteLiveSourceDown() {
+        lastErrorWasSourceDown = true
     }
 
     /** Alternates we've already tried within the current failure cycle.

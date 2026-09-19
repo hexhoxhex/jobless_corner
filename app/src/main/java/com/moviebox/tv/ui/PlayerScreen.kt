@@ -535,6 +535,7 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                 resizeMode = resizeMode,
                 isLive = play.isLive,
                 onFatalLiveError = { vm.forceFallbackToWebPlayer() },
+                onLiveSourceDown = { vm.noteLiveSourceDown() },
                 onLiveError = { msg ->
                     // Long-haul resilience cascade. Returns true if the
                     // caller should also call exo.prepare() to attempt
@@ -1648,6 +1649,10 @@ private fun VideoPlayer(
      *  after the in-place retry has failed too many times — in which
      *  case the player should NOT call prepare() (return false). */
     onLiveError: (String) -> Boolean = { true },
+    /** The upstream answered 5xx — it is refusing to serve, not glitching.
+     *  Lets the caller fail over to another feed instead of re-preparing the
+     *  same dead source three times first. */
+    onLiveSourceDown: () -> Unit = {},
     /** Permanent error that the native HLS path can never recover from
      *  for this specific stream (e.g. AUDIO_TRACK_INIT_FAILED on a
      *  channel whose audio sample-rate the device's AudioTrack rejects).
@@ -1693,6 +1698,7 @@ private fun VideoPlayer(
     val reloadState = rememberUpdatedState(onReloadStream)
     val progressState = rememberUpdatedState(onProgress)
     val liveErrorState = rememberUpdatedState(onLiveError)
+    val sourceDownState = rememberUpdatedState(onLiveSourceDown)
     val fatalLiveState = rememberUpdatedState(onFatalLiveError)
     val stabilisingState = rememberUpdatedState(onStabilising)
     // Track BehindLiveWindow recovery timestamps per-channel-session.
@@ -1970,7 +1976,24 @@ private fun VideoPlayer(
             // intermittent network trouble before the source-error path is
             // reached.
             HlsMediaSource.Factory(dataSourceFactory)
-                .setAllowChunklessPreparation(true)
+                // Read the actual media before preparing, rather than
+                // trusting the playlist's CODECS attribute.
+                //
+                // Chunkless preparation builds the track list from what the
+                // master playlist CLAIMS. When the claim stops matching the
+                // media — which is routine on these relays, where the
+                // provider switches encoder at an ad break or a feed change —
+                // the player cannot attach to the new video and dies with
+                // "Unable to bind a sample queue to TrackGroup with MIME type
+                // video/…". Seen twice inside a minute on Canal+ Foot France
+                // (2026-09-19), each time surfacing as a freeze and a reload.
+                // Its declaration came from upstream there; for the feeds
+                // whose master carries no STREAM-INF at all we invent one
+                // (see LiveStreamProxy.handleMaster), which is the same bet
+                // with worse odds. Preparing from the chunk costs a fraction
+                // of a second at start and makes a mid-stream format change
+                // survivable instead of fatal.
+                .setAllowChunklessPreparation(false)
                 .setLoadErrorHandlingPolicy(
                     object : androidx.media3.exoplayer.upstream
                         .DefaultLoadErrorHandlingPolicy() {
@@ -3170,6 +3193,17 @@ private fun VideoPlayer(
                         com.moviebox.tv.debug.Telemetry.Severity.WARN,
                         "Live source error — re-preparing",
                     )
+                    // A 5xx is the origin saying "not serving this", and
+                    // re-asking it rarely changes that answer: measured on
+                    // 2026-09-19, three 503 cycles ~30 s apart went by before
+                    // the failover threshold was reached — 90 seconds of
+                    // "Reconnecting…" while a working sibling feed sat there.
+                    if (cause is androidx.media3.datasource.HttpDataSource
+                            .InvalidResponseCodeException &&
+                        cause.responseCode in 500..504
+                    ) {
+                        sourceDownState.value()
+                    }
                     val shouldPrepare = liveErrorState.value(msg)
                     if (shouldPrepare) {
                         runCatching {
