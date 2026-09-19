@@ -239,16 +239,19 @@ class LiveResolver(
      * anything can help them. Past this budget the answer is worth less than
      * the delay: give up and let the caller fail over to a sibling feed.
      */
-    suspend fun resolveStream(channelId: String): String? {
+    suspend fun resolveStream(
+        channelId: String,
+        budgetMs: Long = RESOLVE_BUDGET_MS,
+    ): String? {
         val started = System.currentTimeMillis()
-        return kotlinx.coroutines.withTimeoutOrNull(RESOLVE_BUDGET_MS) {
+        return kotlinx.coroutines.withTimeoutOrNull(budgetMs) {
             resolveStreamUnbounded(channelId)
         } ?: run {
             android.util.Log.w(
                 "LiveDiag",
                 "RESOLVER ch=$channelId gave up after " +
                     "${System.currentTimeMillis() - started}ms (budget " +
-                    "${RESOLVE_BUDGET_MS}ms) — caller should try another feed",
+                    "${budgetMs}ms) — caller should try another feed",
             )
             null
         }
@@ -1053,6 +1056,19 @@ class LiveResolver(
          *  Sits under LiveStreamProxy.ENSURE_CACHED_TIMEOUT_MS (14 s) so the
          *  master + inner fetches still have room inside that ceiling. */
         private const val RESOLVE_BUDGET_MS = 9_000L
+
+        /**
+         * Probing gets longer than playback does.
+         *
+         * The 9 s playback budget is about not making a stalled viewer wait.
+         * Applying it to PROBES was a mistake that defeated the feature it
+         * feeds: measured on a congested match, every sibling aborted on it
+         * (8.0 s, 9.4 s, 9.8 s, 8.0 s), so not one of 54 feeds could be
+         * measured, auto-switch concluded "nothing clears headroom 1.3 among
+         * 54" and rested — while the viewer stalled 37% of the time. A probe
+         * runs in the background; it can afford to wait for an answer.
+         */
+        const val PROBE_RESOLVE_BUDGET_MS = 20_000L
 
         private fun playerClient(): OkHttpClient = OkHttpClient.Builder()
             .connectTimeout(3, java.util.concurrent.TimeUnit.SECONDS)

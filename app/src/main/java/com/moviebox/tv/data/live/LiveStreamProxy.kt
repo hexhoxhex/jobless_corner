@@ -295,7 +295,12 @@ class LiveStreamProxy(
      */
     suspend fun probe(channelId: String): ProbeResult {
         val t0 = System.currentTimeMillis()
-        val master = runCatching { resolver.resolveStream(channelId) }.getOrNull()
+        val master = runCatching {
+            resolver.resolveStream(
+                channelId,
+                budgetMs = LiveResolver.PROBE_RESOLVE_BUDGET_MS,
+            )
+        }.getOrNull()
             ?: return ProbeResult(
                 channelId, false, 0, 0, 0, "", "could not resolve",
             )

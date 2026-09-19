@@ -1307,10 +1307,42 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 com.moviebox.tv.data.live.LiveStatus.note(
                     "⚠  Checking other feeds for this match…",
                 )
+                // One at a time, stopping at the first usable answer.
+                //
+                // probeAll measured the whole batch before anyone looked at
+                // the results, so a congested match cost six resolves and six
+                // segment samples — pulled over the same thin pipe the
+                // stalling stream was fighting for. Measured: six probe
+                // resolves inside three minutes while the viewer's buffer sat
+                // under a second. Spend the bandwidth only until there is
+                // something to switch to.
                 val candidates = siblings.keys.filter { it !in exclude }
                     .take(AUTO_SWITCH_PROBE_LIMIT)
-                ranker.probeAll(candidates) { liveProxy.probe(it) }
-                pick = ranker.best(siblings.keys, exclude, names = siblings)
+                for (cand in candidates) {
+                    runCatching { liveProxy.probe(cand) }.getOrNull()
+                        ?.let { ranker.record(it) }
+                    pick = ranker.best(siblings.keys, exclude, names = siblings)
+                    if (pick != null) break
+                }
+                // Still nothing? Take the best that can at least keep up,
+                // rather than leaving the viewer on a feed that cannot.
+                if (pick == null) {
+                    pick = ranker.best(
+                        siblings.keys, exclude,
+                        minHeadroom = com.moviebox.tv.data.live.FeedRanker
+                            .RELAXED_HEADROOM,
+                        names = siblings,
+                    )
+                    if (pick != null) {
+                        android.util.Log.w(
+                            "LiveDiag",
+                            "AUTOSWITCH nothing cleared " +
+                                "${com.moviebox.tv.data.live.FeedRanker.MIN_HEADROOM}" +
+                                " — taking ${pick.channelId} at " +
+                                "headroom=${pick.headroom}",
+                        )
+                    }
+                }
             }
             if (pick == null) {
                 lastAutoSwitchFailedAt = android.os.SystemClock.elapsedRealtime()

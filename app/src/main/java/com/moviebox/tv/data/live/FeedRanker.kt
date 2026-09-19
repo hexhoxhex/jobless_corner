@@ -40,6 +40,16 @@ object FeedRanker {
      *  stalled, 1.75 and 2.00 held a flat 20 s buffer. */
     const val MIN_HEADROOM = 1.3f
 
+    /**
+     * Fallback bar when nothing clears [MIN_HEADROOM].
+     *
+     * 1.3 is the right target when the day is healthy. On a big fixture
+     * every mirror is congested at once, and insisting on 1.3 meant staying
+     * on a feed stalling 37% of the time rather than moving to the best of a
+     * bad set. Anything above 1.0 can at least sustain real time.
+     */
+    const val RELAXED_HEADROOM = 1.05f
+
     fun cached(channelId: String): Ranked? =
         results[channelId]?.takeIf { System.currentTimeMillis() - it.atMs < FRESH_MS }
 
