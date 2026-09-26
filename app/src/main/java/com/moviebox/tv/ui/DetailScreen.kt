@@ -358,6 +358,15 @@ fun DetailScreen(state: UiState, vm: MainViewModel) {
             Icon(Icons.Filled.PlayArrow, null)
             val label = when {
                 state.availability == Availability.UNAVAILABLE -> "Not available — pick from search"
+                // Say so while the probe is still running. It used to read
+                // "Play" the whole time, which is a promise the app cannot
+                // keep yet: the probe runs the same provider cascade a real
+                // play does, and for a title no source carries that takes
+                // ~2 minutes. The viewer tapped Play, waited, and got
+                // "No source has this title" — reported as "why doesn't the
+                // button show the movie is available?".
+                state.availability == Availability.CHECKING ->
+                    if (isSeries) "Checking…" else "Checking this plays…"
                 isSeries -> "Play S${state.details?.seasons?.firstOrNull()?.season ?: 1}E1"
                 else -> "Play"
             }

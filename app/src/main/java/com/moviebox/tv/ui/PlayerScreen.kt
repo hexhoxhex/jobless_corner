@@ -218,6 +218,10 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
     // the player via trackSelectionParameters (no DefaultTrackSelector
     // reference needed). Reset to off when the played item changes.
     var subtitleLang by remember { mutableStateOf<String?>(null) }
+
+    /** Audio language the viewer picked for THIS stream, if any. Null means
+     *  "whatever the player chose", which prefers English already. */
+    var audioLang by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(play?.mediaUrl) { subtitleLang = null }
     // True once the player fires STATE_ENDED for THIS movie/episode — the
     // definitive "content actually finished" signal. The movie / end-of-
@@ -780,6 +784,46 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                                 play.dubs.map { d ->
                                     (d.name + if (d.original) " (Original)" else "") to d.name
                                 }, onInteract = bumpControls) { vm.changeDub(it) }
+                        } else {
+                            // The provider offers no dub variants, but the
+                            // FILE may still carry several audio languages —
+                            // and nothing surfaced them, so a viewer handed a
+                            // dub had no way back ("the spiderman playing is
+                            // in hindi ... there is no way for me to switch
+                            // languages"). Read the tracks off the player.
+                            val groups = exoRef?.currentTracks?.groups.orEmpty()
+                                .filter { it.type == C.TRACK_TYPE_AUDIO }
+                            val opts = groups.flatMap { g ->
+                                (0 until g.length).map { i ->
+                                    val f = g.getTrackFormat(i)
+                                    val code = f.language.orEmpty()
+                                    val name = f.label
+                                        ?: code.uppercase().ifBlank { "Track ${i + 1}" }
+                                    name to code
+                                }
+                            }.filter { it.second.isNotBlank() }.distinctBy { it.second }
+                            if (opts.size > 1) {
+                                val playing = groups.firstNotNullOfOrNull { g ->
+                                    (0 until g.length)
+                                        .firstOrNull { g.isTrackSelected(it) }
+                                        ?.let { g.getTrackFormat(it).language }
+                                }
+                                val cur = audioLang ?: playing ?: opts.first().second
+                                val curName =
+                                    opts.firstOrNull { it.second == cur }?.first ?: cur
+                                Dropdown(
+                                    "Audio: $curName", opts, onInteract = bumpControls,
+                                ) { picked ->
+                                    val exo = exoRef
+                                    if (exo != null && picked.isNotBlank()) {
+                                        audioLang = picked
+                                        exo.trackSelectionParameters =
+                                            exo.trackSelectionParameters.buildUpon()
+                                                .setPreferredAudioLanguage(picked)
+                                                .build()
+                                    }
+                                }
+                            }
                         }
                         Dropdown(play.selected,
                             play.qualities.map { it.label to it.label },

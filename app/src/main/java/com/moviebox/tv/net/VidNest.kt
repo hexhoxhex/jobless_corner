@@ -64,6 +64,12 @@ object VidNest {
         episode: Int,
         title: String,
     ): PlayInfo? = withContext(Dispatchers.IO) {
+        // A server that only carries a dub is a last resort, not an answer.
+        // This used to take the first server that returned anything, so
+        // Spider-Man came back from `allmovies` with its single Hindi track
+        // and played in Hindi — with no way to change it. Keep looking for
+        // an English track across the remaining servers first.
+        var dubbedFallback: PlayInfo? = null
         for (server in SERVERS) {
             val path =
                 if (season > 0) "/$server/tv/$tmdbId/$season/$episode"
@@ -94,7 +100,7 @@ object VidNest {
                 "resolved tmdb=$tmdbId s=${season}e=$episode via $server " +
                     "(${entries.size} audio tracks, picked $language)",
             )
-            return@withContext PlayInfo(
+            val info = PlayInfo(
                 title = title,
                 // The master playlist — ExoPlayer adapts across its renditions.
                 mediaUrl = url,
@@ -109,8 +115,15 @@ object VidNest {
                 durationSec = 0,
                 headers = headers,
             )
+            // "Original" means the provider named no language, which for this
+            // catalogue is the original soundtrack — good enough. Anything
+            // else named is a dub: hold it aside and try the next server.
+            if (language.equals("English", true) || language == "Original") {
+                return@withContext info
+            }
+            if (dubbedFallback == null) dubbedFallback = info
         }
-        null
+        dubbedFallback
     }
 
     /** `{"data":"<custom-base64>"}` → the decoded JSON object. */

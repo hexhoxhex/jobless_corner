@@ -38,6 +38,12 @@ object H5PlayResolver {
     // resolves season/episode metadata first); movies typically fire it in
     // <4s. 25s covers both with headroom.
     private const val MAX_WAIT_MS = 25_000L
+
+    /** How often to look for the in-page play answer, and how long to wait
+     *  for it. The call itself came back in well under a second in testing;
+     *  this is slack for a slow page, well inside [MAX_WAIT_MS]. */
+    private const val PLAY_POLL_MS = 500L
+    private const val PLAY_FETCH_TIMEOUT_MS = 12_000L
     /** Startup warm: poll CookieManager every [WARM_POLL_MS] up to
      *  [WARM_MAX_WAIT_MS] for the SPA to mint mb_token. */
     private const val WARM_POLL_MS = 400L
@@ -166,13 +172,14 @@ object H5PlayResolver {
                 // the WebView (slow, defeats the cache).
                 runCatching {
                     val cm = android.webkit.CookieManager.getInstance()
-                    // Include both moviebox.ph (the new main domain) and
-                    // themoviebox.org (legacy fallback) so any cookies the
-                    // WebView picked up from either origin get pushed into
-                    // OkHttp's jar for subsequent direct-play calls.
-                    for (host in listOf(
-                        "moviebox.ph", "themoviebox.org", "h5-api.aoneroom.com",
-                    )) {
+                    // Current origin FIRST, then the legacy names. This
+                    // list used to be hardcoded to moviebox.ph /
+                    // themoviebox.org — both of which now only 301 — so the
+                    // cookies the WebView had just been granted on
+                    // officialmoviebox.com were never bridged, and the
+                    // "next direct play call" this block exists to enable
+                    // went out unentitled every time.
+                    for (host in H5Client.cookieHosts()) {
                         val raw = cm.getCookie("https://$host/") ?: continue
                         H5Client.pushCookies(host, raw)
                     }
@@ -208,6 +215,90 @@ object H5PlayResolver {
             // No layout — never attached. We only need its JS engine + cookie jar.
         }
         webView = wv
+
+        // Ask the page for the streams rather than waiting for it to ask.
+        //
+        // Measured in a real browser on 2026-09-26: the SAME play request
+        // that answers `hasResource:false streams:0` from anywhere else
+        // answers `hasResource:true` with a 480p and a 1080p MP4 when it is
+        // issued FROM the title's own page. The entitlement is minted per
+        // title by visiting it — which is why our direct call, which runs
+        // BEFORE this WebView opens the page, only ever saw the unentitled
+        // answer.
+        //
+        // This resolver was then supposed to catch the SPA's own play XHR,
+        // but the SPA does not reliably fire one (the page logs
+        // ERR_BLOCKED_BY_ORB and the nudge's click targets no longer match),
+        // so every MovieBox title fell through to the backup providers —
+        // which is how Spider-Man ended up playing in Hindi, and how titles
+        // the backups do not carry came back as "no source has this title".
+        //
+        // So make the call ourselves, in the page, where it works.
+        val playQuery = "subjectId=$subjectId" +
+            "&se=${if (season > 0) season else 0}" +
+            "&ep=${if (episode > 0) episode else 0}" +
+            "&detailPath=$detailPath"
+        var asked = false
+
+        fun askPageForStreams() {
+            if (finished || asked) return
+            asked = true
+            runCatching {
+                wv.evaluateJavascript(
+                    """
+                    (function () {
+                      window.__mbPlay = 'PENDING';
+                      fetch('/wefeed-h5api-bff/subject/play?$playQuery',
+                            { credentials: 'include' })
+                        .then(function (r) { return r.text(); })
+                        .then(function (t) { window.__mbPlay = t; })
+                        .catch(function (e) { window.__mbPlay = 'ERR:' + e; });
+                    })();
+                    """.trimIndent(),
+                    null,
+                )
+            }
+            val poll = object : Runnable {
+                private var waited = 0L
+                override fun run() {
+                    if (finished) return
+                    val self = this
+                    runCatching {
+                        wv.evaluateJavascript("window.__mbPlay") { quoted ->
+                            // evaluateJavascript hands back a JSON-encoded
+                            // value, so unwrap it before parsing.
+                            val body = runCatching {
+                                org.json.JSONTokener(quoted).nextValue() as? String
+                            }.getOrNull()
+                            when {
+                                body == null || body == "PENDING" -> {
+                                    waited += PLAY_POLL_MS
+                                    if (waited < PLAY_FETCH_TIMEOUT_MS) {
+                                        main.postDelayed(self, PLAY_POLL_MS)
+                                    }
+                                }
+                                body.startsWith("ERR:") ->
+                                    Log.w(TAG, "in-page play failed: ${body.take(120)}")
+                                else -> {
+                                    val streams = runCatching {
+                                        parseStreams(
+                                            org.json.JSONObject(body)
+                                                .optJSONObject("data"),
+                                        )
+                                    }.getOrDefault(emptyList())
+                                    Log.i(
+                                        TAG,
+                                        "in-page play -> ${streams.size} stream(s)",
+                                    )
+                                    if (streams.isNotEmpty()) finish(streams)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            main.postDelayed(poll, PLAY_POLL_MS)
+        }
 
         wv.webViewClient = object : WebViewClient() {
             override fun shouldInterceptRequest(
@@ -283,6 +374,9 @@ object H5PlayResolver {
                 ) {
                     Log.w(TAG, "page is 404 ($landed) — dead subjectId, bailing early")
                     finish(emptyList())
+                } else if (landed.contains("/movies/")) {
+                    // The title page is up, so the entitlement exists now.
+                    askPageForStreams()
                 }
             }
         }
