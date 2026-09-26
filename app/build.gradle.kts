@@ -25,8 +25,8 @@ android {
         // ExoPlayer codec support; covers virtually all Android TV devices.
         minSdk = 26
         targetSdk = 35
-        versionCode = 285
-        versionName = "0.1.275"
+        versionCode = 286
+        versionName = "0.1.276"
 
         // Ship only the ABIs real devices use. The universal APK carried four
         // (arm64-v8a, armeabi-v7a, x86, x86_64) = ~40 MB, and that size was

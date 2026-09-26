@@ -26,6 +26,19 @@ class App : Application(), ImageLoaderFactory {
         // for connectivity changes immediately.
         com.moviebox.tv.debug.Telemetry.init(this)
         com.moviebox.tv.debug.NetworkMonitor.start(this)
+        // The remote's access list, initialised HERE rather than from the
+        // Compose tree.
+        //
+        // MainActivity.onCreate starts the remote server eagerly, but
+        // RemoteAccess.init() was called from a LaunchedEffect in AppRoot —
+        // i.e. after the first composition. Every remote request goes through
+        // RemoteAccess to authorise, so for the ~30 s between the server
+        // accepting connections and Compose getting there, every single
+        // request answered "lateinit property prefs has not been
+        // initialized". Open the phone remote just after the TV app starts
+        // and it looked dead. init() is idempotent, so the AppRoot call
+        // stays and simply finds it done.
+        runCatching { com.moviebox.tv.remote.RemoteAccess.init(this) }
         // Mint the premium atp:3 session token at startup (off the first-frame
         // path) so the FIRST search/detail already carries the bearer that
         // unlocks full results — instead of running degraded ("nothing found"
