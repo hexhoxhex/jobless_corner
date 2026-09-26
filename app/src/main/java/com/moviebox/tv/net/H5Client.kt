@@ -91,6 +91,27 @@ object H5Client {
         }
     }
 
+    /** Ask the site where it lives now, by following its own redirects.
+     *
+     *  Warm used to learn this from the WebView's URL, which is a race it
+     *  loses. CookieManager is persistent, so a LEFTOVER `mb_token` from the
+     *  previous domain is already there — warm saw it ~400 ms in, declared
+     *  success, harvested from the dead host and never waited for the 301 to
+     *  be followed. themoviebox.org has 301'd to officialmoviebox.com since
+     *  2026-09-18 and the cookie that unlocks playback is minted on the NEW
+     *  host, so every VOD play came back `streams:[] hasResource:false`
+     *  while the same title played fine on the site itself. One
+     *  redirect-following GET settles it, off the WebView's timeline.
+     *
+     *  Blocking — call from IO, never the main thread. */
+    fun refreshSiteBase() {
+        runCatching {
+            val start = discoveredBase ?: loadSiteBase() ?: DEFAULT_PROXY_BASE
+            client.newCall(Request.Builder().url("$start/").get().build())
+                .execute().use { resp -> noteSiteBase(resp.request.url.toString()) }
+        }
+    }
+
     /** Hosts worth harvesting cookies from, current origin first. */
     fun cookieHosts(): List<String> {
         val out = LinkedHashSet<String>()

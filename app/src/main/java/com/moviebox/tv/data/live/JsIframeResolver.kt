@@ -37,6 +37,25 @@ object JsIframeResolver {
 
     private const val TAG = "JsIframeResolver"
 
+    /** Mute anything this off-screen page decides to play, and keep muting:
+     *  players replace their media element during setup, and ads inject
+     *  their own. Same-origin only — a cross-origin ad iframe is beyond our
+     *  reach, which is why the VOD resolver blocks autoplay outright. */
+    private const val MUTE_JS = """
+        (function () {
+          var mute = function () {
+            var m = document.querySelectorAll('video,audio');
+            for (var i = 0; i < m.length; i++) { m[i].muted = true; m[i].volume = 0; }
+          };
+          mute();
+          setInterval(mute, 400);
+          if (window.MutationObserver) {
+            new MutationObserver(mute).observe(
+              document.documentElement, { childList: true, subtree: true });
+          }
+        })();
+    """
+
     // 10 s (bumped from 6 s): welovetocare, cdnlivetv and ksohls all
     // load ~15-40 external resources (analytics, ad SDK, fingerprinting)
     // before Clappr fires the m3u8 request — 6 s was catching only the
@@ -150,6 +169,25 @@ object JsIframeResolver {
         webView = wv
 
         wv.webViewClient = object : WebViewClient() {
+            // Autoplay stays ON here, unlike the VOD resolver: these iframe
+            // players only fetch the m3u8 once playback starts, and that
+            // fetch is the whole point of this WebView. So mute instead —
+            // the page may play, it may not be heard. Injected on start AND
+            // finish because the player often attaches before load completes,
+            // and re-applied on a timer since these pages swap their media
+            // element as they initialise.
+            override fun onPageStarted(
+                view: WebView?, url: String?, favicon: android.graphics.Bitmap?,
+            ) {
+                super.onPageStarted(view, url, favicon)
+                view?.evaluateJavascript(MUTE_JS, null)
+            }
+
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                view?.evaluateJavascript(MUTE_JS, null)
+            }
+
             override fun shouldInterceptRequest(
                 view: WebView, request: WebResourceRequest,
             ): WebResourceResponse? {

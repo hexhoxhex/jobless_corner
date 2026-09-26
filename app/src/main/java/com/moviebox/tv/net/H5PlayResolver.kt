@@ -60,7 +60,21 @@ object H5PlayResolver {
     @SuppressLint("SetJavaScriptEnabled")
     fun warmSession() {
         val main = Handler(Looper.getMainLooper())
-        main.post {
+        // Settle which origin the site is on BEFORE opening a WebView on it.
+        // Off this thread because it is a network call, and ahead of the
+        // WebView because warm's own cookie check wins a race it should lose
+        // and would otherwise pin us to a dead domain for the whole session
+        // (see H5Client.refreshSiteBase).
+        Thread({
+            H5Client.refreshSiteBase()
+            main.post { warmOnMain() }
+        }, "h5-warm-base").start()
+    }
+
+    /** The WebView half of the warm, on the main thread where it must run. */
+    private fun warmOnMain() {
+        val main = Handler(Looper.getMainLooper())
+        run {
             runCatching {
                 val cm = android.webkit.CookieManager.getInstance()
                 cm.setAcceptCookie(true)
@@ -183,7 +197,14 @@ object H5PlayResolver {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.userAgentString = BROWSER_UA
-            settings.mediaPlaybackRequiresUserGesture = false
+            // Autoplay stays BLOCKED here. This WebView is never attached to
+            // any layout — the viewer cannot see it — but it loads an
+            // ad-heavy page, and with autoplay allowed an ad starts playing
+            // audio from a window that does not exist. Reported as "music is
+            // coming from somewhere, maybe YouTube" while trying to start a
+            // film. Nothing here needs playback: this resolver watches for
+            // the play API call the site's own JS makes, which is an XHR.
+            settings.mediaPlaybackRequiresUserGesture = true
             // No layout — never attached. We only need its JS engine + cookie jar.
         }
         webView = wv

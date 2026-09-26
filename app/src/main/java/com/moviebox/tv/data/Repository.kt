@@ -233,6 +233,35 @@ class Repository(
      *  the title surfaces however it's typed. A plain single-word query has
      *  one variant → one upstream call, so the extra cost is only paid where
      *  it actually broadens the result set. */
+    /** The canonical detailPath for [subjectId], found the way the UI finds
+     *  things rather than the way the API prefers.
+     *
+     *  H5Api.lookupDetailPath searches the keyword LITERALLY, which is the
+     *  one thing aoneroom's search is bad at: "Tyler Perry's: Madea on the
+     *  Run" matches nothing, so play fell through to a slug synthesised from
+     *  the subjectId ("3666553826863136720-aXXxxXXxxXX"), the site's router
+     *  never recognised it, and the title reported as unavailable even though
+     *  the catalog had it (`hasResource:true` on /detail). searchVariants is
+     *  what the search screen uses — spelling variants and all — so the play
+     *  path uses it too. Costs one extra search, and only on a cache miss:
+     *  a hit from the search screen already populated the cache. */
+    private suspend fun detailPathTolerant(
+        subjectId: String, titleHint: String?,
+    ): String? {
+        com.moviebox.tv.net.H5Api.detailPathFor(subjectId)?.let { return it }
+        val hint = titleHint?.trim().orEmpty()
+        if (hint.isEmpty()) return null
+        com.moviebox.tv.net.H5Api.lookupDetailPath(subjectId, hint)?.let { return it }
+        val hits = runCatching { searchVariants(hint) }.getOrDefault(emptyList())
+        com.moviebox.tv.net.H5Api.detailPathFor(subjectId)?.let { return it }
+        // No id match. Fall back to the best title match: ids differ between
+        // dub variants of the same film, so an exact title is worth more here
+        // than an id the catalog has rotated out.
+        val byTitle = hits.firstOrNull { it.title.equals(hint, ignoreCase = true) }
+            ?: hits.firstOrNull { it.title.lowercase().contains(hint.lowercase()) }
+        return byTitle?.let { com.moviebox.tv.net.H5Api.detailPathFor(it.subjectId) }
+    }
+
     suspend fun searchVariants(
         keyword: String,
         type: SubjectType = SubjectType.ALL,
@@ -272,6 +301,40 @@ class Repository(
         fourk
             .filter { type == SubjectType.ALL || it.type == type }
             .forEach { merged.putIfAbsent(it.subjectId, it) }
+        // Upstream matches titles loosely rather than as a phrase. "madea"
+        // returns "Tyler Perry's: Madea on the Run"; typing the film's actual
+        // name, "madea on the run", returns nothing — so the app told the
+        // viewer "No source has this title" about a film it can play, with
+        // full details, right now. When NOTHING found so far contains every
+        // word typed, ask again using the most distinctive word on its own
+        // and keep the rows that do contain them all. One extra call, paid
+        // only when the phrase search has already failed.
+        val words = keyword.trim().lowercase()
+            .split(' ', ',', ':', '-', '.', '(', ')')
+            .filter { it.length > 2 }
+        fun hasAllWords(title: String): Boolean {
+            val t = title.lowercase()
+            return words.all { t.contains(it) }
+        }
+        if (words.size > 1 && merged.values.none { hasAllWords(it.title) }) {
+            val probe = words.maxByOrNull { it.length }.orEmpty()
+            val hits = runCatching { search(probe, type) }
+                .getOrDefault(emptyList())
+                .filter { hasAllWords(it.title) }
+            if (hits.isNotEmpty()) {
+                android.util.Log.i(
+                    "Search",
+                    "'$keyword' matched nothing as a phrase; '$probe' " +
+                        "found ${hits.size} containing every word",
+                )
+                // The exact-word matches ARE the answer — put them first.
+                val reordered = LinkedHashMap<String, Item>()
+                hits.forEach { reordered[it.subjectId] = it }
+                merged.forEach { (k, v) -> reordered.putIfAbsent(k, v) }
+                merged.clear()
+                merged.putAll(reordered)
+            }
+        }
         // A person's filmography goes FIRST when the catalogues found nothing
         // (searching "Tom Holland" has no title match, so those results are
         // the whole point) and after the title hits otherwise, so an actor who
@@ -503,8 +566,7 @@ class Repository(
         // host. If we don't already have a detailPath cached from search,
         // search by title to find one (detail-rec returns recommendations,
         // not the subject itself, so it's not usable as a lookup).
-        val dp = com.moviebox.tv.net.H5Api.detailPathFor(subjectId)
-            ?: com.moviebox.tv.net.H5Api.lookupDetailPath(subjectId, titleHint)
+        val dp = detailPathTolerant(subjectId, titleHint)
         val h5 = dp?.let { com.moviebox.tv.net.H5Api.detail(it) }
         if (h5 != null) {
             val type = if (h5.isSeries) SubjectType.TV_SERIES else SubjectType.MOVIE
@@ -846,8 +908,7 @@ class Repository(
         // mobile itemDetails returns 441 now, so without this the player
         // showed the raw subjectId number instead of the movie name. Look the
         // detailPath up if we don't already have one cached from search.
-        val dp = com.moviebox.tv.net.H5Api.detailPathFor(subjectId)
-            ?: com.moviebox.tv.net.H5Api.lookupDetailPath(subjectId, titleHint)
+        val dp = detailPathTolerant(subjectId, titleHint)
         val h5Detail = dp?.let { com.moviebox.tv.net.H5Api.detail(it) }
 
         val (effectiveId, selectedDub, detailPath) = run {
@@ -863,7 +924,13 @@ class Repository(
             if (matchDub != null) {
                 Triple(matchDub.subjectId, mapDubName(matchDub.name), matchDub.detailPath.ifBlank { dp ?: "" })
             } else {
-                Triple(subjectId, "Original", dp ?: com.moviebox.tv.net.H5Client.syntheticDetailPath(h5Detail?.title ?: subjectId))
+                Triple(subjectId, "Original", dp ?: com.moviebox.tv.net.H5Client.syntheticDetailPath(
+                    // Never slug the subjectId: "3666553826863136720-aXXxx…"
+                    // is not a route the site has. A title slug at least
+                    // matches the shape its router expects.
+                    h5Detail?.title?.ifBlank { null } ?: titleHint?.ifBlank { null }
+                        ?: subjectId,
+                ))
             }
         }
         val dubs = h5Detail?.dubs?.map {
