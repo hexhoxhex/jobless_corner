@@ -312,6 +312,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             .stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
 
     init {
+        // Load the channel list up front, from cache.
+        //
+        // It used to load only when the user SWITCHED to the Live tab, when
+        // the phone remote asked, or when they hit a retry button. So after
+        // any restart that lands straight on Live — which is where a TV that
+        // was watching live comes back to — nothing triggered a load and the
+        // tab showed an empty grid. Reported as "live tv channels have
+        // disappeared", with 752 perfectly good channels sitting in the
+        // cache file the whole time.
+        //
+        // loadLiveIfStale reads that cache first and only re-fetches when it
+        // is actually old, so this costs a restart nothing.
+        loadLiveIfStale()
+
         // One-shot reset of bounce counters on this version. v0.1.42
         // added the ffmpeg audio decoder — channels that were stuck
         // web-only because of TCL's 24 kHz audio rejection (FOX USA,

@@ -39,15 +39,19 @@ class App : Application(), ImageLoaderFactory {
         // in what order). Reads the cache instantly and refreshes in the
         // background, so a source that dies upstream can be disabled for
         // existing installs without an app update.
+        // Settle the live wrapper host, on a thread of its own. It is one
+        // redirect-following GET, but against a host that can take tens of
+        // seconds to answer — and everything below runs in sequence, so
+        // doing it there would have delayed arming the match reminders by
+        // that long on every boot. Alarms are the one thing that must not
+        // wait.
+        Thread {
+            runCatching { com.moviebox.tv.data.live.LiveResolver.refreshWrapperBase() }
+        }.apply { isDaemon = true }.start()
+
         Thread {
             kotlinx.coroutines.runBlocking {
                 runCatching { com.moviebox.tv.data.ProviderConfig.warm(this@App) }
-                // Settle the live wrapper host on this background thread, so
-                // the first channel start does not pay two redirects on each
-                // of six path attempts.
-                runCatching {
-                    com.moviebox.tv.data.live.LiveResolver.refreshWrapperBase()
-                }
                 // Arm match reminders without waiting for anyone to open the
                 // Live tab. The VM only fetches the schedule when Live is
                 // visited, so a TV that boots to the home screen would
