@@ -415,7 +415,31 @@ class LiveStreamProxy(
      * player's first /master is a hit and the start costs one race.
      */
     suspend fun prime(channelId: String): String? =
+        // Stays on the short budget: playChannel AWAITS this before it opens
+        // the player, so a patient prime here means the viewer stares at a
+        // blank screen for a minute. Patience belongs in
+        // [primeInBackground], after the player is up.
         refreshCache(channelId)?.masterUrl
+
+    /** Keep resolving after the caller has given up waiting.
+     *
+     *  The blocking prime is bounded by what a viewer will sit through (9 s).
+     *  When the source is trickling that is simply not enough — measured
+     *  2026-09-26, the wrapper page is 644 KB (168 KB gzipped) served at
+     *  ~13 KB/s, so ~15 s at best — and the player then starts with an empty
+     *  cache, fails, retries, fails again and stops. That is exactly the
+     *  "plays, then fails, reconnects, then stops" report.
+     *
+     *  So let the resolve continue on the proxy's own scope with the patient
+     *  budget. The player is already up and its /master retries hit the same
+     *  cache, so it recovers on its own once the answer lands. */
+    fun primeInBackground(channelId: String) {
+        scope.launch {
+            runCatching {
+                refreshCache(channelId, LiveResolver.PATIENT_RESOLVE_BUDGET_MS)
+            }
+        }
+    }
 
     fun invalidate(channelId: String) {
         Log.i(DIAG, "PROXY ch=$channelId INVALIDATE (caller-requested)")
@@ -1420,7 +1444,10 @@ class LiveStreamProxy(
     /** Re-resolve donis for this channel; populate the cache. Serialized
      *  per-channel via a Mutex so two concurrent refreshes don't double-fire
      *  donis. */
-    private suspend fun refreshCache(channelId: String): CacheEntry? {
+    private suspend fun refreshCache(
+        channelId: String,
+        budgetMs: Long = LiveResolver.RESOLVE_BUDGET_MS_DEFAULT,
+    ): CacheEntry? {
         val lock = refreshLocks.getOrPut(channelId) { Mutex() }
         return lock.withLock {
             val current = cache[channelId]
@@ -1430,7 +1457,8 @@ class LiveStreamProxy(
                 // Another thread refreshed inside the lock; reuse that.
                 return@withLock current
             }
-            val masterUrl = resolver.resolveStream(channelId) ?: return@withLock null
+            val masterUrl = resolver.resolveStream(channelId, budgetMs)
+                ?: return@withLock null
             // Fetch master once to learn the inner URL + STREAM-INF line.
             val parsed = parseMaster(masterUrl)
             if (parsed == null) {

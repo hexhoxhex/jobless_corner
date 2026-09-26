@@ -42,6 +42,12 @@ class App : Application(), ImageLoaderFactory {
         Thread {
             kotlinx.coroutines.runBlocking {
                 runCatching { com.moviebox.tv.data.ProviderConfig.warm(this@App) }
+                // Settle the live wrapper host on this background thread, so
+                // the first channel start does not pay two redirects on each
+                // of six path attempts.
+                runCatching {
+                    com.moviebox.tv.data.live.LiveResolver.refreshWrapperBase()
+                }
                 // Arm match reminders without waiting for anyone to open the
                 // Live tab. The VM only fetches the schedule when Live is
                 // visited, so a TV that boots to the home screen would

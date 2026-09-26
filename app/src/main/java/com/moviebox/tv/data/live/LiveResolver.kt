@@ -372,7 +372,7 @@ class LiveResolver(
                             }
                         }
                     }
-                    for (path in playerPathsFor(channelId)) {
+                    for (path in playerPathsFor(channelId, wide = true)) {
                         fallbackProbes += async {
                             runCatching { tryPlayerPath(channelId, path) }
                                 .getOrNull()?.let { it to "dlhd:$path" }
@@ -629,8 +629,9 @@ class LiveResolver(
      *  routes Kenya-reachable via vinix.inproviszon.st. */
     private suspend fun tryPlayerPath(channelId: String, path: String): String? {
         val t0 = System.currentTimeMillis()
-        val wrapper = "https://dlhd.st/$path/stream-$channelId.php"
-        val referer = "https://dlhd.st/watch.php?id=$channelId"
+        val base = wrapperBase()
+        val wrapper = "$base/$path/stream-$channelId.php"
+        val referer = "$base/watch.php?id=$channelId"
         var finalWrapper = wrapper
         val iframeUrl = runCatching {
             val req = Request.Builder().url(wrapper)
@@ -720,10 +721,31 @@ class LiveResolver(
 
     /** /hub/ maps an EVENT feed to a generic channel (8042 -> tntsports1-uk:
      *  a working stream of the wrong content), so event feeds never race it.
-     *  24/7 channels keep it — there it returns the matching feed. */
-    private fun playerPathsFor(channelId: String): List<String> =
-        if (LiveEventFeeds.isEvent(channelId)) PLAYER_PATHS.filter { it != "hub" }
-        else PLAYER_PATHS
+     *  24/7 channels keep it — there it returns the matching feed.
+     *
+     *  [wide] opens up the full list. The first pass deliberately does not.
+     *  Each wrapper page is ~644 KB (168 KB gzipped) and the <iframe> we came
+     *  for sits at the very END of it (measured: byte 644146 of 644578), so
+     *  there is nothing to abort early — racing all six paths costs ~3.9 MB,
+     *  and the resolver runs two passes, so ~7.7 MB for ONE channel start,
+     *  repeated for every sibling the feed prober measures.
+     *
+     *  Measured 2026-09-26, and this is the honest cause of "it plays, then
+     *  fails, reconnects, then stops": after sustained fetching at that rate
+     *  the host stopped accepting TCP on 443 from this address altogether —
+     *  ICMP still 0% loss, every other site fine, so it reads as our bug from
+     *  the sofa. Two paths first, widening only when they fail, costs ~1.3 MB
+     *  in the common case. */
+    private fun playerPathsFor(
+        channelId: String, wide: Boolean = false,
+    ): List<String> {
+        val all = if (LiveEventFeeds.isEvent(channelId)) {
+            PLAYER_PATHS.filter { it != "hub" }
+        } else {
+            PLAYER_PATHS
+        }
+        return if (wide) all else all.take(PATHS_PER_FIRST_PASS)
+    }
 
     private fun logPath(channelId: String, path: String, t0: Long, outcome: String) {
         android.util.Log.i(
@@ -969,9 +991,27 @@ class LiveResolver(
         //   /cast/ /watch/ /plus/ /casting/ -> just wrap /stream/
         //   /player/  -> HTTP 404 (gone)
         // /hub/ goes first: it is the route that is actually serving.
+        /** Best-first. /plus is the route that actually resolves — it was
+         *  3 of 3 in isolated testing and is what the scraper tries first —
+         *  so it leads, and the first pass only reaches as far as
+         *  [PATHS_PER_FIRST_PASS]. The old order led with /hub, which meant
+         *  the cheap pass spent its budget on the least likely routes. */
         private val PLAYER_PATHS = listOf(
-            "hub", "stream", "cast", "watch", "plus", "casting",
+            "plus", "stream", "hub", "cast", "watch", "casting",
         )
+
+        /** How many wrapper paths the first pass may fetch. ONE.
+         *
+         *  The host trickles these pages at ~13 KB/s and that rate is shared,
+         *  so parallelism is self-defeating: measured on the TV, two paths at
+         *  once each ran past a 30 s ceiling and BOTH failed
+         *  ("dlhd:plus 30003ms wrapper InterruptedIOException"), while the
+         *  same page alone completes in ~15 s. Racing six, as before, gave
+         *  each ~2 KB/s and nothing ever finished — six simultaneous failures,
+         *  then "source DOWN", then a channel that will not start. Fetch one,
+         *  finish it, only then try another. The last-resort pass still opens
+         *  up. */
+        private const val PATHS_PER_FIRST_PASS = 1
 
         /** epiembeds-style obfuscation: `var _x=[n,n,...],_k=63,_s=225;`
          *  decoded as `((n ^ k) - s + 256) & 255` and eval'd. The decoded
@@ -1052,10 +1092,80 @@ class LiveResolver(
          * room. 8 s still fits inside the proxy's 10 s resolve budget with
          * ~2 s left for the master fetch.
          */
+        /** Where the wrapper pages live today. Treat it as a hint.
+         *
+         *  Measured 2026-09-26, and it explains "the stream just stops":
+         *  `dlhd.st/plus/stream-343.php` now 301s TWICE before landing on
+         *  dlive.sx, and the page is 644 KB (168 KB gzipped) that the site
+         *  trickles out — ttfb 4.1 s, complete at 15.7 s — with the <iframe>
+         *  deliberately at the very END (byte 644146 of 644578), so there is
+         *  nothing to abort early on. Against an 8 s call ceiling and 3 s per
+         *  connect, all six paths died with SocketTimeoutException at ~3 s:
+         *  "RESOLVER ch=343 FAILED — all daddy x all player paths", then
+         *  "source DOWN after 5 consecutive failures", and the channel never
+         *  started. Learning the final host once removes two connects per
+         *  attempt, six attempts per channel. */
+        private const val WRAPPER_SEED = "https://dlhd.st"
+        private const val WRAPPER_PREFS = "live_host"
+        private const val WRAPPER_KEY = "wrapper_base"
+
+        @Volatile private var wrapperBase: String? = null
+
+        fun wrapperBase(): String = wrapperBase
+            ?: runCatching {
+                com.moviebox.tv.App.instance
+                    .getSharedPreferences(
+                        WRAPPER_PREFS, android.content.Context.MODE_PRIVATE,
+                    )
+                    .getString(WRAPPER_KEY, null)
+                    ?.takeIf { it.startsWith("https://") }
+                    ?.also { wrapperBase = it }
+            }.getOrNull()
+            ?: WRAPPER_SEED
+
+        /** Follow the wrapper host's redirects once and remember where they
+         *  land. Blocking — call from IO, never the main thread. */
+        fun refreshWrapperBase() {
+            runCatching {
+                val req = Request.Builder().url(wrapperBase() + "/")
+                    .header("User-Agent", CHROME_ANDROID_UA)
+                    .get().build()
+                // The body is not read: closing the response aborts the
+                // transfer, which matters when the page is this big.
+                playerClient().newCall(req).execute().use { r ->
+                    val landed = "https://" + r.request.url.host
+                    if (landed != wrapperBase) {
+                        wrapperBase = landed
+                        android.util.Log.i("LiveDiag", "wrapper base -> $landed")
+                        com.moviebox.tv.App.instance
+                            .getSharedPreferences(
+                                WRAPPER_PREFS, android.content.Context.MODE_PRIVATE,
+                            )
+                            .edit().putString(WRAPPER_KEY, landed).apply()
+                    }
+                }
+            }
+        }
+
+        /** Budget for a resolve nobody is waiting on — the pre-resolve that
+         *  runs before the player exists.
+         *
+         *  The 9 s playback budget is about not making a viewer wait, and it
+         *  is right for the serving path: ExoPlayer is on the other end of
+         *  the proxy socket. But applying it to the PRE-resolve made it
+         *  useless the moment the source slowed down: a page walk that
+         *  genuinely needs ~16 s can never finish in 9 s, so the cache stayed
+         *  empty, the player started cold, and the channel failed. Nothing is
+         *  waiting here, so wait properly. */
+        const val PATIENT_RESOLVE_BUDGET_MS = 60_000L
+
         /** Longest a single resolve may run before the caller moves on.
          *  Sits under LiveStreamProxy.ENSURE_CACHED_TIMEOUT_MS (14 s) so the
          *  master + inner fetches still have room inside that ceiling. */
         private const val RESOLVE_BUDGET_MS = 9_000L
+
+        /** The playback-path budget, for callers that need to name it. */
+        const val RESOLVE_BUDGET_MS_DEFAULT = RESOLVE_BUDGET_MS
 
         /**
          * Probing gets longer than playback does.
@@ -1071,9 +1181,18 @@ class LiveResolver(
         const val PROBE_RESOLVE_BUDGET_MS = 20_000L
 
         private fun playerClient(): OkHttpClient = OkHttpClient.Builder()
-            .connectTimeout(3, java.util.concurrent.TimeUnit.SECONDS)
-            .readTimeout(7, java.util.concurrent.TimeUnit.SECONDS)
-            .callTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
+            // Measured against the live source on 2026-09-26: two redirects,
+            // ttfb 4.1 s, body complete at 15.7 s (168 KB gzipped, 644 KB
+            // raw), iframe at the very end so the whole body is required.
+            // The old 3 s/7 s/8 s ceilings could not fit that under any
+            // conditions — every path timed out at ~3 s and the channel
+            // reported "source DOWN". These ceilings are what the request is
+            // ALLOWED to take, not what it usually takes; a healthy source
+            // still answers in ~1.5-2 s and the resolve budget, not this,
+            // decides when we stop waiting.
+            .connectTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(40, java.util.concurrent.TimeUnit.SECONDS)
+            .callTimeout(45, java.util.concurrent.TimeUnit.SECONDS)
             .followRedirects(true)
             .followSslRedirects(true)
             .build()

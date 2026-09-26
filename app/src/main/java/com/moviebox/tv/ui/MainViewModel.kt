@@ -856,6 +856,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     liveProxy.prime(ch.id)
                 }
             }.getOrNull()
+            // Nothing inside the viewer-facing budget. Don't start cold and
+            // hope: keep resolving in the background with the patient budget
+            // (a trickling source needs ~15 s, the blocking prime waits 9) so
+            // the player's own /master retries find a warm cache instead of
+            // failing their way to a stop.
+            if (resolved == null) liveProxy.primeInBackground(ch.id)
             // Prefer the proxy URL (which transparently refreshes tokens
             // forever); fall back to the directly-resolved URL if the
             // proxy didn't come up; final fallback is the catalog's
