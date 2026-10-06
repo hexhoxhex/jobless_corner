@@ -17,6 +17,14 @@ import androidx.compose.ui.composed
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.SolidColor
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import androidx.compose.animation.core.Animatable
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.drawOutline
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.inset
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -95,36 +103,68 @@ fun Modifier.tvFocusable(
             onLongClick = onLongClick,
         )
     }
-    var focused by remember { mutableStateOf(false) }
+    // Nothing here READS focus during composition — only the layer and draw
+    // lambdas below do. That is the whole point.
+    //
+    // This used to animate with `animate*AsState` and apply the values via
+    // `.scale(scale)` / `.border(width = border)`, which read them in
+    // composition: every frame of the ~200 ms focus animation recomposed the
+    // card that gained focus AND the one that lost it, and recomposing a card
+    // re-runs its poster image. Measured on the TV while browsing the home
+    // rows: 48-54% janky frames, median 36-42 ms, 99th percentile 250-300 ms,
+    // ~28 frames per run blamed on the UI thread. Read inside graphicsLayer /
+    // drawWithContent, a focus change only redraws — the card is not rebuilt.
+    // Same look: same scale, spring, shadow, ring and clip as before.
+    val focused = remember { mutableStateOf(false) }
     val bringIntoView = remember { BringIntoViewRequester() }
-    val scale by animateFloatAsState(
-        if (focused) scaleOnFocus else 1f,
-        animationSpec = spring(dampingRatio = 0.8f, stiffness = 320f),
-        label = "tv-focus-scale",
-    )
-    val border by animateDpAsState(
-        if (focused) borderWidth else 0.dp,
-        animationSpec = spring(dampingRatio = 0.9f, stiffness = 400f),
-        label = "tv-focus-border",
-    )
+    val scale = remember { Animatable(1f) }
+    val ring = remember { Animatable(0f) }   // 0..1 of borderWidth
     LaunchedEffect(Unit) {
-        snapshotFlow { focused }.collectLatest { isFocused ->
-            if (isFocused) {
-                runCatching { bringIntoView.bringIntoView() }
+        snapshotFlow { focused.value }.collectLatest { isFocused ->
+            coroutineScope {
+                if (isFocused) launch { runCatching { bringIntoView.bringIntoView() } }
+                launch {
+                    scale.animateTo(
+                        if (isFocused) scaleOnFocus else 1f,
+                        spring(dampingRatio = 0.8f, stiffness = 320f),
+                    )
+                }
+                ring.animateTo(
+                    if (isFocused) 1f else 0f,
+                    spring(dampingRatio = 0.9f, stiffness = 400f),
+                )
             }
         }
     }
     this
         .bringIntoViewRequester(bringIntoView)
-        .scale(scale)
-        .shadow(
-            elevation = if (focused) 12.dp else 0.dp,
-            shape = shape,
-            ambientColor = borderColor,
-            spotColor = borderColor,
-        )
-        .border(width = border, brush = SolidColor(borderColor), shape = shape)
-        .onFocusChanged { focused = it.isFocused }
+        .graphicsLayer {
+            val s = scale.value
+            scaleX = s
+            scaleY = s
+            val on = focused.value
+            shadowElevation = if (on) 12.dp.toPx() else 0f
+            this.shape = shape
+            clip = on                         // .shadow() clipped when elevated
+            ambientShadowColor = borderColor
+            spotShadowColor = borderColor
+        }
+        .drawWithContent {
+            drawContent()
+            val w = ring.value * borderWidth.toPx()
+            if (w > 0.5f) {
+                // .border() draws inside the bounds; inset by half the stroke
+                // so this one does too.
+                inset(w / 2f) {
+                    drawOutline(
+                        shape.createOutline(size, layoutDirection, this),
+                        color = borderColor,
+                        style = Stroke(width = w),
+                    )
+                }
+            }
+        }
+        .onFocusChanged { focused.value = it.isFocused }
         .focusable()
         .combinedClickable(
             interactionSource = remember { MutableInteractionSource() },
@@ -200,14 +240,26 @@ fun PosterImage(
         if (url.isNullOrBlank()) {
             PosterFallback(title, Modifier.fillMaxSize())
         } else {
-            SubcomposeAsyncImage(
-                model = url,
-                contentDescription = title.ifBlank { null },
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize(),
-                loading = { PosterFallback(title, Modifier.fillMaxSize(), dim = true) },
-                error   = { PosterFallback(title, Modifier.fillMaxSize()) },
-            )
+            // AsyncImage, not SubcomposeAsyncImage. The subcompose variant
+            // runs a separate composition for its loading/error slots and
+            // re-runs it on every state change — Coil's own docs say not to
+            // use it in lists, and this is every card of every row. Same look
+            // here: the dimmed fallback sits underneath while the poster
+            // loads (it crossfades in over it), and goes un-dimmed if the
+            // poster fails — the only recomposition left, once per image.
+            // AsyncImage also sizes the decode to the card's own bounds
+            // rather than the poster's full resolution.
+            var failed by remember(url) { mutableStateOf(false) }
+            PosterFallback(title, Modifier.fillMaxSize(), dim = !failed)
+            if (!failed) {
+                coil.compose.AsyncImage(
+                    model = url,
+                    contentDescription = title.ifBlank { null },
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                    onError = { failed = true },
+                )
+            }
         }
     }
 }

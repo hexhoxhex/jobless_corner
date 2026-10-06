@@ -1,0 +1,37 @@
+# Baseline profile for OUR code: which classes and methods Android should
+# compile ahead of time instead of interpreting.
+#
+# Why this file exists (measured 2026-10-06 on the TV): the app is sideloaded,
+# so every update lands as `[status=verify]` — nothing compiled, every line of
+# Compose interpreted or JIT'd on a weak TV chip. Browsing the home rows in
+# that state: 48-56% janky frames, p90 120-150 ms, p99 250-300 ms. The same
+# build compiled with a profile: 6-20% janky, p90 38-46 ms, p99 57-113 ms.
+#
+# Android does that compilation itself, during idle maintenance (on a TV,
+# usually while it sits on standby) — but only for what a profile names. The
+# libraries ship profiles for their own code; nothing named ours, so our
+# screens, cards, the player and the live proxy stayed interpreted even after
+# the device had compiled everything else. These rules name them. AGP expands
+# the wildcards at build time and androidx.profileinstaller hands the result
+# to the system on first launch.
+#
+# H = hot (called often), S = called during startup, P = called after startup.
+
+# UI: every screen, card, focus modifier, the player and its controls.
+HSPLcom/moviebox/tv/ui/**;->**(**)**
+Lcom/moviebox/tv/ui/**;
+
+# App start and the activity.
+HSPLcom/moviebox/tv/App;->**(**)**
+HSPLcom/moviebox/tv/MainActivity;->**(**)**
+
+# Data, networking and the live path: catalogue, resolver, proxy, segment
+# unwrapping — all of it runs while the viewer is waiting on a picture.
+HSPLcom/moviebox/tv/data/**;->**(**)**
+Lcom/moviebox/tv/data/**;
+HSPLcom/moviebox/tv/net/**;->**(**)**
+Lcom/moviebox/tv/net/**;
+
+# The phone remote's server answers while the TV is in use.
+HSPLcom/moviebox/tv/remote/**;->**(**)**
+Lcom/moviebox/tv/remote/**;

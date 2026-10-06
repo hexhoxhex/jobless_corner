@@ -32,6 +32,9 @@ vlcj = "4.10.1"
 coil3 = "3.0.4"
 
 [libraries]
+# Hands baseline profiles (the libraries' and app/src/main/baseline-prof.txt)
+# to the system on first launch. Sideloaded installs get no cloud profile.
+androidx-profileinstaller = { group = "androidx.profileinstaller", name = "profileinstaller", version = "1.4.1" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 androidx-work-runtime-ktx = { group = "androidx.work", name = "work-runtime-ktx", version.ref = "work" }
 androidx-tvprovider = { group = "androidx.tvprovider", name = "tvprovider", version.ref = "tvprovider" }
