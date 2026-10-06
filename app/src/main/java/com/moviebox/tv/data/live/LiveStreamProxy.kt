@@ -441,6 +441,13 @@ class LiveStreamProxy(
         }
     }
 
+    /** Resolve AND parse the master for [channelId] — the same two steps a
+     *  real start takes, so a non-null answer means "this device could play
+     *  it". For the background [HomeSweepWorker]: patient, because nothing is
+     *  waiting on it, and it does not need the proxy's server running. */
+    suspend fun verify(channelId: String): String? =
+        refreshCache(channelId, LiveResolver.PATIENT_RESOLVE_BUDGET_MS)?.masterUrl
+
     fun invalidate(channelId: String) {
         Log.i(DIAG, "PROXY ch=$channelId INVALIDATE (caller-requested)")
         cache.remove(channelId)
@@ -630,17 +637,76 @@ class LiveStreamProxy(
             )
         }
         val len = body.contentLength()
+        val stream = body.byteStream()
+
+        // Peek at the first bytes. A real TS segment starts with the sync byte
+        // and goes on streaming exactly as before; only a disguised one is
+        // buffered. Some CDNs now serve the stream inside a PNG — see
+        // DisguisedSegment — which ExoPlayer rejects outright with "Cannot
+        // find sync byte", failing the whole channel.
+        val head = ByteArray(8)
+        var got = 0
+        while (got < head.size) {
+            val n = runCatching { stream.read(head, got, head.size - got) }.getOrDefault(-1)
+            if (n < 0) break
+            got += n
+        }
+        if (DisguisedSegment.isPng(head, got)) {
+            val file = runCatching {
+                java.io.ByteArrayOutputStream(
+                    if (len in 1..Int.MAX_VALUE.toLong()) len.toInt() else 2_000_000,
+                ).apply {
+                    write(head, 0, got)
+                    stream.copyTo(this)
+                }.toByteArray()
+            }.getOrNull()
+            resp.close()
+            if (file == null) {
+                return NanoHTTPD.newFixedLengthResponse(
+                    NanoHTTPD.Response.Status.SERVICE_UNAVAILABLE,
+                    "text/plain", "segment read failed",
+                )
+            }
+            val size = file.size
+            val ts = DisguisedSegment.unwrap(file)
+            if (ts != null) {
+                val (buf, tsLen) = ts
+                if (unwrapLogged.add(channelId)) {
+                    Log.i(
+                        DIAG,
+                        "PROXY ch=$channelId SEG was a PNG-disguised stream — " +
+                            "unwrapped $size -> $tsLen bytes of MPEG-TS",
+                    )
+                }
+                return NanoHTTPD.newFixedLengthResponse(
+                    NanoHTTPD.Response.Status.OK, "video/mp2t",
+                    java.io.ByteArrayInputStream(buf, 0, tsLen), tsLen.toLong(),
+                )
+            }
+            Log.w(DIAG, "PROXY ch=$channelId SEG is a PNG with no stream inside")
+            return NanoHTTPD.newFixedLengthResponse(
+                NanoHTTPD.Response.Status.OK, ct,
+                java.io.ByteArrayInputStream(file, 0, size), size.toLong(),
+            )
+        }
+        val joined = java.io.SequenceInputStream(
+            java.io.ByteArrayInputStream(head, 0, got), stream,
+        )
         return if (len >= 0) {
             NanoHTTPD.newFixedLengthResponse(
-                NanoHTTPD.Response.Status.OK, ct, body.byteStream(), len,
+                NanoHTTPD.Response.Status.OK, ct, joined, len,
             )
         } else {
             // Length unknown (chunked upstream): stream it on without one.
             NanoHTTPD.newChunkedResponse(
-                NanoHTTPD.Response.Status.OK, ct, body.byteStream(),
+                NanoHTTPD.Response.Status.OK, ct, joined,
             )
         }
     }
+
+    /** Channels already reported as serving disguised segments; one log line
+     *  per channel per session, not one per segment. */
+    private val unwrapLogged: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     /** Carry the OLD segment's last path component into the NEW inner
      *  playlist's path. Live CDNs use stable segment numbering at the

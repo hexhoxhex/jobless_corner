@@ -466,6 +466,18 @@ class RemoteServer(
                 )
             }
 
+            // What this TV has verified about each channel from its own
+            // network. Pulled by scripts/publish_home_health.py in the
+            // scraper repo, because CI can no longer verify anything itself.
+            uri == "/api/live/health" ->
+                json(com.moviebox.tv.data.live.HomeHealthLedger.toJson(context))
+
+            // Run one home sweep now instead of waiting for the hourly one.
+            uri == "/api/live/health/sweep" && method == Method.POST -> {
+                com.moviebox.tv.data.live.HomeSweepWorker.runNow(context)
+                ok()
+            }
+
             uri == "/api/live/groups" -> {
                 val arr = JSONArray()
                 RemoteController.liveChannels()

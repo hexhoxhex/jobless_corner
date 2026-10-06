@@ -1094,6 +1094,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             runCatching {
                 channelHealthDao.recordSuccess(channelId, System.currentTimeMillis())
             }
+            // The strongest verdict there is: it is playing, on this TV.
+            runCatching {
+                com.moviebox.tv.data.live.HomeHealthLedger.record(getApplication(), channelId, ok = true)
+            }
         }
     }
 
@@ -1160,6 +1164,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 runCatching {
                     channelHealthDao.recordSuccess(
                         channelId, System.currentTimeMillis(),
+                    )
+                }
+                runCatching {
+                    com.moviebox.tv.data.live.HomeHealthLedger.record(
+                        getApplication(), channelId, ok = true,
                     )
                 }
             }

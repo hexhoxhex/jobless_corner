@@ -292,6 +292,7 @@ class LiveResolver(
             for (path in playerPathsFor(channelId)) {
                 probes += async {
                     runCatching { tryPlayerPath(channelId, path) }.getOrNull()
+                        ?.also { noteWinningPath(path) }
                         ?.let { it to "dlhd:$path" }
                 }
             }
@@ -337,8 +338,21 @@ class LiveResolver(
                 },
             )
             probes.forEach { if (it.isActive) it.cancel() }
-            if (first != null || avoid.isEmpty()) {
+            if (first != null) {
                 first
+            } else if (avoid.isEmpty()) {
+                // The first pass failed and there is no blacklist — which
+                // used to mean "return null": the wide pass below only ever
+                // ran for channels WITH a blacklist. With the first pass
+                // narrowed to the leading path (to stop parallel fetches
+                // getting the IP blocked), an ordinary channel was therefore
+                // tried on exactly ONE route. That held while /plus was the
+                // route that worked; on 2026-10-06 /plus started landing on
+                // a parked page ("For business, promotional, or legal
+                // inquiries…") for most channels, and every one of them
+                // became unplayable — USA Network included — while /stream
+                // resolved them all in 4-11 s. Walk the rest, one at a time.
+                walkRemainingPaths(channelId)
             } else {
                 // Blacklist-hit dead end: we filtered every candidate and
                 // ended up with nothing. Without this escape hatch the
@@ -375,7 +389,9 @@ class LiveResolver(
                     for (path in playerPathsFor(channelId, wide = true)) {
                         fallbackProbes += async {
                             runCatching { tryPlayerPath(channelId, path) }
-                                .getOrNull()?.let { it to "dlhd:$path" }
+                                .getOrNull()
+                                ?.also { noteWinningPath(path) }
+                                ?.let { it to "dlhd:$path" }
                         }
                     }
                     val r = awaitFirstNonNull(fallbackProbes)
@@ -719,6 +735,21 @@ class LiveResolver(
 
     private val pageClient: OkHttpClient by lazy { playerClient() }
 
+    /** Try the wrapper paths the first pass did not, in learned order, ONE
+     *  AT A TIME — sequential on purpose: these pages share the source's
+     *  trickle, so racing them starves all of them. Stops at the first that
+     *  resolves; the caller's budget bounds the whole walk. */
+    private suspend fun walkRemainingPaths(channelId: String): Pair<String, String>? {
+        val tried = playerPathsFor(channelId).toSet()
+        for (path in playerPathsFor(channelId, wide = true)) {
+            if (path in tried) continue
+            val url = runCatching { tryPlayerPath(channelId, path) }.getOrNull() ?: continue
+            noteWinningPath(path)
+            return url to "dlhd:$path"
+        }
+        return null
+    }
+
     /** /hub/ maps an EVENT feed to a generic channel (8042 -> tntsports1-uk:
      *  a working stream of the wrong content), so event feeds never race it.
      *  24/7 channels keep it — there it returns the matching feed.
@@ -739,10 +770,11 @@ class LiveResolver(
     private fun playerPathsFor(
         channelId: String, wide: Boolean = false,
     ): List<String> {
+        val ordered = pathOrder()
         val all = if (LiveEventFeeds.isEvent(channelId)) {
-            PLAYER_PATHS.filter { it != "hub" }
+            ordered.filter { it != "hub" }
         } else {
-            PLAYER_PATHS
+            ordered
         }
         return if (wide) all else all.take(PATHS_PER_FIRST_PASS)
     }
@@ -991,14 +1023,45 @@ class LiveResolver(
         //   /cast/ /watch/ /plus/ /casting/ -> just wrap /stream/
         //   /player/  -> HTTP 404 (gone)
         // /hub/ goes first: it is the route that is actually serving.
-        /** Best-first. /plus is the route that actually resolves — it was
-         *  3 of 3 in isolated testing and is what the scraper tries first —
-         *  so it leads, and the first pass only reaches as far as
-         *  [PATHS_PER_FIRST_PASS]. The old order led with /hub, which meant
-         *  the cheap pass spent its budget on the least likely routes. */
+        /** Starting order, best-first as measured on 2026-10-06: /stream
+         *  resolved every channel tested (343, 51, 608, via dembed.top), /watch
+         *  some, /plus only some — it now lands on a parked page for most.
+         *  It is only a starting point: [pathOrder] puts whichever path last
+         *  actually resolved in front, so when the source moves its working
+         *  route again — it has twice in a month — one success re-teaches the
+         *  order instead of needing an app update. */
         private val PLAYER_PATHS = listOf(
-            "plus", "stream", "hub", "cast", "watch", "casting",
+            "stream", "plus", "watch", "hub", "cast", "casting",
         )
+
+        private const val LEADER_KEY = "path_leader"
+        @Volatile private var pathLeader: String? = null
+
+        private fun leader(): String? = pathLeader ?: runCatching {
+            com.moviebox.tv.App.instance
+                .getSharedPreferences(WRAPPER_PREFS, android.content.Context.MODE_PRIVATE)
+                .getString(LEADER_KEY, null)
+                ?.takeIf { it in PLAYER_PATHS }
+                ?.also { pathLeader = it }
+        }.getOrNull()
+
+        /** The starting order with the last path that worked moved to the front. */
+        fun pathOrder(): List<String> {
+            val lead = leader() ?: return PLAYER_PATHS
+            return listOf(lead) + PLAYER_PATHS.filter { it != lead }
+        }
+
+        /** Called on every successful wrapper resolve. */
+        fun noteWinningPath(path: String) {
+            if (path == pathLeader || path !in PLAYER_PATHS) return
+            pathLeader = path
+            android.util.Log.i("LiveDiag", "RESOLVER path leader -> /$path")
+            runCatching {
+                com.moviebox.tv.App.instance
+                    .getSharedPreferences(WRAPPER_PREFS, android.content.Context.MODE_PRIVATE)
+                    .edit().putString(LEADER_KEY, path).apply()
+            }
+        }
 
         /** How many wrapper paths the first pass may fetch. ONE.
          *

@@ -78,6 +78,11 @@ class App : Application(), ImageLoaderFactory {
                 runCatching {
                     com.moviebox.tv.reminders.ScheduleSyncWorker.schedule(this@App)
                 }
+                // Verify channels from this TV's own network while it is idle.
+                // CI cannot any more — see HomeSweepWorker.
+                runCatching {
+                    com.moviebox.tv.data.live.HomeSweepWorker.schedule(this@App)
+                }
             }
         }.apply { isDaemon = true }.start()
     }
