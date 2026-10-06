@@ -24,6 +24,12 @@
     <symbol id="i-play" viewBox="0 0 24 24" fill="currentColor">
       <path d="M8 5v14l11-7z"/>
     </symbol>
+    <symbol id="i-skip-prev" viewBox="0 0 24 24" fill="currentColor">
+      <path d="M6 6h2v12H6zM9.5 12l8.5 6V6z"/>
+    </symbol>
+    <symbol id="i-skip-next" viewBox="0 0 24 24" fill="currentColor">
+      <path d="M16 6h2v12h-2zM6 18l8.5-6L6 6z"/>
+    </symbol>
     <symbol id="i-pause" viewBox="0 0 24 24" fill="currentColor">
       <rect x="6" y="5" width="4" height="14" rx="1"/>
       <rect x="14" y="5" width="4" height="14" rx="1"/>
@@ -276,7 +282,7 @@
       <button id="dPlay" class="primary big">
         <svg class="icon"><use href="#i-play"/></svg> Play on TV
       </button>
-      <button id="dTrailer" class="ghost hidden">▶ Trailer</button>
+      <button id="dTrailer" class="ghost hidden"><svg class="icon sm"><use href="#i-play"/></svg> Trailer</button>
       <button id="dDl" class="ghost">
         <svg class="icon"><use href="#i-download"/></svg> Download
       </button>
@@ -310,7 +316,7 @@
          controls hidden so the page doesn't look like a pile of dead
          buttons. -->
     <div id="npEmpty" class="np-empty">
-      <div class="np-empty-icon">▶</div>
+      <div class="np-empty-icon"><svg class="icon lg"><use href="#i-play"/></svg></div>
       <div class="np-empty-title">Nothing playing</div>
       <div class="np-empty-sub muted">Pick a movie, show, or channel to start</div>
     </div>
@@ -361,8 +367,8 @@
       </button>
       <!-- Prev/Next belong to a series only. -->
       <div class="row np-eps" data-show-eps="false">
-        <button id="epPrev" class="ghost">⏮ Prev ep</button>
-        <button id="epNext" class="ghost">Next ep ⏭</button>
+        <button id="epPrev" class="ghost"><svg class="icon sm"><use href="#i-skip-prev"/></svg> Prev ep</button>
+        <button id="epNext" class="ghost">Next ep <svg class="icon sm"><use href="#i-skip-next"/></svg></button>
       </div>
       <!-- Stop applies to anything on screen, so it lives OUTSIDE the
            episode row. It used to sit inside it and inherited that row's

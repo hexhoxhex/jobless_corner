@@ -1,5 +1,6 @@
 package com.moviebox.tv.ui
 
+import androidx.compose.material.icons.rounded.Star
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -45,7 +46,7 @@ fun FavouritesScreen(vm: MainViewModel) {
         )
         if (favourites.isEmpty()) {
             Box(Modifier.fillMaxSize(), Alignment.Center) {
-                Text("No favourites yet — tap ♡ on a title.", color = TextMuted)
+                Text("No favourites yet. Open a title and choose Add to favourites.", color = TextMuted)
             }
             return
         }
@@ -76,7 +77,11 @@ fun FavouritesScreen(vm: MainViewModel) {
                             color = TextMuted, fontSize = 12.sp,
                         )
                         item.rating?.takeIf { it > 0 }?.let {
-                            Text("★ %.1f".format(it), color = Gold, fontSize = 12.sp)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(androidx.compose.material.icons.Icons.Rounded.Star, null, tint = Gold,
+                                    modifier = Modifier.size(14.dp))
+                                Text(" %.1f".format(it), color = Gold, fontSize = 12.sp)
+                            }
                         }
                     }
                     Box(

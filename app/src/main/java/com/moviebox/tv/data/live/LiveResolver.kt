@@ -261,7 +261,7 @@ class LiveResolver(
         channelId: String,
     ): String? = withContext(Dispatchers.IO) {
         val t0 = System.currentTimeMillis()
-        LiveStatus.note("▶  Fetching streams…")
+        LiveStatus.note("Fetching streams…")
         // Race every known resolver strategy IN PARALLEL and take the FIRST
         // one that hands back a validated master manifest — the health check
         // inside each probe (GET + `#EXTM3U` prefix) means only URLs the
@@ -417,7 +417,7 @@ class LiveResolver(
                 "RESOLVER ch=$channelId won=${winner.second} cdn=$cdn " +
                     "dt=${System.currentTimeMillis() - t0}ms",
             )
-            LiveStatus.note("▶  Preparing player…")
+            LiveStatus.note("Preparing player…")
             if (winner.second.startsWith("donis@")) {
                 rememberWorkingHost(winner.second.removePrefix("donis@"))
             }
@@ -427,7 +427,7 @@ class LiveResolver(
             "LiveDiag",
             "RESOLVER ch=$channelId FAILED — all daddy × all player paths",
         )
-        LiveStatus.note("✗  All streams offline — try another channel")
+        LiveStatus.note("All streams offline — try another channel")
         com.moviebox.tv.debug.ProviderHealth.failure(
             "donis", "resolve failed (all daddy endpoints × all player paths)")
         null

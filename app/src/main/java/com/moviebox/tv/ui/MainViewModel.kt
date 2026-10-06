@@ -969,11 +969,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         //   near MAX:          about to fall to WebView (last resort)
         val statusMsg = when {
             liveResolveFailures >= MAX_RESOLVE_FAILURES_BEFORE_WEBVIEW - 2 ->
-                "⚠  Native player struggling — falling back to browser…"
+                "Native player struggling — switching to the browser player…"
             liveResolveFailures >= AUTO_FAILOVER_AFTER ->
-                "↻  Trying another channel for this event…"
+                "Trying another channel for this event…"
             else ->
-                "↻  Reconnecting… (attempt $liveResolveFailures/" +
+                "Reconnecting… (attempt $liveResolveFailures/" +
                     "${MAX_RESOLVE_FAILURES_BEFORE_WEBVIEW})"
         }
         com.moviebox.tv.data.live.LiveStatus.note(statusMsg)
@@ -1054,7 +1054,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     "${alternates.size} sibling(s) tried; giving up",
             )
             com.moviebox.tv.data.live.LiveStatus.note(
-                "✗  All ${alternates.size} channels for this event are offline",
+                "All ${alternates.size} channels for this event are offline",
             )
             _state.update { it.copy(
                 error = "This channel and every alternate feed are offline right now.",
@@ -1068,7 +1068,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 "same event, ${triedFailoverAlternates.size}/${alternates.size} tried",
         )
         com.moviebox.tv.data.live.LiveStatus.note(
-            "↻  Switching to ${next.displayName} for this event…",
+            "Switching to ${next.displayName} for this event…",
         )
         // Surface a small info toast via the existing error field. Not an
         // error — but the same top-of-screen banner is fine for now.
@@ -1334,7 +1334,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             if (pick == null) {
                 // Nothing fresh enough to trust — measure, then decide.
                 com.moviebox.tv.data.live.LiveStatus.note(
-                    "⚠  Checking other feeds for this match…",
+                    "Checking other feeds for this match…",
                 )
                 // One at a time, stopping at the first usable answer.
                 //
@@ -1394,7 +1394,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             )
             autoSwitchTried.add(current)
             lastAutoSwitchAt = android.os.SystemClock.elapsedRealtime()
-            com.moviebox.tv.data.live.LiveStatus.note("↻  Switching to $name…")
+            com.moviebox.tv.data.live.LiveStatus.note("Switching to $name…")
             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
                 playScheduleChannel(pick.channelId)
             }
@@ -1457,7 +1457,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         "nor the schedule — nothing to play",
                 )
                 com.moviebox.tv.data.live.LiveStatus.note(
-                    "✗  That channel isn't available right now",
+                    "That channel isn't available right now",
                 )
                 return@launch
             }
@@ -2386,7 +2386,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             kotlinx.coroutines.delay(SLOW_RESOLVE_HINT_MS)
             if (_state.value.playLoading) {
                 com.moviebox.tv.data.live.LiveStatus.note(
-                    "▶ Still finding a good source — hang on…",
+                    "Still finding a good source — hang on…",
                 )
             }
         }

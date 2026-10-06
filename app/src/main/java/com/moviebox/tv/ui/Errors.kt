@@ -54,6 +54,8 @@ fun ErrorView(
             friendlyError(message),
             color = TextMuted, fontSize = 14.sp, textAlign = TextAlign.Center,
         )
-        if (onRetry != null) Button(onClick = onRetry) { Text("Retry") }
+        if (onRetry != null) {
+            Button(onClick = onRetry, modifier = Modifier.tvFocusRing()) { Text("Retry") }
+        }
     }
 }

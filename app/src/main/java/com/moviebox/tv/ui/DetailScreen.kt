@@ -1,5 +1,9 @@
 package com.moviebox.tv.ui
 
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.material.icons.rounded.Star
+import androidx.compose.material.icons.rounded.ArrowDropDown
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -91,6 +95,32 @@ fun DetailScreen(state: UiState, vm: MainViewModel) {
         androidx.compose.runtime.mutableStateOf(false)
     }
 
+    // Where the remote starts. Nothing on this page asked for focus, so it
+    // opened — and came back from the player — with no focused control at
+    // all: no highlight anywhere until a key was pressed, and that first
+    // press landed on the top-left back arrow ("the remote pointer is not
+    // visible"). TV rule: one primary action, focused first. The sticky Play
+    // button is the one control that is always present and enabled (it
+    // reads "Checking this plays…" while the probe runs), so it gets it.
+    // Retries briefly because the button composes a frame after the page;
+    // stops as soon as anything here has focus, so it never yanks focus
+    // away from where the user has moved.
+    val isTv = LocalIsTv.current
+    val primaryFocus = androidx.compose.runtime.remember {
+        androidx.compose.ui.focus.FocusRequester()
+    }
+    var screenHasFocus by androidx.compose.runtime.remember {
+        androidx.compose.runtime.mutableStateOf(false)
+    }
+    androidx.compose.runtime.LaunchedEffect(item.subjectId, isTv) {
+        if (!isTv) return@LaunchedEffect
+        repeat(20) {
+            if (screenHasFocus) return@LaunchedEffect
+            runCatching { primaryFocus.requestFocus() }
+            kotlinx.coroutines.delay(150)
+        }
+    }
+
     // Self-heal: if the user landed here from the player's back arrow on a
     // Continue Watching resume (where details were never loaded — we went
     // straight to the player), lazily fetch them now so the episode picker
@@ -101,14 +131,24 @@ fun DetailScreen(state: UiState, vm: MainViewModel) {
         }
     }
 
-    Box(Modifier.fillMaxSize()) {
+    Box(
+        Modifier.fillMaxSize()
+            .onFocusChanged { screenHasFocus = it.hasFocus },
+    ) {
     Column(
         Modifier
             .fillMaxSize()
+            // TV: the scroll area must END where the sticky Play bar begins.
+            // It used to run underneath it, and Compose's D-pad search only
+            // treats a container as "above" the focused button if it ends
+            // above it — so UP from Play went nowhere and the rest of the
+            // page (favourite, episodes, download) was unreachable from the
+            // button the page opens on. 82 dp = 54 dp button + 2 x 14 dp.
+            .padding(bottom = if (isTv) 82.dp else 0.dp)
             .verticalScroll(rememberScrollState())
-            // Leave room at the bottom for the sticky CTA bar so the last
-            // scrolling content (For You row) isn't hidden behind it.
-            .padding(bottom = 96.dp),
+            // Phones: content scrolls under the translucent bar instead;
+            // leave room so the last row isn't hidden behind it.
+            .padding(bottom = if (isTv) 12.dp else 96.dp),
     ) {
         Box(Modifier.fillMaxWidth().height(360.dp)) {
             AsyncImage(
@@ -130,10 +170,15 @@ fun DetailScreen(state: UiState, vm: MainViewModel) {
                     )
                 )
             )
-            CircleIcon(
-                Icons.AutoMirrored.Filled.ArrowBack,
-                Modifier.align(Alignment.TopStart).statusBarsPadding().padding(12.dp),
-            ) { vm.back() }
+            // Phones only. TV guidelines: never draw a back button — the
+            // remote has one, and this one was the first thing focus fell
+            // on when the page opened with nothing focused.
+            if (!isTv) {
+                CircleIcon(
+                    Icons.AutoMirrored.Filled.ArrowBack,
+                    Modifier.align(Alignment.TopStart).statusBarsPadding().padding(12.dp),
+                ) { vm.back() }
+            }
             CircleIcon(
                 if (isFav) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
                 Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(12.dp),
@@ -150,8 +195,12 @@ fun DetailScreen(state: UiState, vm: MainViewModel) {
                         Text("$it", color = TextMuted, fontSize = 13.sp)
                     }
                     (item.rating?.takeIf { it > 0 } ?: state.details?.rating)?.let {
-                        Text("★ %.1f".format(it), color = Gold, fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(androidx.compose.material.icons.Icons.Rounded.Star, null, tint = Gold,
+                                modifier = Modifier.size(15.dp))
+                            Text(" %.1f".format(it), color = Gold, fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold)
+                        }
                     }
                     Text(if (isSeries) "TV Series" else "Movie",
                         color = TextMuted, fontSize = 13.sp)
@@ -171,7 +220,8 @@ fun DetailScreen(state: UiState, vm: MainViewModel) {
                     when (state.availability) {
                         Availability.CHECKING -> Button(
                             onClick = { /* wait for verdict */ },
-                            modifier = Modifier.weight(1f).height(50.dp),
+                            modifier = Modifier.weight(1f).height(50.dp)
+                                .tvFocusRing(RoundedCornerShape(12.dp), scaleOnFocus = 1.04f),
                             shape = RoundedCornerShape(12.dp),
                             enabled = false,
                         ) {
@@ -184,7 +234,8 @@ fun DetailScreen(state: UiState, vm: MainViewModel) {
                         }
                         Availability.UNAVAILABLE -> OutlinedButton(
                             onClick = { vm.pickFromSearch() },
-                            modifier = Modifier.weight(1f).height(50.dp),
+                            modifier = Modifier.weight(1f).height(50.dp)
+                                .tvFocusRing(RoundedCornerShape(12.dp), scaleOnFocus = 1.04f),
                             shape = RoundedCornerShape(12.dp),
                         ) {
                             Text(
@@ -197,7 +248,8 @@ fun DetailScreen(state: UiState, vm: MainViewModel) {
                         // behaviour rather than blocking).
                         else -> Button(
                             onClick = { vm.playMovie() },
-                            modifier = Modifier.weight(1f).height(50.dp),
+                            modifier = Modifier.weight(1f).height(50.dp)
+                                .tvFocusRing(RoundedCornerShape(12.dp), scaleOnFocus = 1.04f),
                             shape = RoundedCornerShape(12.dp),
                         ) {
                             Icon(Icons.Filled.PlayArrow, null)
@@ -206,7 +258,8 @@ fun DetailScreen(state: UiState, vm: MainViewModel) {
                     }
                     OutlinedButton(
                         onClick = { vm.downloadMovie(item) },
-                        modifier = Modifier.height(50.dp),
+                        modifier = Modifier.height(50.dp)
+                            .tvFocusRing(RoundedCornerShape(12.dp)),
                         shape = RoundedCornerShape(12.dp),
                     ) { Icon(Icons.Filled.Download, "Download") }
                     // Trailer — appears once the background Cinemeta lookup
@@ -216,7 +269,8 @@ fun DetailScreen(state: UiState, vm: MainViewModel) {
                     if (trailerId != null) {
                         OutlinedButton(
                             onClick = { showTrailer = true },
-                            modifier = Modifier.height(50.dp),
+                            modifier = Modifier.height(50.dp)
+                                .tvFocusRing(RoundedCornerShape(12.dp)),
                             shape = RoundedCornerShape(12.dp),
                         ) {
                             Icon(Icons.Filled.PlayCircleOutline, "Trailer")
@@ -348,7 +402,9 @@ fun DetailScreen(state: UiState, vm: MainViewModel) {
                     vm.playEpisode(s1, 1, restoreResume = true)
                 } else vm.playMovie()
             },
-            modifier = Modifier.fillMaxWidth().height(54.dp),
+            modifier = Modifier.fillMaxWidth().height(54.dp)
+                .focusRequester(primaryFocus)
+                .tvFocusRing(RoundedCornerShape(28.dp), scaleOnFocus = 1.03f),
             shape = RoundedCornerShape(28.dp),
             colors = androidx.compose.material3.ButtonDefaults.buttonColors(
                 containerColor = com.moviebox.tv.ui.theme.Accent,
@@ -437,10 +493,11 @@ private fun SeriesEpisodes(state: UiState, vm: MainViewModel) {
     Row(verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Box {
-            Chip("Season $season ▾") { open = true }
+            Chip("Season $season", trailing = androidx.compose.material.icons.Icons.Rounded.ArrowDropDown) { open = true }
             DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
                 seasons.forEach { s ->
-                    DropdownMenuItem(text = { Text("Season ${s.season}") }, onClick = {
+                    DropdownMenuItem(text = { Text("Season ${s.season}") },
+                        modifier = Modifier.tvFocusRing(androidx.compose.ui.graphics.RectangleShape, scaleOnFocus = 1f, inside = true), onClick = {
                         season = s.season; open = false
                     })
                 }
@@ -462,7 +519,10 @@ private fun SeriesEpisodes(state: UiState, vm: MainViewModel) {
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            OutlinedButton(onClick = { vm.downloadSeason(dItem, season, rawCount) }) {
+            OutlinedButton(
+                onClick = { vm.downloadSeason(dItem, season, rawCount) },
+                modifier = Modifier.tvFocusRing(),
+            ) {
                 Icon(Icons.Filled.Download, null, Modifier.size(18.dp))
                 Text(" Download season", fontSize = 12.sp)
             }
@@ -511,7 +571,11 @@ private fun SeriesEpisodes(state: UiState, vm: MainViewModel) {
 }
 
 @Composable
-fun Chip(label: String, onClick: (() -> Unit)? = null) {
+fun Chip(
+    label: String,
+    trailing: androidx.compose.ui.graphics.vector.ImageVector? = null,
+    onClick: (() -> Unit)? = null,
+) {
     Box(
         Modifier
             .clip(RoundedCornerShape(20.dp))
@@ -519,7 +583,13 @@ fun Chip(label: String, onClick: (() -> Unit)? = null) {
             .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
             .padding(horizontal = 14.dp, vertical = 7.dp),
     ) {
-        Text(label, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = Color.White)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(label, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = Color.White)
+            if (trailing != null) {
+                Icon(trailing, null, tint = Color.White,
+                    modifier = Modifier.padding(start = 2.dp).size(18.dp))
+            }
+        }
     }
 }
 
@@ -532,10 +602,17 @@ private fun CircleIcon(
 ) {
     Box(
         modifier
+            .tvFocusRing(CircleShape)
             .size(40.dp)
             .clip(CircleShape)
             .background(Color(0x88000000))
-            .clickable(onClick = onClick),
+            .clickable(
+                interactionSource = androidx.compose.runtime.remember {
+                    androidx.compose.foundation.interaction.MutableInteractionSource()
+                },
+                indication = ownFocusIndication(),
+                onClick = onClick,
+            ),
         contentAlignment = Alignment.Center,
     ) { Icon(icon, null, tint = tint, modifier = Modifier.size(22.dp)) }
 }

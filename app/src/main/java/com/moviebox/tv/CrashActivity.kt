@@ -1,5 +1,7 @@
 package com.moviebox.tv
 
+import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.foundation.layout.size
 import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -39,7 +41,11 @@ class CrashActivity : ComponentActivity() {
                             16.dp, Alignment.CenterVertically,
                         ),
                     ) {
-                        Text("😬", fontSize = 40.sp)
+                        androidx.compose.material3.Icon(
+                            androidx.compose.material.icons.Icons.Rounded.ErrorOutline, null,
+                            tint = androidx.compose.ui.graphics.Color(0xFFE8B341),
+                            modifier = Modifier.size(48.dp),
+                        )
                         Text(
                             "Something went wrong",
                             fontSize = 20.sp, fontWeight = FontWeight.Bold,

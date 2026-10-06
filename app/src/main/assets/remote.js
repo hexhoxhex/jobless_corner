@@ -2121,7 +2121,13 @@ async function loadLeagues() {
   leagues.forEach(l => {
     const chip = document.createElement("div");
     chip.className = "chip" + (l.custom ? " active" : "");
-    chip.textContent = l.custom ? l.name + "  ✕" : l.name;
+    chip.textContent = l.name;
+    if (l.custom) {
+      // A drawn icon, not the multiplication-sign glyph: same sprite as
+      // every other close button.
+      chip.insertAdjacentHTML("beforeend",
+        ' <svg class="icon sm" aria-hidden="true"><use href="#i-close"/></svg>');
+    }
     if (l.custom) {
       chip.title = "Remove " + l.name;
       chip.onclick = async () => {

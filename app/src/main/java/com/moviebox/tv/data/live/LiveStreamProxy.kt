@@ -844,7 +844,7 @@ class LiveStreamProxy(
                 Log.w(DIAG, "PROXY ch=$channelId ROTATE: ${state.staleServeStreak} " +
                     "consecutive stale serves (prev-dt=" +
                     "${state.lastInnerFetchDurationMs}ms) — dropping route")
-                LiveStatus.note("↻  Switching to a faster source…")
+                LiveStatus.note("Switching to a faster source…")
                 state.staleServeStreak = 0
                 state.lastInnerFetchDurationMs = 0L
                 state.lastGoodBody = null
@@ -859,7 +859,7 @@ class LiveStreamProxy(
             Log.i(DIAG, "PROXY ch=$channelId STALE_SERVE age=${cacheAgeForFast}ms " +
                 "prev-dt=${state.lastInnerFetchDurationMs}ms " +
                 "streak=${state.staleServeStreak}")
-            LiveStatus.note("⚠  CDN slow — serving cached playlist…")
+            LiveStatus.note("Slow connection to the stream — using the cached playlist…")
             // Reset the slow flag so we don't stale-serve forever; the
             // next fetch attempt (kicked off by the ExoPlayer poll ~5 s
             // from now) gets a real try before we consider this route
@@ -1003,7 +1003,7 @@ class LiveStreamProxy(
                     // available) or another sibling will win instead of
                     // us being stuck in the same xameleon 403 loop.
                     resolver.reportAuthFailure(channelId, hostOf(entry.innerUrl))
-                    LiveStatus.note("⚠  Stream blocked — trying alternate…")
+                    LiveStatus.note("Stream blocked — trying another…")
                     break  // token death — go rotate now
                 }
             } else {
@@ -1102,7 +1102,7 @@ class LiveStreamProxy(
                     "PROXY ch=$channelId source DOWN (inner $lastResponseCode x$streak) " +
                         "— backing off ${SOURCE_DOWN_COOLDOWN_MS / 1000}s",
                 )
-                LiveStatus.note("✗  This channel's source is down — try another")
+                LiveStatus.note("This channel's source is down — try another")
             }
         }
         // Out of retries AND no fresh cache. 503 = "retry me" rather than
@@ -1488,7 +1488,7 @@ class LiveStreamProxy(
                     "and reporting offline",
             )
             // Say something true instead of "Preparing player…".
-            LiveStatus.note("✗  This channel's source is down — try another")
+            LiveStatus.note("This channel's source is down — try another")
         }
         return null
     }
@@ -1590,7 +1590,7 @@ class LiveStreamProxy(
                     return null
                 }
                 Log.i(DIAG, "PROXY master OK dt=${dt}ms host=${hostOf(masterUrl)}")
-                LiveStatus.note("▶  Buffering…")
+                LiveStatus.note("Buffering…")
                 val body = resp.body?.string() ?: return null
                 // Build the FULL variant table, then choose — rather than
                 // taking whichever URL happened to come first.

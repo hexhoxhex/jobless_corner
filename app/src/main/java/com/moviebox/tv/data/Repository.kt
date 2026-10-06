@@ -76,7 +76,7 @@ class Repository(
                 )
             }
             if (trending.isNotEmpty()) {
-                onRow(HomeRow("🔥 Trending Now", trending.take(14)))
+                onRow(HomeRow("Trending now", trending.take(14)))
             }
             // Then every server-named row (Popular Movie, Superhero Series,
             // Teen Romance, …) in operatingList order.
@@ -122,7 +122,7 @@ class Repository(
                     tagline = item.overview.orEmpty(),
                 ))
             }
-            if (items.isNotEmpty()) onRow(HomeRow("🔥 Trending Now", items.take(14)))
+            if (items.isNotEmpty()) onRow(HomeRow("Trending now", items.take(14)))
         }
         val jobs = listOf(
             trendingJob,
@@ -168,7 +168,7 @@ class Repository(
         }.getOrDefault(emptyList()) }
 
         val rows = listOf(
-            HomeRow("🔥 Trending Now",   trending.await()),
+            HomeRow("Trending now",   trending.await()),
             HomeRow("Popular Movies",              popularMovies.await()),
             HomeRow("Popular Series",              popularTv.await()),
             HomeRow("Netflix",                     netflix.await()),
@@ -724,8 +724,8 @@ class Repository(
             // before the next is attempted), and silence during that reads as
             // "nothing is happening". The overlay clears on first frame.
             com.moviebox.tv.data.live.LiveStatus.note(
-                if (tried == 1) "▶ Finding a source…"
-                else "↻ Not on ${order[tried - 2].label} — checking ${p.label}…",
+                if (tried == 1) "Finding a source…"
+                else "Not on ${order[tried - 2].label} — checking ${p.label}…",
             )
             // Bound the whole chain. Each additional provider adds its own
             // failure latency — 4KHDHub can spend ~90 s timing out dead
@@ -744,7 +744,7 @@ class Repository(
                     idForProvider(p, subjectId, title, year, isSeries)
                 }
             }.getOrNull() ?: continue
-            com.moviebox.tv.data.live.LiveStatus.note("▶ Loading from ${p.label}…")
+            com.moviebox.tv.data.live.LiveStatus.note("Loading from ${p.label}…")
             val attempt = runCatching {
                 // Per-provider cap: one slow source must not eat the budget
                 // the others need. Generous enough for the aoneroom WebView
@@ -770,7 +770,7 @@ class Repository(
                 "${p.label} failed for '$title': ${lastError?.message} — trying next",
             )
         }
-        com.moviebox.tv.data.live.LiveStatus.note("✗ No source has this title")
+        com.moviebox.tv.data.live.LiveStatus.note("No source has this title")
         throw ApiException(
             lastError?.message ?: "This title isn't available right now.",
         )

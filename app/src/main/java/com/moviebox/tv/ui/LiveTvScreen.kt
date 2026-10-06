@@ -148,12 +148,16 @@ private fun ChannelsView(state: UiState, vm: MainViewModel, isTv: Boolean) {
             Modifier.fillMaxWidth()
                 .padding(horizontal = if (isTv) 32.dp else 16.dp)
                 .padding(bottom = 8.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .background(SurfaceElevated)
+                // White ring, like the channel cards: Accent was the only
+                // focus cue and is the colour of everything selected here.
                 .tvFocusable(
                     shape = RoundedCornerShape(12.dp),
+                    borderColor = Color.White,
+                    scaleOnFocus = 1.02f,
                     onClick = { liveSearchEditing = true },
                 )
+                .clip(RoundedCornerShape(12.dp))
+                .background(SurfaceElevated)
                 .padding(horizontal = 12.dp, vertical = 10.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -384,12 +388,18 @@ private fun ChannelCard(
 @Composable
 private fun GroupChip(label: String, selected: Boolean, onClick: () -> Unit) {
     Box(
-        Modifier.clip(RoundedCornerShape(20.dp))
-            .background(if (selected) Accent else SurfaceElevated)
-            .tvFocusable(
+        // Focus first, then shape and fill: the ring and the scale cover
+        // the whole chip, and the ring is WHITE. It was Accent, drawn on a
+        // chip that is Accent when selected — focus on "All" / "Channels"
+        // (where the page opens) was invisible ("the remote pointer is not
+        // visible on some buttons").
+        Modifier.tvFocusable(
                 shape = RoundedCornerShape(20.dp),
+                borderColor = Color.White,
                 onClick = onClick,
             )
+            .clip(RoundedCornerShape(20.dp))
+            .background(if (selected) Accent else SurfaceElevated)
             .padding(horizontal = 14.dp, vertical = 7.dp),
     ) {
         Text(
@@ -403,12 +413,18 @@ private fun GroupChip(label: String, selected: Boolean, onClick: () -> Unit) {
 @Composable
 private fun SubTabPill(label: String, selected: Boolean, onClick: () -> Unit) {
     Box(
-        Modifier.clip(RoundedCornerShape(20.dp))
-            .background(if (selected) Accent else SurfaceElevated)
-            .tvFocusable(
+        // Focus first, then shape and fill: the ring and the scale cover
+        // the whole chip, and the ring is WHITE. It was Accent, drawn on a
+        // chip that is Accent when selected — focus on "All" / "Channels"
+        // (where the page opens) was invisible ("the remote pointer is not
+        // visible on some buttons").
+        Modifier.tvFocusable(
                 shape = RoundedCornerShape(20.dp),
+                borderColor = Color.White,
                 onClick = onClick,
             )
+            .clip(RoundedCornerShape(20.dp))
+            .background(if (selected) Accent else SurfaceElevated)
             .padding(horizontal = 18.dp, vertical = 9.dp),
     ) {
         Text(
@@ -541,7 +557,7 @@ private fun ScheduleView(state: UiState, vm: MainViewModel, isTv: Boolean) {
                         .padding(horizontal = 14.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text(cat, color = TextPrimary, fontWeight = FontWeight.SemiBold,
+                    Text(Glyphs.plain(cat), color = TextPrimary, fontWeight = FontWeight.SemiBold,
                         fontSize = 14.sp, modifier = Modifier.weight(1f))
                     Box(
                         Modifier.clip(RoundedCornerShape(8.dp))
@@ -583,7 +599,7 @@ private fun EventRow(
                 EventStatus.NEXT -> StatusPill("NEXT", Color(0xFF9AA7AE))
                 EventStatus.ENDED -> Unit
             }
-            Text(e.title, color = TextPrimary, fontSize = 13.sp,
+            Text(Glyphs.plain(e.title), color = TextPrimary, fontSize = 13.sp,
                 fontWeight = FontWeight.Medium, maxLines = 2,
                 overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
         }
@@ -613,7 +629,7 @@ private fun EventRow(
                             Icon(Icons.Filled.PlayArrow, null, tint = Color.White,
                                 modifier = Modifier.size(11.dp))
                         }
-                        Text(ref.name,
+                        Text(Glyphs.plain(ref.name),
                             color = if (available) Color.White else TextMuted,
                             fontSize = 10.sp, fontWeight = FontWeight.SemiBold,
                             maxLines = 1, overflow = TextOverflow.Ellipsis,

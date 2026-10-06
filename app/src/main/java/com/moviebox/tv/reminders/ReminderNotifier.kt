@@ -72,7 +72,8 @@ object ReminderNotifier {
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentTitle(payload.headline())
             .setContentText(body)
-            .setStyle(NotificationCompat.BigTextStyle().bigText("$body\n${payload.title}"))
+            .setStyle(NotificationCompat.BigTextStyle().bigText(
+                "$body\n${com.moviebox.tv.ui.Glyphs.plain(payload.title)}"))
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_REMINDER)
             .setAutoCancel(true)

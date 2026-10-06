@@ -49,7 +49,7 @@ fun DownloadsScreen(vm: MainViewModel) {
         )
         if (downloads.isEmpty()) {
             Box(Modifier.fillMaxSize(), Alignment.Center) {
-                Text("No downloads yet — tap ⬇ on a title.", color = TextMuted)
+                Text("No downloads yet. Open a title and choose Download.", color = TextMuted)
             }
             return
         }
@@ -111,6 +111,6 @@ private fun statusLine(d: DownloadEntity): String = when (d.status) {
     DownloadStatus.COMPLETED.name -> "Downloaded · plays offline"
     DownloadStatus.DOWNLOADING.name -> "Downloading ${(d.progress * 100).toInt()}%"
     DownloadStatus.QUEUED.name -> "Queued"
-    DownloadStatus.FAILED.name -> "Failed — tap ✕ and retry"
+    DownloadStatus.FAILED.name -> "Failed — remove it and download again"
     else -> d.status
 }

@@ -1,5 +1,10 @@
 package com.moviebox.tv.ui
 
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import android.graphics.Bitmap
 import android.graphics.Color
 import androidx.compose.foundation.Image
@@ -59,8 +64,16 @@ fun RemoteOverlay(onClose: () -> Unit) {
         RemoteServerManager.ensureStarted(context)
         value = RemoteServerManager.pairUrl()
     }
+    val closeFocus = remember { androidx.compose.ui.focus.FocusRequester() }
+    var hasFocus by remember { mutableStateOf(false) }
+    TvInitialFocus(closeFocus) { hasFocus }
     Box(
         Modifier.fillMaxSize().background(ComposeColor(0xB3000000))
+            .onFocusChanged { hasFocus = it.hasFocus }
+            // Tap-outside-to-close for touch only. As a D-pad target it was
+            // an invisible stop: focus could land on the backdrop and show
+            // nothing at all.
+            .focusProperties { canFocus = false }
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null, onClick = onClose,
@@ -70,6 +83,7 @@ fun RemoteOverlay(onClose: () -> Unit) {
         Column(
             Modifier.widthIn(max = 320.dp).clip(RoundedCornerShape(20.dp))
                 .background(Surface).padding(24.dp)
+                .focusProperties { canFocus = false }
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null, onClick = {},
@@ -105,7 +119,10 @@ fun RemoteOverlay(onClose: () -> Unit) {
                 Text("Scan with your phone's camera (same Wi-Fi).",
                     color = TextMuted, fontSize = 12.sp, textAlign = TextAlign.Center)
             }
-            TextButton(onClick = onClose) { Text("Close") }
+            TextButton(
+                onClick = onClose,
+                modifier = Modifier.focusRequester(closeFocus).tvFocusRing(),
+            ) { Text("Close") }
         }
     }
 }
@@ -134,8 +151,8 @@ fun SuggestionPopup(onShow: () -> Unit, onDismiss: () -> Unit) {
                 fontSize = 13.sp,
                 modifier = Modifier.padding(start = 8.dp, end = 8.dp),
             )
-            TextButton(onClick = onShow) { Text("Show") }
-            IconButton(onClick = onDismiss) {
+            TextButton(onClick = onShow, modifier = Modifier.tvFocusRing()) { Text("Show") }
+            IconButton(onClick = onDismiss, modifier = Modifier.tvFocusRing(androidx.compose.foundation.shape.CircleShape)) {
                 Icon(Icons.Filled.Close, "Dismiss", tint = TextMuted)
             }
         }

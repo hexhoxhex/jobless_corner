@@ -552,8 +552,8 @@ class RemoteServer(
                             chArr.put(
                                 JSONObject()
                                     .put("id", ch.id)
-                                    .put("name", catalogName ?: ch.name)
-                                    .put("listedAs", ch.name)
+                                    .put("name", com.moviebox.tv.ui.Glyphs.plain(catalogName ?: ch.name))
+                                    .put("listedAs", com.moviebox.tv.ui.Glyphs.plain(ch.name))
                                     .put("conflict", clash)
                             )
                         }
@@ -567,7 +567,7 @@ class RemoteServer(
                         // "time" string when start_unix is missing.
                         val ev = JSONObject()
                             .put("time", e.time)
-                            .put("title", e.title)
+                            .put("title", com.moviebox.tv.ui.Glyphs.plain(e.title))
                             .put("channels", chArr)
                         e.startUnix?.let { ev.put("start_unix", it) }
                         // Parsed sides + competition, so the phone can offer
@@ -610,7 +610,7 @@ class RemoteServer(
                     val sport = groupSport[cat]
                     arr.put(
                         JSONObject()
-                            .put("category", cat)
+                            .put("category", com.moviebox.tv.ui.Glyphs.plain(cat))
                             .put(
                                 "kind",
                                 when {
@@ -718,7 +718,7 @@ class RemoteServer(
                             )
                             .forEach { ch ->
                                 chArr.put(
-                                    JSONObject().put("id", ch.id).put("name", ch.name)
+                                    JSONObject().put("id", ch.id).put("name", com.moviebox.tv.ui.Glyphs.plain(ch.name))
                                 )
                             }
                         o.put("next_channels", chArr)
@@ -818,7 +818,7 @@ class RemoteServer(
                         )
                         .forEach { ch ->
                             chArr.put(
-                                JSONObject().put("id", ch.id).put("name", ch.name)
+                                JSONObject().put("id", ch.id).put("name", com.moviebox.tv.ui.Glyphs.plain(ch.name))
                             )
                         }
                     val start = m.event.startUnix ?: 0L
@@ -826,9 +826,9 @@ class RemoteServer(
                         JSONObject()
                             .put("follow", m.follow.label)
                             .put("key", m.follow.key)
-                            .put("title", m.event.title)
+                            .put("title", com.moviebox.tv.ui.Glyphs.plain(m.event.title))
                             .put("opponent", m.opponent ?: JSONObject.NULL)
-                            .put("category", m.event.category)
+                            .put("category", com.moviebox.tv.ui.Glyphs.plain(m.event.category))
                             .put("time", m.event.time)
                             .put("start_unix", start)
                             .put("live", start in 1..nowSec)

@@ -97,7 +97,12 @@ fun AppRoot(vm: MainViewModel = viewModel()) {
         }
     }
 
-    CompositionLocalProvider(LocalIsTv provides isTv) {
+    CompositionLocalProvider(
+        LocalIsTv provides isTv,
+        // Visible D-pad focus for every plain .clickable on TV (FocusRing.kt).
+        androidx.compose.foundation.LocalIndication provides
+            if (isTv) TvFocusIndication else androidx.compose.foundation.LocalIndication.current,
+    ) {
     Box(Modifier.fillMaxSize()) {
         when (state.screen) {
             Screen.DETAIL -> DetailScreen(state, vm)
@@ -202,7 +207,7 @@ private fun BoxScope.ReminderBanner(
         if (payload.channelId != null) {
             Button(
                 onClick = onWatch,
-                modifier = Modifier.focusRequester(watch),
+                modifier = Modifier.focusRequester(watch).tvFocusRing(),
                 colors = ButtonDefaults.buttonColors(containerColor = Accent),
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
             ) { Text("Watch", fontSize = 13.sp, fontWeight = FontWeight.Bold) }

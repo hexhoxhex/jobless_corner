@@ -1,5 +1,7 @@
 package com.moviebox.tv.ui
 
+import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.WifiOff
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -326,16 +328,26 @@ private fun HeroBanner(hero: Hero, onClick: () -> Unit) {
             // would otherwise feel passive.
             if (isTv) {
                 Spacer(Modifier.height(14.dp))
-                Text(
-                    "▶  Play",
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = if (focused) Color(0xFF0B0E13) else Color.White,
+                val ink = if (focused) Color(0xFF0B0E13) else Color.White
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
                         .clip(androidx.compose.foundation.shape.RoundedCornerShape(10.dp))
                         .background(if (focused) Color.White else Accent)
-                        .padding(horizontal = 18.dp, vertical = 9.dp),
-                )
+                        .padding(start = 14.dp, end = 18.dp, top = 8.dp, bottom = 8.dp),
+                ) {
+                    androidx.compose.material3.Icon(
+                        androidx.compose.material.icons.Icons.Rounded.PlayArrow, null, tint = ink,
+                        modifier = Modifier.size(22.dp),
+                    )
+                    Text(
+                        "Play",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = ink,
+                        modifier = Modifier.padding(start = 6.dp),
+                    )
+                }
             }
         }
         RatingPill(
@@ -492,9 +504,11 @@ private fun NetworkOfflinePage(onRetry: () -> Unit) {
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier.padding(horizontal = 24.dp),
         ) {
-            Text("📡",
-                fontSize = 56.sp,
-                color = androidx.compose.ui.graphics.Color.White)
+            androidx.compose.material3.Icon(
+                androidx.compose.material.icons.Icons.Rounded.WifiOff, null,
+                tint = androidx.compose.ui.graphics.Color.White,
+                modifier = Modifier.size(56.dp),
+            )
             Spacer(Modifier.height(16.dp))
             Text("No internet right now",
                 fontSize = 22.sp, fontWeight = FontWeight.Bold,

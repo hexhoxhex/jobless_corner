@@ -25,13 +25,8 @@ object LiveStatus {
     val message: StateFlow<String?> = _message
 
     /** Post a status line. Call from any thread. Empty/null clears the
-     *  overlay. Prefix conventions:
-     *    - ▶  positive progress ("Resolving streams…")
-     *    - ↻  retry ("Reconnecting…")
-     *    - ⚠  transient trouble ("Stream blocked — trying alternate…")
-     *    - ✗  fatal ("Stream unavailable")
-     *  The overlay treats them all the same visually; the prefix is
-     *  cosmetic. */
+     *  overlay. Plain words only — no glyph prefixes (they rendered as
+     *  mismatched emoji on the TV; see ui/Glyphs.kt). */
     fun note(msg: String?) {
         _message.value = msg
     }

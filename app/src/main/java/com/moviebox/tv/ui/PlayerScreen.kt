@@ -1,5 +1,8 @@
 package com.moviebox.tv.ui
 
+import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Pause
+import androidx.compose.material.icons.rounded.HourglassEmpty
 import android.app.Activity
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
@@ -715,15 +718,22 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                     .background(Color(0xCC000000))
                     .padding(horizontal = 14.dp, vertical = 8.dp),
             ) {
-                Text(
-                    when (label) {
-                        "Playing" -> "▶  Playing"
-                        "Paused"  -> "⏸  Paused"
-                        else      -> "•  Loading"
-                    },
-                    color = Color.White, fontSize = 13.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        when (label) {
+                            "Playing" -> androidx.compose.material.icons.Icons.Rounded.PlayArrow
+                            "Paused" -> androidx.compose.material.icons.Icons.Rounded.Pause
+                            else -> androidx.compose.material.icons.Icons.Rounded.HourglassEmpty
+                        },
+                        null, tint = Color.White, modifier = Modifier.size(18.dp),
+                    )
+                    Text(
+                        if (label == "Playing" || label == "Paused") label else "Loading",
+                        color = Color.White, fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(start = 6.dp),
+                    )
+                }
             }
         }
 
@@ -1398,7 +1408,7 @@ private fun UpNextCard(
                         .focusRequester(playFocus)
                         .onFocusChanged { playFocused = it.isFocused }
                         .focusable()
-                        .clickable(onClick = onPlayNow)
+                        .clickable(interactionSource = remember { MutableInteractionSource() }, indication = ownFocusIndication(), onClick = onPlayNow)
                         .padding(horizontal = 14.dp, vertical = 7.dp),
                 ) {
                     Text("Play now",
@@ -1412,7 +1422,7 @@ private fun UpNextCard(
                             if (cancelFocused) Color(0x77FFFFFF) else Color(0x33FFFFFF))
                         .onFocusChanged { cancelFocused = it.isFocused }
                         .focusable()
-                        .clickable(onClick = onDismiss)
+                        .clickable(interactionSource = remember { MutableInteractionSource() }, indication = ownFocusIndication(), onClick = onDismiss)
                         .padding(horizontal = 14.dp, vertical = 7.dp),
                 ) {
                     Text("Cancel",
@@ -1474,7 +1484,7 @@ private fun UpNextItemCard(
                         .focusRequester(playFocus)
                         .onFocusChanged { playFocused = it.isFocused }
                         .focusable()
-                        .clickable(onClick = onPlayNow)
+                        .clickable(interactionSource = remember { MutableInteractionSource() }, indication = ownFocusIndication(), onClick = onPlayNow)
                         .padding(horizontal = 14.dp, vertical = 7.dp),
                 ) {
                     Text("Watch next",
@@ -1488,7 +1498,7 @@ private fun UpNextItemCard(
                             if (cancelFocused) Color(0x77FFFFFF) else Color(0x33FFFFFF))
                         .onFocusChanged { cancelFocused = it.isFocused }
                         .focusable()
-                        .clickable(onClick = onDismiss)
+                        .clickable(interactionSource = remember { MutableInteractionSource() }, indication = ownFocusIndication(), onClick = onDismiss)
                         .padding(horizontal = 14.dp, vertical = 7.dp),
                 ) {
                     Text("Cancel",
@@ -1515,7 +1525,7 @@ private fun BigPlayPauseBtn(
             .size(76.dp).clip(CircleShape)
             .then(if (focused) Modifier.border(3.dp, Color.White, CircleShape) else Modifier)
             .background(Color(0xCCFFFFFF))
-            .clickable { onInteract(); onClick() },
+            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = ownFocusIndication()) { onInteract(); onClick() },
         contentAlignment = Alignment.Center,
     ) {
         if (buffering) {
@@ -1548,7 +1558,7 @@ private fun SkipBtn(
             .size(56.dp).clip(CircleShape)
             .then(if (focused) Modifier.border(3.dp, Color.White, CircleShape) else Modifier)
             .background(if (focused) Color(0xBB000000) else Color(0x66000000))
-            .clickable { onInteract(); onClick() },
+            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = ownFocusIndication()) { onInteract(); onClick() },
         contentAlignment = Alignment.Center,
     ) {
         Icon(icon, null, tint = Color.White, modifier = Modifier.size(30.dp))
@@ -1616,14 +1626,15 @@ private fun Dropdown(
                 .clip(RoundedCornerShape(16.dp))
                 .then(if (focused) Modifier.border(2.5.dp, Color.White, RoundedCornerShape(16.dp)) else Modifier)
                 .background(if (focused) Color(0xAA000000) else Color(0x55000000))
-                .clickable { onInteract(); open = true }.padding(horizontal = 12.dp, vertical = 6.dp),
+                .clickable(interactionSource = remember { MutableInteractionSource() }, indication = ownFocusIndication()) { onInteract(); open = true }.padding(horizontal = 12.dp, vertical = 6.dp),
         ) {
             Text(label, color = Color.White, fontSize = 12.sp,
                 fontWeight = FontWeight.SemiBold)
         }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
             options.forEach { (text, value) ->
-                DropdownMenuItem(text = { Text(text) }, onClick = {
+                DropdownMenuItem(text = { Text(text) },
+                    modifier = Modifier.tvFocusRing(androidx.compose.ui.graphics.RectangleShape, scaleOnFocus = 1f, inside = true), onClick = {
                     onPick(value); open = false
                 })
             }
@@ -1645,7 +1656,7 @@ private fun CircleBtn(
             .size(40.dp).clip(CircleShape)
             .then(if (focused) Modifier.border(2.5.dp, Color.White, CircleShape) else Modifier)
             .background(if (focused) Color(0xAA000000) else Color(0x55000000))
-            .clickable { onInteract(); onClick() },
+            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = ownFocusIndication()) { onInteract(); onClick() },
         contentAlignment = Alignment.Center,
     ) { Icon(icon, null, tint = Color.White, modifier = Modifier.size(22.dp)) }
 }

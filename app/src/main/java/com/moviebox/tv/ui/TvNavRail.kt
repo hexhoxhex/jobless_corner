@@ -200,6 +200,45 @@ fun TvTabs(state: UiState, vm: MainViewModel) {
         }
     }
 
+    // Settings and the phone-remote QR draw ON TOP of these tabs and take
+    // focus while open. Closing one destroyed the focused control and nothing
+    // handed focus back: the rail sat there with no item lit and the D-pad
+    // did nothing at all ("the remote pointer is not visible"). Put it back
+    // where it came from — the rail item that opened the overlay, or the
+    // content if it was opened from there (the QR tip's "Show").
+    val remoteItem = remember { FocusRequester() }
+    val settingsItem = remember { FocusRequester() }
+    var returnTo by remember { mutableStateOf<FocusRequester?>(null) }
+    var restoring by remember { mutableStateOf<FocusRequester?>(null) }
+    val overlayOpen = state.showSettings || state.showRemote
+    LaunchedEffect(overlayOpen) {
+        if (overlayOpen) {
+            returnTo = when {
+                !railFocused -> content
+                state.showSettings -> settingsItem
+                else -> remoteItem
+            }
+            return@LaunchedEffect
+        }
+        val target = returnTo ?: return@LaunchedEffect
+        returnTo = null
+        // The rail's enter rule ("land on the current tab") would otherwise
+        // turn a return to Settings into a jump to Home.
+        restoring = target
+        // Not "stop once anything has focus": the moment the overlay goes,
+        // Compose hands focus to the rail's default entry (Home) by itself,
+        // which is exactly what this corrects. A few tries inside ~0.5 s,
+        // too soon for anyone to have moved yet.
+        try {
+            repeat(4) {
+                delay(100)
+                runCatching { target.requestFocus() }
+            }
+        } finally {
+            restoring = null
+        }
+    }
+
     Box(
         Modifier
             .fillMaxSize()
@@ -230,6 +269,9 @@ fun TvTabs(state: UiState, vm: MainViewModel) {
             vm = vm,
             expanded = railFocused,
             requesters = requesters,
+            remoteItem = remoteItem,
+            settingsItem = settingsItem,
+            restoring = { restoring },
             onFocusChange = { railFocused = it },
         )
         if (exitHint) ExitHint()
@@ -243,6 +285,9 @@ private fun BoxScope.Rail(
     vm: MainViewModel,
     expanded: Boolean,
     requesters: Map<Tab, FocusRequester>,
+    remoteItem: FocusRequester,
+    settingsItem: FocusRequester,
+    restoring: () -> FocusRequester?,
     onFocusChange: (Boolean) -> Unit,
 ) {
     val width by animateDpAsState(
@@ -260,7 +305,9 @@ private fun BoxScope.Rail(
             // Entering the rail lands on the CURRENT tab, not whichever item
             // happens to be level with the card you came from — pressing
             // LEFT from the first row used to open the rail on "Phone remote".
-            .focusProperties { enter = { requesters.getValue(state.tab) } }
+            .focusProperties {
+                enter = { if (restoring() != null) FocusRequester.Default else requesters.getValue(state.tab) }
+            }
             .focusGroup()
             .padding(vertical = 20.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
@@ -285,10 +332,10 @@ private fun BoxScope.Rail(
         RailItem("Favourites", Icons.Filled.Favorite, state.tab == Tab.FAVOURITES, expanded,
             requesters.getValue(Tab.FAVOURITES)) { vm.selectTab(Tab.FAVOURITES) }
         Spacer(Modifier.weight(1f))
-        RailItem("Phone remote", Icons.Filled.SettingsRemote, false, expanded, null) {
+        RailItem("Phone remote", Icons.Filled.SettingsRemote, false, expanded, remoteItem) {
             vm.openRemote()
         }
-        RailItem("Settings", Icons.Filled.Settings, false, expanded, null) {
+        RailItem("Settings", Icons.Filled.Settings, false, expanded, settingsItem) {
             vm.openSettings()
         }
     }

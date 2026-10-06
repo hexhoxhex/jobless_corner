@@ -191,7 +191,7 @@ fun SectionHeader(
         Text(title, fontSize = fontSize, fontWeight = FontWeight.Bold)
         if (onSeeAll != null) {
             Text(
-                "SEE ALL",
+                "See all",
                 fontSize = if (isTv) 14.sp else 12.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = TextMuted,

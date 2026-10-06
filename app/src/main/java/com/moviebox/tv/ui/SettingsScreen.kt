@@ -1,5 +1,7 @@
 package com.moviebox.tv.ui
 
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -71,8 +73,13 @@ fun SettingsScreen(onClose: () -> Unit) {
     // landed on the offscreen items but the surrounding view never
     // shifted, so the user couldn't reach the paired-devices section
     // or the new About card with the remote.
+    val isTv = LocalIsTv.current
+    val firstFocus = remember { androidx.compose.ui.focus.FocusRequester() }
+    var hasFocus by remember { mutableStateOf(false) }
+    TvInitialFocus(firstFocus) { hasFocus }
     LazyColumn(
-        Modifier.fillMaxSize().background(Bg),
+        Modifier.fillMaxSize().background(Bg)
+            .onFocusChanged { hasFocus = it.hasFocus },
         contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
@@ -81,8 +88,12 @@ fun SettingsScreen(onClose: () -> Unit) {
                 Modifier.fillMaxWidth().statusBarsPadding().padding(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                IconButton(onClick = onClose) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back")
+                // Phones only: on TV the remote's BACK closes Settings, and
+                // an on-screen back arrow is just one more stop for focus.
+                if (!isTv) {
+                    IconButton(onClick = onClose) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back")
+                    }
                 }
                 Text(
                     "Settings — Remotes", fontSize = 20.sp,
@@ -108,7 +119,10 @@ fun SettingsScreen(onClose: () -> Unit) {
                         fontSize = 28.sp,
                     )
                     Spacer(Modifier.weight(1f))
-                    OutlinedButton(onClick = { RemoteAccess.regeneratePairCode(); tick++ }) {
+                    OutlinedButton(
+                        onClick = { RemoteAccess.regeneratePairCode(); tick++ },
+                        modifier = Modifier.focusRequester(firstFocus).tvFocusRing(),
+                    ) {
                         Text("Regenerate")
                     }
                 }
@@ -132,7 +146,7 @@ fun SettingsScreen(onClose: () -> Unit) {
                         color = TextMuted, fontSize = 12.sp,
                     )
                 }
-                Switch(checked = allowAll, onCheckedChange = {
+                Switch(checked = allowAll, modifier = Modifier.tvFocusRing(), onCheckedChange = {
                     RemoteAccess.allowAll = it; tick++
                 })
             }
@@ -222,7 +236,7 @@ private fun AboutCard() {
             color = TextMuted, fontSize = 12.sp,
         )
         Spacer(Modifier.size(10.dp))
-        OutlinedButton(onClick = {
+        OutlinedButton(modifier = Modifier.tvFocusRing(), onClick = {
             android.widget.Toast.makeText(
                 ctx,
                 "Checking GitHub Releases…",
@@ -258,8 +272,10 @@ private fun LangChip(label: String, on: Boolean, onToggle: () -> Unit) {
     Box(
         Modifier.clip(RoundedCornerShape(999.dp))
             .background(bg)
-            .padding(horizontal = 12.dp, vertical = 8.dp)
-            .clickable(onClick = onToggle),
+            // Before the padding, so the TV focus highlight covers the whole
+            // chip rather than a box around the label.
+            .clickable(onClick = onToggle)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
     ) {
         Text(label, color = fg, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
     }
@@ -293,16 +309,20 @@ private fun DeviceRow(d: RemoteAccess.Device, onChange: () -> Unit) {
             )
         }
         Box {
-            TextButton(onClick = { roleMenu = true }) { Text("Role") }
+            TextButton(onClick = { roleMenu = true }, modifier = Modifier.tvFocusRing()) { Text("Role") }
             DropdownMenu(roleMenu, onDismissRequest = { roleMenu = false }) {
                 RemoteAccess.Role.values().forEach { r ->
-                    DropdownMenuItem(text = { Text(r.name.lowercase()) }, onClick = {
+                    DropdownMenuItem(text = { Text(r.name.lowercase()) },
+                        modifier = Modifier.tvFocusRing(androidx.compose.ui.graphics.RectangleShape, scaleOnFocus = 1f, inside = true), onClick = {
                         RemoteAccess.setRole(d.token, r); roleMenu = false; onChange()
                     })
                 }
             }
         }
-        TextButton(onClick = { RemoteAccess.remove(d.token); onChange() }) {
+        TextButton(
+            onClick = { RemoteAccess.remove(d.token); onChange() },
+            modifier = Modifier.tvFocusRing(),
+        ) {
             Text("Remove", color = Color(0xFFE5484D))
         }
     }
