@@ -114,8 +114,11 @@ fun RemoteOverlay(onClose: () -> Unit) {
 @Composable
 fun SuggestionPopup(onShow: () -> Unit, onDismiss: () -> Unit) {
     LaunchedEffect(Unit) { delay(9_000); onDismiss() }
-    Box(Modifier.fillMaxSize().padding(bottom = 96.dp),
-        contentAlignment = Alignment.BottomCenter) {
+    // Bottom-right corner, out of the way of the rows. It sat bottom-centre,
+    // 96 dp up to clear the old bottom bar — i.e. right on top of the first
+    // row of cards. (TV-only: AppRoot only shows it on TVs.)
+    Box(Modifier.fillMaxSize().padding(end = 24.dp, bottom = 24.dp),
+        contentAlignment = Alignment.BottomEnd) {
         Row(
             Modifier.padding(horizontal = 16.dp).clip(RoundedCornerShape(14.dp))
                 .background(SurfaceElevated).padding(start = 14.dp, end = 4.dp,

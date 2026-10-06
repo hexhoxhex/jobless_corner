@@ -82,11 +82,16 @@ fun AppRoot(vm: MainViewModel = viewModel()) {
 
     BackHandler(
         enabled = state.showRemote || state.showSettings ||
+            (isTv && state.suggestRemote) ||
             state.screen != Screen.TABS || state.tab != Tab.HOME,
     ) {
         when {
             state.showRemote -> vm.closeRemote()
             state.showSettings -> vm.closeSettings()
+            // The "use your phone as a remote" tip. Pressing BACK to get rid
+            // of it used to reach the system — and on Home that closed the
+            // app.
+            isTv && state.suggestRemote -> vm.dismissSuggestion()
             state.screen != Screen.TABS -> vm.back()
             state.tab != Tab.HOME -> vm.selectTab(Tab.HOME)
         }
@@ -246,6 +251,10 @@ private fun detectTv(context: Context, configuration: Configuration): Boolean {
 
 @Composable
 private fun Tabs(state: UiState, vm: MainViewModel, isTv: Boolean) {
+    if (isTv) {
+        TvTabs(state, vm)
+        return
+    }
     Scaffold(
         topBar = {
             Row(
