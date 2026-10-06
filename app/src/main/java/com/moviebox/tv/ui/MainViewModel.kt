@@ -295,6 +295,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      *  within 20 s of the end). The episode picker reads this to draw a
      *  watched check on completed episodes and a "Season complete" mark
      *  when every present episode in a season is finished. */
+    /** Every history row keyed "subjectId|se|ep" — the TV title page reads
+     *  per-episode progress and the resume point from it. */
+    val historyByKey: StateFlow<Map<String, WatchHistoryEntity>> =
+        watchDao.all()
+            .map { list -> list.associateBy { it.key } }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
+
     val watchedKeys: StateFlow<Set<String>> =
         watchDao.all()
             .map { history ->
@@ -1652,6 +1659,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                                 ?: cur.description,
                             rating = meta?.rating ?: cur.rating,
                             cast = meta?.cast?.takeIf { it.isNotEmpty() } ?: cur.cast,
+                            tmdbId = meta?.tmdbId?.takeIf { meta.isTv } ?: cur.tmdbId,
                         ),
                     )
                 } else s
@@ -1959,6 +1967,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** From a verified-unavailable Detail, drop into Search with the title. */
+    /** Open Search for [text] — a cast member's name on the TV title page
+     *  (Search already matches people and lists what they are in). */
+    fun searchFor(text: String) {
+        _state.update {
+            it.copy(
+                screen = Screen.TABS,
+                tab = Tab.SEARCH,
+                query = text,
+                searchType = SubjectType.ALL,
+                detailItem = null,
+                availability = Availability.UNKNOWN,
+            )
+        }
+        onQuery(text)
+    }
+
     fun pickFromSearch() {
         val item = _state.value.detailItem ?: return
         _state.update {
@@ -1977,6 +2001,30 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun playMovie() {
         _state.update { it.copy(currentSe = null, currentEp = null) }
         resolve()
+    }
+
+    /** "Start over" on the TV title page: same as [playMovie], ignoring the
+     *  saved position. */
+    fun playMovieFromStart() {
+        skipResumeNext = true
+        playMovie()
+    }
+
+    /** TMDB episode names/stills per "tmdbId|season", loaded on demand by
+     *  the TV title page. */
+    private val _episodeMeta =
+        MutableStateFlow<Map<String, List<com.moviebox.tv.data.EpisodeMeta>>>(emptyMap())
+    val episodeMeta: StateFlow<Map<String, List<com.moviebox.tv.data.EpisodeMeta>>> = _episodeMeta
+    private val episodeMetaInFlight = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+
+    fun loadEpisodeMeta(tmdbId: Int, season: Int) {
+        val key = "$tmdbId|$season"
+        if (_episodeMeta.value.containsKey(key) || !episodeMetaInFlight.add(key)) return
+        viewModelScope.launch {
+            val eps = runCatching { repo.episodeMeta(tmdbId, season) }.getOrDefault(emptyList())
+            _episodeMeta.update { it + (key to eps) }
+            episodeMetaInFlight.remove(key)
+        }
     }
 
     /** Switch playback to (se, ep). Defaults to a fresh start; opt into

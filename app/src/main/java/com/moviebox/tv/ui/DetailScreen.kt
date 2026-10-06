@@ -72,6 +72,12 @@ import com.moviebox.tv.ui.theme.TextMuted
 
 @Composable
 fun DetailScreen(state: UiState, vm: MainViewModel) {
+    // TVs get the 10-foot title page (TvDetailScreen.kt); everything below
+    // is the phone layout, unchanged.
+    if (LocalIsTv.current) {
+        TvDetailScreen(state, vm)
+        return
+    }
     val item = state.detailItem ?: return
     val favIds by vm.favouriteIds.collectAsState()
     val isFav = favIds.contains(item.subjectId)
@@ -626,7 +632,7 @@ private fun CircleIcon(
  * Back button and the ✕ both call [onClose].
  */
 @androidx.compose.runtime.Composable
-private fun TrailerOverlay(youTubeId: String, onClose: () -> Unit) {
+internal fun TrailerOverlay(youTubeId: String, onClose: () -> Unit) {
     // Hardware Back closes the trailer instead of leaving the detail page.
     androidx.activity.compose.BackHandler(enabled = true) { onClose() }
     Box(

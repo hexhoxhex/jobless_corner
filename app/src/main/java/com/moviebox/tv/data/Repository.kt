@@ -648,6 +648,9 @@ class Repository(
     ): com.moviebox.tv.data.tmdb.TmdbRepository.TmdbMeta? =
         runCatching { tmdb.enrich(title, year, isSeries) }.getOrNull()
 
+    suspend fun episodeMeta(tmdbId: Int, season: Int): List<EpisodeMeta> =
+        tmdb.episodes(tmdbId, season)
+
     /** Which source served a stream — surfaced to the UI/remote so a title's
      *  origin is visible and switchable. */
     enum class Provider(val label: String) {

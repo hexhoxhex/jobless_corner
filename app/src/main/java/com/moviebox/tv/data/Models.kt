@@ -60,6 +60,15 @@ data class SeasonInfo(
 
 data class Dub(val name: String, val code: String, val original: Boolean)
 
+/** One episode's TMDB metadata, for the episode cards on the TV title page. */
+data class EpisodeMeta(
+    val number: Int,
+    val name: String?,
+    val overview: String?,
+    val stillUrl: String?,
+    val runtimeMin: Int?,
+)
+
 /** A cast member (from TMDB credits). [profileUrl] is a ready image URL. */
 data class CastMember(
     val name: String,
@@ -88,6 +97,9 @@ data class Details(
     val backdropUrl: String? = null,
     val rating: Double? = null,
     val cast: List<CastMember> = emptyList(),
+    /** TMDB id of the confident match (series only used), for episode
+     *  names and stills. Null when TMDB has no confident match. */
+    val tmdbId: Int? = null,
 )
 
 /** A selectable quality. [mediaUrl] is null when it must be re-resolved. */

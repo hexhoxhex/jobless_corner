@@ -87,6 +87,10 @@ class TmdbRepository(token: String = BuildConfig.TMDB_TOKEN) {
         val rating: Double?,
         val trailerKey: String?,
         val cast: List<com.moviebox.tv.data.CastMember>,
+        /** The matched TMDB id and whether it is a series — lets the title
+         *  page ask for per-season episode names and stills. */
+        val tmdbId: Int? = null,
+        val isTv: Boolean = false,
     )
 
     suspend fun enrich(title: String, year: Int?, isSeries: Boolean): TmdbMeta? {
@@ -120,8 +124,26 @@ class TmdbRepository(token: String = BuildConfig.TMDB_TOKEN) {
             rating = d.voteAverage?.takeIf { it > 0.0 },
             trailerKey = trailer,
             cast = cast,
+            tmdbId = match.id,
+            isTv = matchIsTv,
         )
     }
+
+    /** Episodes of one season, numbered as TMDB numbers them. Empty on any
+     *  failure; callers fall back to plain "Episode N" cards. */
+    suspend fun episodes(tmdbId: Int, season: Int): List<com.moviebox.tv.data.EpisodeMeta> =
+        runCatching { api.tvSeason(tmdbId, season).episodes }
+            .getOrDefault(emptyList())
+            .filter { it.episodeNumber > 0 }
+            .map {
+                com.moviebox.tv.data.EpisodeMeta(
+                    number = it.episodeNumber,
+                    name = it.name?.takeIf { n -> n.isNotBlank() },
+                    overview = it.overview?.takeIf { o -> o.isNotBlank() },
+                    stillUrl = it.stillPath?.let { p -> "https://image.tmdb.org/t/p/w300$p" },
+                    runtimeMin = it.runtime?.takeIf { r -> r > 0 },
+                )
+            }
 
     /** A person the user might be searching for, with what they're known for. */
     data class Person(

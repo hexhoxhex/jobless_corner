@@ -108,7 +108,7 @@ private const val EXIT_WINDOW_MS = 2_500L
  * rows (horizontal) and the page (vertical) alike.
  */
 @OptIn(ExperimentalFoundationApi::class)
-private val CalmScroll = object : BringIntoViewSpec {
+internal val CalmScroll = object : BringIntoViewSpec {
     // A spring, not a tween. The scroll is re-aimed every frame as the
     // remaining distance shrinks; a spring carries its velocity through each
     // re-aim, a fixed-duration tween restarts — measured on the TV, a 300 ms

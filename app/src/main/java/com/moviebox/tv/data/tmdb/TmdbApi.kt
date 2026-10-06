@@ -78,6 +78,15 @@ interface TmdbApi {
         @Query("language") language: String = "en-US",
     ): TmdbPersonCredits
 
+    /** One season's episodes: names, stills, runtimes. Feeds the episode
+     *  cards on the TV title page. */
+    @GET("tv/{id}/season/{season}")
+    suspend fun tvSeason(
+        @Path("id") id: Int,
+        @Path("season") season: Int,
+        @Query("language") language: String = "en-US",
+    ): TmdbSeasonDetailDto
+
     @GET("genre/movie/list")
     suspend fun movieGenres(): TmdbGenres
 
@@ -135,6 +144,21 @@ data class TmdbSeasonDto(
     @Json(name = "season_number") val seasonNumber: Int = 0,
     @Json(name = "episode_count") val episodeCount: Int = 0,
     val name: String? = null,
+)
+
+@JsonClass(generateAdapter = true)
+data class TmdbSeasonDetailDto(
+    val episodes: List<TmdbEpisodeDto> = emptyList(),
+)
+
+@JsonClass(generateAdapter = true)
+data class TmdbEpisodeDto(
+    @Json(name = "episode_number") val episodeNumber: Int = 0,
+    val name: String? = null,
+    val overview: String? = null,
+    @Json(name = "still_path") val stillPath: String? = null,
+    val runtime: Int? = null,
+    @Json(name = "air_date") val airDate: String? = null,
 )
 
 @JsonClass(generateAdapter = true)
