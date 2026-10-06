@@ -55,6 +55,59 @@ class LiveResolver(
     private val cdnFailures =
         java.util.concurrent.ConcurrentHashMap<String, ChannelHealth>()
 
+    /** Which wrapper path ("stream", "watch", ...) produced each channel's
+     *  current stream; absent when a daddy endpoint won. */
+    private val lastRoute = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /** channelId -> (path -> skip-until ms). See [reportDeadRoute]. */
+    private val deadRoutes =
+        java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.ConcurrentHashMap<String, Long>>()
+
+    /**
+     * The stream this channel's last route handed out does not exist on its
+     * CDN (master 404/410: "unknown channel"). Skip that route for this
+     * channel for a while.
+     *
+     * Reported 2026-10-07 on AHC (206), while dlive.sx itself played it:
+     * /stream resolved in 1.5-2.7 s to edge.cowedd4855ws.sbs, whose master
+     * answered `404 unknown channel`. Every recovery re-resolved, the leading
+     * route won again with the same dead URL, and after 8 rounds the proxy
+     * declared the source down — the other five player pages were never
+     * asked. The CDN-avoid list could not help: this route only ever names
+     * that one CDN.
+     */
+    fun reportDeadRoute(channelId: String) {
+        val path = lastRoute[channelId] ?: return
+        deadRoutes.getOrPut(channelId) { java.util.concurrent.ConcurrentHashMap() }[path] =
+            System.currentTimeMillis() + DEAD_ROUTE_TTL_MS
+        android.util.Log.w(
+            "LiveDiag",
+            "RESOLVER ch=$channelId route $path handed out a stream its CDN " +
+                "does not know — skipping it for ${DEAD_ROUTE_TTL_MS / 60_000} min",
+        )
+    }
+
+    /**
+     * The stream from this channel's last route played (its master parsed),
+     * so that route may lead for every channel.
+     *
+     * This used to happen as soon as a page yielded ANY URL. A route that
+     * hands out a dead server still "resolves", so one bad channel could make
+     * it the first route tried for all of them (seen 2026-10-07: AHC walked
+     * to /hub, which named the dead phantemlis family, and /hub became the
+     * leader).
+     */
+    fun reportRouteWorked(channelId: String) {
+        lastRoute[channelId]?.let { noteWinningPath(it) }
+    }
+
+    private fun deadRoutesFor(channelId: String): Set<String> {
+        val m = deadRoutes[channelId] ?: return emptySet()
+        val now = System.currentTimeMillis()
+        m.entries.removeIf { it.value <= now }
+        return m.keys.toSet()
+    }
+
     /** Channels for which the systemic-dead avoid recently filtered out
      *  EVERY candidate and no alternate CDN resolved — i.e. the channel is
      *  reachable ONLY via the dead family (Sky Cinema Premiere UK is one:
@@ -292,7 +345,6 @@ class LiveResolver(
             for (path in playerPathsFor(channelId)) {
                 probes += async {
                     runCatching { tryPlayerPath(channelId, path) }.getOrNull()
-                        ?.also { noteWinningPath(path) }
                         ?.let { it to "dlhd:$path" }
                 }
             }
@@ -390,7 +442,6 @@ class LiveResolver(
                         fallbackProbes += async {
                             runCatching { tryPlayerPath(channelId, path) }
                                 .getOrNull()
-                                ?.also { noteWinningPath(path) }
                                 ?.let { it to "dlhd:$path" }
                         }
                     }
@@ -418,6 +469,11 @@ class LiveResolver(
                     "dt=${System.currentTimeMillis() - t0}ms",
             )
             LiveStatus.note("Preparing player…")
+            if (winner.second.startsWith("dlhd:")) {
+                lastRoute[channelId] = winner.second.removePrefix("dlhd:")
+            } else {
+                lastRoute.remove(channelId)
+            }
             if (winner.second.startsWith("donis@")) {
                 rememberWorkingHost(winner.second.removePrefix("donis@"))
             }
@@ -744,7 +800,6 @@ class LiveResolver(
         for (path in playerPathsFor(channelId, wide = true)) {
             if (path in tried) continue
             val url = runCatching { tryPlayerPath(channelId, path) }.getOrNull() ?: continue
-            noteWinningPath(path)
             return url to "dlhd:$path"
         }
         return null
@@ -776,7 +831,13 @@ class LiveResolver(
         } else {
             ordered
         }
-        return if (wide) all else all.take(PATHS_PER_FIRST_PASS)
+        // Routes that handed this channel a stream its CDN does not carry go
+        // to the back of the queue (see reportDeadRoute). If every route has
+        // failed, try them all again rather than none.
+        val dead = deadRoutesFor(channelId)
+        val live = all.filter { it !in dead }
+        val usable = if (live.isEmpty()) all else live
+        return if (wide) usable else usable.take(PATHS_PER_FIRST_PASS)
     }
 
     private fun logPath(channelId: String, path: String, t0: Long, outcome: String) {
@@ -1031,7 +1092,11 @@ class LiveResolver(
          *  route again — it has twice in a month — one success re-teaches the
          *  order instead of needing an app update. */
         private val PLAYER_PATHS = listOf(
-            "stream", "plus", "watch", "hub", "cast", "casting",
+            // dlive.sx's own Player 1-6 order as of 2026-10-07 (/player is
+            // back; it 404'd on 10-06). /hub is no longer offered by the site
+            // and, for the channels checked, names the dead phantemlis family
+            // — kept only as a last resort.
+            "stream", "cast", "watch", "plus", "casting", "player", "hub",
         )
 
         private const val LEADER_KEY = "path_leader"
@@ -1075,6 +1140,11 @@ class LiveResolver(
          *  finish it, only then try another. The last-resort pass still opens
          *  up. */
         private const val PATHS_PER_FIRST_PASS = 1
+
+        /** How long a route that served a non-existent stream is skipped
+         *  for that channel. Long enough to cover a viewing session, short
+         *  enough that a fixed route is picked up again the same evening. */
+        private const val DEAD_ROUTE_TTL_MS = 20 * 60_000L
 
         /** epiembeds-style obfuscation: `var _x=[n,n,...],_k=63,_s=225;`
          *  decoded as `((n ^ k) - s + 256) & 255` and eval'd. The decoded

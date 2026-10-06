@@ -1003,6 +1003,9 @@ class LiveStreamProxy(
                     // available) or another sibling will win instead of
                     // us being stuck in the same xameleon 403 loop.
                     resolver.reportAuthFailure(channelId, hostOf(entry.innerUrl))
+                    // The route that produced this stream will produce the
+                    // same refused family again; try the next one.
+                    resolver.reportDeadRoute(channelId)
                     LiveStatus.note("Stream blocked — trying another…")
                     break  // token death — go rotate now
                 }
@@ -1526,8 +1529,17 @@ class LiveStreamProxy(
             val masterUrl = resolver.resolveStream(channelId, budgetMs)
                 ?: return@withLock null
             // Fetch master once to learn the inner URL + STREAM-INF line.
-            val parsed = parseMaster(masterUrl)
+            val failCode = IntArray(1)
+            val parsed = parseMaster(masterUrl, failCode)
             if (parsed == null) {
+                // 404/410 = this stream does not exist on the CDN (body:
+                // "unknown channel"). That is the ROUTE's fault, not a blip:
+                // re-resolving the same route returns the same dead URL.
+                // 403 too: the token family this route hands out is refused,
+                // and asking the same route again returns the same family.
+                if (failCode[0] == 404 || failCode[0] == 410 || failCode[0] == 403) {
+                    runCatching { resolver.reportDeadRoute(channelId) }
+                }
                 // Tell the resolver the CDN failed at the MASTER.
                 //
                 // Only an inner-playlist 401/403/410 used to reach
@@ -1546,6 +1558,7 @@ class LiveStreamProxy(
                 return@withLock null
             }
             val (innerUrl, streamInf) = parsed
+            runCatching { resolver.reportRouteWorked(channelId) }
             val entry = CacheEntry(
                 masterUrl = masterUrl,
                 innerUrl = innerUrl,
@@ -1569,13 +1582,17 @@ class LiveStreamProxy(
      * 15.8 s; 3-4 500s -> 26-28 s or no start at all), which is the honest
      * shape of the problem: it is the origin, not our retry policy.
      */
-    private fun parseMaster(masterUrl: String): Pair<String, String?>? {
+    private fun parseMaster(
+        masterUrl: String,
+        failCode: IntArray? = null,
+    ): Pair<String, String?>? {
         val req = buildCdnRequest(masterUrl).build()
         val t0 = System.currentTimeMillis()
         return runCatching {
             clientFor(masterUrl).newCall(req).execute().use { resp ->
                 val dt = System.currentTimeMillis() - t0
                 if (!resp.isSuccessful) {
+                    failCode?.set(0, resp.code)
                     val cfRay = resp.header("cf-ray").orEmpty()
                     val cfMit = resp.header("cf-mitigated").orEmpty()
                     val body = resp.body?.string().orEmpty()

@@ -1053,8 +1053,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 "AUTO_FAILOVER ch=$failingChannelId exhausted — " +
                     "${alternates.size} sibling(s) tried; giving up",
             )
+            // A 24/7 channel has no siblings; "All 0 channels for this event"
+            // read as a bug.
             com.moviebox.tv.data.live.LiveStatus.note(
-                "All ${alternates.size} channels for this event are offline",
+                when (alternates.size) {
+                    0 -> "This channel is offline at the source right now"
+                    1 -> "This channel and its alternate feed are offline"
+                    else -> "All ${alternates.size} channels for this event are offline"
+                },
             )
             _state.update { it.copy(
                 error = "This channel and every alternate feed are offline right now.",

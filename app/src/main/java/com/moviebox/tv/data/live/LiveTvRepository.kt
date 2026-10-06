@@ -251,7 +251,7 @@ class LiveTvRepository {
                 )
                 emptyMap()
             } else {
-                snap.results.associateBy { it.id }
+                trustworthy(snap.results, now / 1000).associateBy { it.id }
             }
         }.getOrElse { emptyMap() }
         cachedHealth = map
@@ -259,7 +259,50 @@ class LiveTvRepository {
         return map
     }
 
+    /**
+     * Drops "down" verdicts that are not evidence about the channel.
+     *
+     * Reported 2026-10-07 as "why is it showing all tv channels are offline":
+     * every card at the top of the grid said OFTEN OFFLINE while they played
+     * fine on the TV. The cloud sweep runs on GitHub's network, which the
+     * source stopped serving; it measured 0 ok out of 114 in a day and
+     * published all 114 as down. The 100% guard above never fired because
+     * weeks-old "ok" entries kept the snapshot under 100%. So a "down" now
+     * only counts if it is:
+     *  - recent (a 3-week-old failure says nothing about today), and
+     *  - from a vantage point that can play anything: the TV's own checks
+     *    ("home") always qualify; cloud checks only when that same window
+     *    also has cloud successes, and never for "resolve" (the runner could
+     *    not reach the player page at all).
+     * "ok" entries pass through untouched — they never badge anything.
+     */
+    private fun trustworthy(results: List<HealthEntry>, nowSec: Long): List<HealthEntry> {
+        val recent = results.filter { nowSec - it.checkedAt < BADGE_MAX_AGE_S }
+        val cloudRecent = recent.filter { it.source != "home" }
+        val cloudBlind = cloudRecent.size >= 10 && cloudRecent.none { it.status == "ok" }
+        val kept = results.filter { e ->
+            when {
+                e.status != "down" -> true
+                nowSec - e.checkedAt >= BADGE_MAX_AGE_S -> false
+                e.source == "home" -> true
+                cloudBlind -> false
+                e.failReason == "resolve" -> false
+                else -> true
+            }
+        }
+        android.util.Log.i(
+            "LiveDiag",
+            "HEALTH kept ${kept.count { it.status == "down" }} of " +
+                "${results.count { it.status == "down" }} down verdicts " +
+                "(cloud blind=$cloudBlind, recent cloud=${cloudRecent.size})",
+        )
+        return kept
+    }
+
     companion object {
+        /** A "down" older than this no longer badges a channel. */
+        private const val BADGE_MAX_AGE_S = 72 * 3600L
+
         /** Total tries for a catalog file (1 initial + 2 retries). */
         private const val FETCH_ATTEMPTS = 3
         private const val FETCH_RETRY_MS = 700L
@@ -292,4 +335,7 @@ data class HealthEntry(
     val status: String,
     @com.squareup.moshi.Json(name = "fail_reason") val failReason: String? = null,
     @com.squareup.moshi.Json(name = "checked_at") val checkedAt: Long = 0L,
+    /** "home" when the verdict came from a TV's own network (published by
+     *  scripts/publish_home_health.py); absent for the cloud sweep. */
+    val source: String? = null,
 )
