@@ -279,7 +279,11 @@ private fun HeroBanner(hero: Hero, onClick: () -> Unit) {
                 indication = null,
                 onClick = onClick,
             )
-            .let { if (isTv && focused) it.border(3.dp, Accent) else it },
+            // No border on TV: a 3 dp bright-green rectangle around the whole
+            // banner, switching on and off every time focus crossed between
+            // it and the first row, was half of the "flickering" report. The
+            // Play pill below shows focus instead.
+            .let { if (!isTv && focused) it.border(3.dp, Accent) else it },
     ) {
         PosterImage(
             url = hero.backdropUrl,
@@ -321,12 +325,16 @@ private fun HeroBanner(hero: Hero, onClick: () -> Unit) {
             // On TV, give the user a clear affordance — the hero is huge and
             // would otherwise feel passive.
             if (isTv) {
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(14.dp))
                 Text(
                     "▶  Play",
                     fontSize = 16.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Accent,
+                    fontWeight = FontWeight.Bold,
+                    color = if (focused) Color(0xFF0B0E13) else Color.White,
+                    modifier = Modifier
+                        .clip(androidx.compose.foundation.shape.RoundedCornerShape(10.dp))
+                        .background(if (focused) Color.White else Accent)
+                        .padding(horizontal = 18.dp, vertical = 9.dp),
                 )
             }
         }

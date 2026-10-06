@@ -62,6 +62,11 @@ import com.moviebox.tv.ui.theme.SurfaceElevated
 import com.moviebox.tv.ui.theme.TextMuted
 import com.moviebox.tv.ui.theme.TextPrimary
 import kotlinx.coroutines.delay
+import androidx.compose.animation.core.AnimationSpec
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.gestures.BringIntoViewSpec
+import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
+import androidx.compose.runtime.CompositionLocalProvider
 
 /**
  * TV navigation: a slim rail down the left edge instead of the phone's top
@@ -85,6 +90,64 @@ import kotlinx.coroutines.delay
 private val RailCollapsed = 72.dp
 private val RailExpanded = 236.dp
 private const val EXIT_WINDOW_MS = 2_500L
+
+/**
+ * How lists scroll to bring the focused item into view, on TV.
+ *
+ * Reported as "the tv app feels like its flickering up and down, its like
+ * its shaking". Compose's default on a TV keeps the focused item pinned about
+ * 30% down the screen, so every move between the banner and the first row
+ * swung the whole page by half a screen — down onto the row, the banner gone;
+ * back up, the banner back — measured on the TV as ~250 dp per press.
+ *
+ * This scrolls only as far as needed: an item already comfortably on screen
+ * does not move the page at all (the banner stays put while you browse the
+ * first row), anything off-screen comes in just far enough to be fully
+ * visible with a small margin so the focus ring and the 1.06 scale are not
+ * clipped, and the motion is a calm, non-bouncy spring. Applies to
+ * rows (horizontal) and the page (vertical) alike.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+private val CalmScroll = object : BringIntoViewSpec {
+    // A spring, not a tween. The scroll is re-aimed every frame as the
+    // remaining distance shrinks; a spring carries its velocity through each
+    // re-aim, a fixed-duration tween restarts — measured on the TV, a 300 ms
+    // tween turned into a page that kept crawling for 1-3 seconds after each
+    // press (100+ frames where ~25 were needed). No bounce, so nothing
+    // overshoots and settles back: that would read as a wobble.
+    override val scrollAnimationSpec: AnimationSpec<Float> =
+        androidx.compose.animation.core.spring(
+            dampingRatio = androidx.compose.animation.core.Spring.DampingRatioNoBouncy,
+            stiffness = 700f,
+        )
+
+    override fun calculateScrollDistance(
+        offset: Float, size: Float, containerSize: Float,
+    ): Float {
+        // MUST converge. This is re-asked every frame while a scroll runs, so
+        // any answer that can never be satisfied keeps the animation alive
+        // forever. The first version used a margin unconditionally: the first
+        // card of a row sits 64 px in, inside a 71 px margin, so it asked to
+        // scroll before the start of the list — impossible — on every frame,
+        // restarting the page's own scroll each time. Logged on the TV: the
+        // page crept ~1 px per frame, which is a shake of its own.
+        //
+        // So: anything already fully on screen answers 0, and the margin only
+        // adds travel while bringing in something that is partly hidden. Once
+        // it is visible the next answer is 0 and the scroll ends.
+        val trailing = offset + size
+        if (size >= containerSize) {
+            // Too big to show whole: if it already covers the view, leave it;
+            // otherwise line its start up with the edge.
+            return if (offset <= 0f && trailing >= containerSize) 0f else offset
+        }
+        if (offset >= 0f && trailing <= containerSize) return 0f
+        // 9%: enough, moving up, to bring the row's title back into view above
+        // its cards; moving sideways, the neighbouring card peeks in.
+        val margin = minOf(containerSize * 0.09f, (containerSize - size) / 2f)
+        return if (offset < 0f) offset - margin else trailing - (containerSize - margin)
+    }
+}
 
 @Composable
 fun TvTabs(state: UiState, vm: MainViewModel) {
@@ -151,12 +214,15 @@ fun TvTabs(state: UiState, vm: MainViewModel) {
                 .focusRequester(content)
                 .focusGroup(),
         ) {
-            when (state.tab) {
-                Tab.HOME -> HomeScreen(state, vm)
-                Tab.LIVE -> LiveTvScreen(state, vm)
-                Tab.SEARCH -> SearchScreen(state, vm)
-                Tab.DOWNLOADS -> DownloadsScreen(vm)
-                Tab.FAVOURITES -> FavouritesScreen(vm)
+            @OptIn(ExperimentalFoundationApi::class)
+            CompositionLocalProvider(LocalBringIntoViewSpec provides CalmScroll) {
+                when (state.tab) {
+                    Tab.HOME -> HomeScreen(state, vm)
+                    Tab.LIVE -> LiveTvScreen(state, vm)
+                    Tab.SEARCH -> SearchScreen(state, vm)
+                    Tab.DOWNLOADS -> DownloadsScreen(vm)
+                    Tab.FAVOURITES -> FavouritesScreen(vm)
+                }
             }
         }
         Rail(
