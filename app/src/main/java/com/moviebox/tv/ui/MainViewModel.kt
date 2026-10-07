@@ -295,6 +295,49 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      *  within 20 s of the end). The episode picker reads this to draw a
      *  watched check on completed episodes and a "Season complete" mark
      *  when every present episode in a season is finished. */
+    /** Keys of everything followed — the TV sports guide's bells read it. */
+    val followKeys: StateFlow<Set<String>> =
+        db.follows().allKeys()
+            .map { it.toSet() }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
+
+    /** The bell on a match in the TV sports guide: a reminder for THIS
+     *  event. Stored as a SHOW follow on the event's own title, which
+     *  [com.moviebox.tv.data.live.FollowMatcher] matches against that title
+     *  only — so it rings for this match (and a repeat with the same title),
+     *  not for every game either team plays. Pressing it again removes it. */
+    fun toggleEventReminder(e: com.moviebox.tv.data.live.ScheduleEvent): Boolean {
+        val label = Glyphs.plain(e.title)
+        val key = com.moviebox.tv.data.live.FixtureParser.canonical(label)
+        if (key.isBlank()) return false
+        val on = key !in followKeys.value
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val dao = db.follows()
+            if (on) {
+                dao.add(
+                    com.moviebox.tv.data.local.FollowEntity(
+                        key = key,
+                        label = label,
+                        kind = com.moviebox.tv.data.local.FollowKind.SHOW.name,
+                        remindMinutes = com.moviebox.tv.data.local.FollowEntity.DEFAULT_LEAD_MINUTES,
+                        remind = true,
+                        addedAt = System.currentTimeMillis(),
+                    ),
+                )
+            } else {
+                dao.remove(key)
+            }
+            runCatching {
+                com.moviebox.tv.reminders.ReminderScheduler.reschedule(
+                    getApplication(),
+                    com.moviebox.tv.reminders.ReminderWarm
+                        .scheduleOrCached(_state.value.liveSchedule),
+                )
+            }
+        }
+        return on
+    }
+
     /** Every history row keyed "subjectId|se|ep" — the TV title page reads
      *  per-episode progress and the resume point from it. */
     val historyByKey: StateFlow<Map<String, WatchHistoryEntity>> =

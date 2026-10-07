@@ -67,7 +67,7 @@ import com.moviebox.tv.ui.theme.TextPrimary
 /** How long an event stays listed after it starts. Live events have no
  *  published runtime, so this stands in for "probably still on air" — long
  *  enough for a match or a film, matching the upstream feed's own grace. */
-private const val SCHEDULE_GRACE_SEC = 3 * 60 * 60L
+internal const val SCHEDULE_GRACE_SEC = 3 * 60 * 60L
 
 @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable
@@ -439,6 +439,11 @@ private fun SubTabPill(label: String, selected: Boolean, onClick: () -> Unit) {
 
 @Composable
 private fun ScheduleView(state: UiState, vm: MainViewModel, isTv: Boolean) {
+    // TVs get the sports guide (TvSportsScreen.kt); below is the phone list.
+    if (isTv) {
+        TvSportsSchedule(state, vm)
+        return
+    }
     val byId = remember(state.liveChannels) { state.liveChannels.associateBy { it.id } }
     val collapsed = remember { mutableStateMapOf<String, Boolean>() }
     val grouped = remember(state.liveSchedule) {
@@ -652,7 +657,7 @@ private fun EventRow(
  *  TZ (common for late-evening UK shows that wrap past midnight in EAT),
  *  we prefix with "Tom" so the user isn't confused about same-day-vs-next.
  */
-private fun formatEventTime(e: ScheduleEvent): String {
+internal fun formatEventTime(e: ScheduleEvent): String {
     val s = e.startUnix ?: return e.time
     val ms = s * 1000L
     val now = java.util.Calendar.getInstance().apply { timeInMillis = System.currentTimeMillis() }
@@ -748,13 +753,13 @@ private fun leagueFromTitle(title: String): String? {
 }
 
 /** Where an event sits relative to now. */
-private enum class EventStatus { LIVE, NEXT, ENDED }
+internal enum class EventStatus { LIVE, NEXT, ENDED }
 
 /** Live events publish no runtime, so "on air" is a window rather than an end
  *  time: started, and started recently enough to still plausibly be running.
  *  Kept identical to the schedule's own grace so a row cannot claim to be live
  *  after the list has stopped showing it. */
-private fun eventStatus(e: ScheduleEvent): EventStatus {
+internal fun eventStatus(e: ScheduleEvent): EventStatus {
     val start = e.startUnix ?: return EventStatus.NEXT
     val now = System.currentTimeMillis() / 1000
     return when {
