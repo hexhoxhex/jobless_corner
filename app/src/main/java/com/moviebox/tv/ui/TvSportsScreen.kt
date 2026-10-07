@@ -80,7 +80,9 @@ private val Dim = Color(0xFFA7B0BE)
 
 private const val START = 32
 
-private class Classified(
+private val GENERIC_CATEGORY = Regex("^\\s*(upcoming events?|other( sports| events)?|events?|all sports)\\s*$", RegexOption.IGNORE_CASE)
+
+internal class Classified(
     val e: ScheduleEvent,
     val sport: String,
     val league: String,
@@ -100,29 +102,8 @@ fun TvSportsSchedule(state: UiState, vm: MainViewModel) {
             value = System.currentTimeMillis() / 1000
         }
     }
-    val byId = remember(state.liveChannels) { state.liveChannels.associateBy { it.id } }
-    val all = remember(state.liveSchedule, byId) {
-        state.liveSchedule
-            .filter { e -> e.startUnix.let { s -> s == null || s + SCHEDULE_GRACE_SEC >= System.currentTimeMillis() / 1000 } }
-            .sortedBy { it.startUnix ?: Long.MAX_VALUE }
-            .map { e ->
-                val sport = SportCatalog.sportFor(e.title, e.category) ?: "Other"
-                val league = Glyphs.plain(
-                    if (sport == SportCatalog.FOOTBALL) {
-                        LeagueCatalog.groupFor(e.title, e.category).ifBlank { e.category }
-                    } else e.category,
-                )
-                val fx = FixtureParser.parse(e.title)
-                val available = e.channels.mapNotNull { byId[it.id] }
-                Classified(
-                    e = e,
-                    sport = sport,
-                    league = league,
-                    sides = if (fx.isFixture) fx.sides.map { Glyphs.plain(it) } else emptyList(),
-                    primary = available.firstOrNull(),
-                    feeds = (available.size - 1).coerceAtLeast(0),
-                )
-            }
+    val all = remember(state.liveSchedule, state.liveChannels) {
+        classifySchedule(state.liveSchedule, state.liveChannels)
     }
     val sports = remember(all) {
         val present = all.map { it.sport }.toSet()
@@ -134,14 +115,7 @@ fun TvSportsSchedule(state: UiState, vm: MainViewModel) {
     val shown = all.filter { filter == "All" || it.sport == filter }
     // Sport before shows: under "All" the live row used to open on NCIS and
     // The Voice simply because they started first. Within a sport, by start.
-    val liveNow = shown.filter { eventStatusAt(it.e, nowSec) == EventStatus.LIVE }
-        .sortedWith(
-            // Watchable first: a card that says "No feed available" should
-            // not be the first thing in the row.
-            compareBy<Classified> { if (it.primary == null) 1 else 0 }
-                .thenBy { if (it.sport == "Other") Int.MAX_VALUE else SportCatalog.rank(it.sport) }
-                .thenBy { it.e.startUnix ?: Long.MAX_VALUE },
-        )
+    val liveNow = liveNowOf(shown, nowSec)
     val later = shown.filter { eventStatusAt(it.e, nowSec) == EventStatus.NEXT }
 
     LazyColumn(
@@ -150,13 +124,15 @@ fun TvSportsSchedule(state: UiState, vm: MainViewModel) {
         verticalArrangement = Arrangement.spacedBy(22.dp),
     ) {
         item(key = "filters") {
-            LazyRow(
-                Modifier.focusRestorer(),
-                contentPadding = PaddingValues(start = START.dp, end = 48.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                items(sports, key = { it }) { s ->
-                    FilterPill(s, selected = s == filter) { filter = s }
+            EdgeSafeRow(START.dp, 48.dp) {
+                LazyRow(
+                    Modifier.focusRestorer(),
+                    contentPadding = PaddingValues(start = START.dp, end = 48.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    items(sports, key = { it }) { s ->
+                        FilterPill(s, selected = s == filter) { filter = s }
+                    }
                 }
             }
         }
@@ -168,7 +144,7 @@ fun TvSportsSchedule(state: UiState, vm: MainViewModel) {
                         contentPadding = PaddingValues(start = START.dp, end = 48.dp),
                         horizontalArrangement = Arrangement.spacedBy(18.dp),
                     ) {
-                        items(liveNow, key = { "live-" + it.e.title + it.e.startUnix }) { c ->
+                        items(liveNow, key = { it.key() }) { c ->
                             LiveCard(c, nowSec) { c.primary?.let { vm.playScheduleChannel(it.id) } }
                         }
                     }
@@ -182,7 +158,7 @@ fun TvSportsSchedule(state: UiState, vm: MainViewModel) {
                     modifier = Modifier.padding(start = START.dp),
                 )
             }
-            items(later, key = { "later-" + it.e.title + it.e.startUnix }) { c ->
+            items(later, key = { "later-" + it.e.title + "|" + it.e.startUnix }) { c ->
                 val key = FixtureParser.canonical(Glyphs.plain(c.e.title))
                 LaterRow(
                     c = c,
@@ -204,6 +180,65 @@ fun TvSportsSchedule(state: UiState, vm: MainViewModel) {
         }
     }
 }
+
+/** Every event that has not ended, with its sport, competition, sides and
+ *  the feed OK would open. Shared by this guide and the home "Live now" row. */
+internal fun classifySchedule(schedule: List<ScheduleEvent>, channels: List<Channel>): List<Classified> {
+    val byId = channels.associateBy { it.id }
+    val now = System.currentTimeMillis() / 1000
+    return schedule
+        .filter { e -> e.startUnix.let { s -> s == null || s + SCHEDULE_GRACE_SEC >= now } }
+        // The feed lists some events twice, under two categories (MotoGP as
+        // both "Upcoming events" and "Motorsport", each with its own
+        // channels). As two cards they shared one list key and crashed the
+        // guide. One card, every channel from both listings, under the
+        // listing whose category says more than "upcoming"/"other".
+        .groupBy { it.title.trim() to it.startUnix }
+        .values
+        .map { same ->
+            if (same.size == 1) same[0] else {
+                val best = same.firstOrNull { SportCatalog.sportFor(it.title, it.category) != null }
+                    ?: same[0]
+                best.copy(channels = same.flatMap { it.channels }.distinctBy { it.id })
+            }
+        }
+        .sortedBy { it.startUnix ?: Long.MAX_VALUE }
+        .map { e ->
+            val sport = SportCatalog.sportFor(e.title, e.category) ?: "Other"
+            val listed = Glyphs.plain(
+                if (sport == SportCatalog.FOOTBALL) {
+                    LeagueCatalog.groupFor(e.title, e.category).ifBlank { e.category }
+                } else e.category,
+            )
+            // "Upcoming events" / "Other" are the feed's catch-alls, not a
+            // competition; the sport says more (MotoGP read "UPCOMING EVENTS").
+            val league = if (sport != "Other" && GENERIC_CATEGORY.containsMatchIn(listed)) sport else listed
+            val fx = FixtureParser.parse(e.title)
+            val available = e.channels.mapNotNull { byId[it.id] }
+            Classified(
+                e = e,
+                sport = sport,
+                league = league,
+                sides = if (fx.isFixture) fx.sides.map { Glyphs.plain(it) } else emptyList(),
+                primary = available.firstOrNull(),
+                feeds = (available.size - 1).coerceAtLeast(0),
+            )
+        }
+}
+
+/** What is on now, in the order the guide shows it. */
+internal fun liveNowOf(events: List<Classified>, nowSec: Long): List<Classified> =
+    events.filter { eventStatusAt(it.e, nowSec) == EventStatus.LIVE }
+        .sortedWith(
+            // Watchable first: a card that says "No feed available" should
+            // not be the first thing in the row.
+            compareBy<Classified> { if (it.primary == null) 1 else 0 }
+                .thenBy { if (it.sport == "Other") Int.MAX_VALUE else SportCatalog.rank(it.sport) }
+                .thenBy { it.e.startUnix ?: Long.MAX_VALUE },
+        )
+
+/** Stable identity of an event for list keys and focus memory. */
+internal fun Classified.key(): String = "live-" + e.title + "|" + e.startUnix
 
 private fun eventStatusAt(e: ScheduleEvent, nowSec: Long): EventStatus {
     val start = e.startUnix ?: return EventStatus.NEXT
@@ -238,7 +273,7 @@ private fun Section(title: String, badge: String?, content: @Composable () -> Un
                 )
             }
         }
-        content()
+        EdgeSafeRow(START.dp, 48.dp, content)
     }
 }
 
@@ -269,11 +304,16 @@ private fun FilterPill(label: String, selected: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-private fun LiveCard(c: Classified, nowSec: Long, onClick: () -> Unit) {
+internal fun LiveCard(
+    c: Classified,
+    nowSec: Long,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
     val shape = RoundedCornerShape(14.dp)
     val mins = c.e.startUnix?.let { ((nowSec - it) / 60).coerceAtLeast(0) }
     Column(
-        Modifier
+        modifier
             .width(300.dp)
             .height(156.dp)
             .tvFocusable(shape = shape, scaleOnFocus = 1.06f, borderColor = Color.White, onClick = onClick)

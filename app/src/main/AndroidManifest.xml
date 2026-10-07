@@ -81,6 +81,12 @@
             android:name=".reminders.ReminderReceiver"
             android:exported="false" />
 
+        <!-- Result of an in-app update install session (UpdateCompile).
+             Not exported: only our own PendingIntent reaches it. -->
+        <receiver
+            android:name=".debug.UpdateResultReceiver"
+            android:exported="false" />
+
         <receiver
             android:name=".reminders.BootReceiver"
             android:exported="true">

@@ -149,6 +149,55 @@ internal val CalmScroll = object : BringIntoViewSpec {
     }
 }
 
+/**
+ * [CalmScroll] for one horizontal row of cards whose content padding keeps
+ * [start] and [end] clear of the screen edges. CalmScroll counts a card as
+ * visible once it is anywhere on screen, so a card could stop flush against
+ * the right edge with its ring and 1.08 scale cut off — on a TV that crops
+ * the picture's edges it was half gone. Here "visible" means clear of the
+ * edges by the row's own padding.
+ *
+ * Still converges (see CalmScroll): every card can reach that zone, since the
+ * padding is exactly what the first and last cards sit in, and a scroll
+ * aims past it (the 9% margin), so the next answer is 0. Not used for the
+ * page or for lists without that padding, where the zone is unreachable.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+internal fun EdgeSafeRow(
+    start: androidx.compose.ui.unit.Dp,
+    end: androidx.compose.ui.unit.Dp,
+    content: @Composable () -> Unit,
+) {
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val spec = remember(density, start, end) {
+        // 2 px of slack so float rounding at the ends of the row never
+        // leaves a card "just outside" a zone it can get no further into.
+        val lead = with(density) { start.toPx() } - 2f
+        val trail = with(density) { end.toPx() } - 2f
+        object : BringIntoViewSpec {
+            override val scrollAnimationSpec: AnimationSpec<Float> = CalmScroll.scrollAnimationSpec
+
+            override fun calculateScrollDistance(
+                offset: Float, size: Float, containerSize: Float,
+            ): Float {
+                if (size >= containerSize - lead - trail) {
+                    return CalmScroll.calculateScrollDistance(offset, size, containerSize)
+                }
+                val trailing = offset + size
+                if (offset >= lead && trailing <= containerSize - trail) return 0f
+                val margin = minOf(containerSize * 0.09f, (containerSize - size) / 2f)
+                    .coerceAtLeast(maxOf(lead, trail) + 2f)
+                return if (offset < lead) offset - margin else trailing - (containerSize - margin)
+            }
+        }
+    }
+    androidx.compose.runtime.CompositionLocalProvider(
+        LocalBringIntoViewSpec provides spec,
+        content = content,
+    )
+}
+
 @Composable
 fun TvTabs(state: UiState, vm: MainViewModel) {
     val context = LocalContext.current
@@ -195,7 +244,10 @@ fun TvTabs(state: UiState, vm: MainViewModel) {
     LaunchedEffect(Unit) {
         val until = SystemClock.elapsedRealtime() + 8_000
         while (!contentFocused && !userKeyed && SystemClock.elapsedRealtime() < until) {
-            runCatching { content.requestFocus() }
+            // A screen placing its own first focus (the TV home: Play, or
+            // the card BACK returns to) gets a head start. Racing it, this
+            // landed on whatever sat top-left and scrolled the page there.
+            if (!ContentFocusClaim.active) runCatching { content.requestFocus() }
             delay(250)
         }
     }
@@ -276,6 +328,16 @@ fun TvTabs(state: UiState, vm: MainViewModel) {
         )
         if (exitHint) ExitHint()
     }
+}
+
+/** Lets a tab's screen place its own first focus without the rail's generic
+ *  "focus the content" racing it. Time-limited, so a screen that never
+ *  manages it still ends up with the rail's fallback. */
+internal object ContentFocusClaim {
+    @Volatile private var until = 0L
+    fun claim(ms: Long) { until = SystemClock.elapsedRealtime() + ms }
+    fun release() { until = 0L }
+    val active: Boolean get() = SystemClock.elapsedRealtime() < until
 }
 
 @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)

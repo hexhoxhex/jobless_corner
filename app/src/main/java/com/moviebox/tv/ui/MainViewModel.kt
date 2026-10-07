@@ -681,6 +681,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun selectTab(tab: Tab) {
+        liveReturnHome = false
         _state.update { it.copy(tab = tab) }
         if (tab == Tab.LIVE) loadLiveIfStale()
     }
@@ -1497,7 +1498,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         lastAutoSwitchFailedAt = 0L
     }
 
+    /** A live match started from the home "Live now" row: BACK from the
+     *  player returns to Home rather than the Live tab. */
+    @Volatile private var liveReturnHome = false
+
+    fun playLiveFromHome(channelId: String) {
+        playScheduleChannel(channelId)
+        liveReturnHome = true
+    }
+
     fun playScheduleChannel(channelId: String) {
+        liveReturnHome = false
         val cached = _state.value.liveChannels.firstOrNull { it.id == channelId }
             ?: channelFromSchedule(channelId, _state.value.liveSchedule)
         if (cached != null) {
@@ -1608,11 +1619,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val s = _state.value
         if (s.screen != Screen.DETAIL || s.detailItem?.title != want) return
         autoPlayFor = null
-        val norm = { t: String -> t.trim().lowercase().replace(Regex("[^a-z0-9]+"), "") }
-        val resume = historyByKey.value.values
-            .filter { it.subjectId == d.subjectId || norm(it.title) == norm(want) }
-            .filter { !it.finished && it.positionMs > 30_000 }
-            .maxByOrNull { it.updatedAt }
+        // The billboard's "Resume S2 E4" label is drawn from this same rule,
+        // so the button does what it says.
+        val resume = resumeEntryFor(historyByKey.value.values, d.subjectId, want)
         if (d.isSeries && d.seasons.isNotEmpty()) {
             if (resume != null && resume.season > 0) {
                 playEpisode(resume.season, resume.episode, restoreResume = true)
@@ -2404,8 +2413,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         liveResolveFailures = 0
                         lastResolveFailureAt = 0L
                         com.moviebox.tv.debug.Telemetry.onPlayStopped()
+                        val home = liveReturnHome
+                        liveReturnHome = false
                         it.copy(
-                            screen = Screen.TABS, tab = Tab.LIVE,
+                            screen = Screen.TABS, tab = if (home) Tab.HOME else Tab.LIVE,
                             play = null,
                             currentLiveChannel = null,
                             useLiveWebPlayer = false,
@@ -2907,4 +2918,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun clearHistory() {
         viewModelScope.launch { watchDao.clear() }
     }
+}
+
+/** The history row billboard Play resumes: the newest unfinished one past
+ *  30 s for this title, matched by id or title (source ids rotate). The
+ *  billboard's label is drawn from the same rule. */
+internal fun resumeEntryFor(
+    history: Collection<WatchHistoryEntity>,
+    subjectId: String,
+    title: String,
+): WatchHistoryEntity? {
+    val norm = { t: String -> t.trim().lowercase().replace(Regex("[^a-z0-9]+"), "") }
+    val want = norm(title)
+    return history
+        .filter { it.subjectId == subjectId || norm(it.title) == want }
+        .filter { !it.finished && it.positionMs > 30_000 }
+        .maxByOrNull { it.updatedAt }
 }

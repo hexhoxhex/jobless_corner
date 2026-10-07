@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -47,6 +48,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -56,6 +58,7 @@ import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.focus.onFocusChanged
@@ -97,19 +100,49 @@ import kotlinx.coroutines.launch
  * green artwork), only the art scales, and entering a row brings the WHOLE
  * row — heading included — into view, which CalmScroll alone could not do.
  *
+ * Under Continue watching, "Live now": the matches on right now, as in the
+ * sports guide, watchable ones only. OK plays; BACK comes back here.
+ *
+ * Opening a card and coming BACK lands on that same card, scrolled where it
+ * was (HomeMemory): the home leaves composition while a title page or the
+ * player is up, and used to come back at the top with Play focused.
+ *
  * The phone keeps HomeScreen.
  */
 
 private const val START = 32
 private const val ROTATE_IDLE_MS = 9_000L
+private const val LIVE_ROW_MAX = 12
 
 private val Meta = Color(0xFFC9D0DA)
 private val Body = Color(0xFFD5DBE3)
 private val Dim = Color(0xFFA7B0BE)
+private val LiveRed = Color(0xFFC8313A)
+
+/**
+ * Where the viewer was when they opened something from the home, so BACK
+ * returns to that card rather than the top. Everything Compose remembers
+ * goes when the home leaves composition for the title page or the player;
+ * this outlives it. [focus] is consumed by the first home shown after.
+ */
+private object HomeMemory {
+    var columnIndex = 0
+    var columnOffset = 0
+    var heroIndex = 0
+    val rows = HashMap<String, Pair<Int, Int>>()
+    /** "row|item" of the card that was opened; null = open at the top. */
+    var focus: String? = null
+}
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun TvHomeScreen(state: UiState, vm: MainViewModel) {
+    // The home places its own first focus (Play, or the card BACK returns
+    // to); keep the rail's generic content focus out of the way until it
+    // has. Released below once done, or when there is no billboard to
+    // focus. Measured: the first start after an install takes ~4.5 s to
+    // bring the home up, so a fixed short head start was not enough.
+    remember { ContentFocusClaim.claim(8_000) }
     if (state.networkState == com.moviebox.tv.debug.NetworkMonitor.State.OfflineLong) {
         NetworkOfflinePage(onRetry = { vm.loadHome() })
         return
@@ -125,8 +158,43 @@ fun TvHomeScreen(state: UiState, vm: MainViewModel) {
     val continueWatching by vm.continueWatching.collectAsState()
     val recs by vm.recommendations.collectAsState()
     val favIds by vm.favouriteIds.collectAsState()
-    val listState = rememberLazyListState()
+    val history by vm.historyByKey.collectAsState()
+    // Back from a title page or the player: start where the viewer left.
+    val returning = remember { HomeMemory.focus }
+    val listState = rememberLazyListState(
+        if (returning != null) HomeMemory.columnIndex else 0,
+        if (returning != null) HomeMemory.columnOffset else 0,
+    )
+    val rowStates = remember { HashMap<String, LazyListState>() }
+    val restoreFocus = remember { FocusRequester() }
+    val opened: (String, String) -> Unit = { row, item ->
+        HomeMemory.columnIndex = listState.firstVisibleItemIndex
+        HomeMemory.columnOffset = listState.firstVisibleItemScrollOffset
+        HomeMemory.rows.clear()
+        rowStates.forEach { (k, st) ->
+            HomeMemory.rows[k] = st.firstVisibleItemIndex to st.firstVisibleItemScrollOffset
+        }
+        HomeMemory.focus = "$row|$item"
+    }
+    val rowState: @Composable (String) -> LazyListState = { key ->
+        val saved = if (returning != null) HomeMemory.rows[key] else null
+        rememberLazyListState(saved?.first ?: 0, saved?.second ?: 0).also { rowStates[key] = it }
+    }
+    val focusFor: (String, String) -> Modifier = { row, item ->
+        if (returning == "$row|$item") Modifier.focusRequester(restoreFocus) else Modifier
+    }
     var lastKeyAt by remember { mutableLongStateOf(SystemClock.uptimeMillis()) }
+    val nowSec by produceState(System.currentTimeMillis() / 1000) {
+        while (true) {
+            delay(60_000)
+            value = System.currentTimeMillis() / 1000
+        }
+    }
+    val liveNow = remember(state.liveSchedule, state.liveChannels, nowSec) {
+        liveNowOf(classifySchedule(state.liveSchedule, state.liveChannels), nowSec)
+            .filter { it.primary != null }
+            .take(LIVE_ROW_MAX)
+    }
     val billboardOnScreen by remember {
         derivedStateOf { listState.layoutInfo.visibleItemsInfo.any { it.key == "billboard" } }
     }
@@ -138,12 +206,48 @@ fun TvHomeScreen(state: UiState, vm: MainViewModel) {
     var billboardFocused by remember { mutableStateOf(false) }
     val openedAt = remember { SystemClock.uptimeMillis() }
     val hasHeroes = home.heroes.isNotEmpty()
+    val backToCard = returning != null && !returning.startsWith("billboard|")
     LaunchedEffect(hasHeroes) {
-        if (!hasHeroes) return@LaunchedEffect
+        if (backToCard) return@LaunchedEffect
+        if (!hasHeroes) {
+            ContentFocusClaim.release()
+            return@LaunchedEffect
+        }
         repeat(20) {
-            if (billboardFocused || lastKeyAt > openedAt) return@LaunchedEffect
+            if (billboardFocused || lastKeyAt > openedAt) {
+                ContentFocusClaim.release()
+                return@LaunchedEffect
+            }
+            // The billboard's art often arrives a few seconds after the
+            // rows. By then the rail has put focus on the first row and the
+            // list has kept that row on top, leaving the billboard above the
+            // screen where Play cannot be focused. Nobody has pressed
+            // anything yet, so take them back to the top.
+            if (listState.layoutInfo.visibleItemsInfo.none { it.key == "billboard" }) {
+                runCatching { listState.scrollToItem(0) }
+            }
             runCatching { playFocus.requestFocus() }
             delay(150)
+        }
+        ContentFocusClaim.release()
+    }
+    // Back on the card that was opened. Repeated briefly because the rail
+    // hands focus to the content's first card on its own as the tabs come
+    // back; stops the moment the viewer presses anything.
+    LaunchedEffect(Unit) {
+        if (!backToCard) {
+            HomeMemory.focus = null
+            return@LaunchedEffect
+        }
+        try {
+            repeat(12) {
+                if (lastKeyAt > openedAt) return@LaunchedEffect
+                runCatching { restoreFocus.requestFocus() }
+                delay(100)
+            }
+        } finally {
+            HomeMemory.focus = null
+            ContentFocusClaim.release()
         }
     }
 
@@ -173,13 +277,16 @@ fun TvHomeScreen(state: UiState, vm: MainViewModel) {
             item(key = "billboard") {
                 Billboard(
                     heroes = home.heroes,
+                    initialIndex = if (returning != null) HomeMemory.heroIndex else 0,
                     favIds = favIds,
+                    history = history.values,
                     playFocus = playFocus,
                     onFocus = { billboardFocused = it },
                     onScreen = { billboardOnScreen },
                     lastKeyAt = { lastKeyAt },
-                    onPlay = { vm.playFromHome(it) },
-                    onInfo = { vm.openItem(it) },
+                    onIndex = { HomeMemory.heroIndex = it },
+                    onPlay = { opened("billboard", "play"); vm.playFromHome(it) },
+                    onInfo = { opened("billboard", "info"); vm.openItem(it) },
                     onList = { vm.toggleFavourite(it) },
                 )
             }
@@ -194,11 +301,36 @@ fun TvHomeScreen(state: UiState, vm: MainViewModel) {
                     ) {
                         LazyRow(
                             Modifier.focusGroup().focusRestorer(),
+                            state = rowState("continue"),
                             contentPadding = PaddingValues(start = START.dp, end = 48.dp),
                             horizontalArrangement = Arrangement.spacedBy(18.dp),
                         ) {
                             items(continueWatching, key = { it.key }) { h ->
-                                ContinueCardTv(h) { vm.resumeFrom(h) }
+                                ContinueCardTv(h, focusFor("continue", h.key)) {
+                                    opened("continue", h.key)
+                                    vm.resumeFrom(h)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (liveNow.isNotEmpty()) {
+            item(key = "live") {
+                LiveRow(liveNow.size, liveNow.map { it.sport }.distinct().filter { it != "Other" }) {
+                    LazyRow(
+                        Modifier.focusGroup().focusRestorer(),
+                        state = rowState("live"),
+                        contentPadding = PaddingValues(start = START.dp, end = 48.dp),
+                        horizontalArrangement = Arrangement.spacedBy(18.dp),
+                    ) {
+                        items(liveNow, key = { it.key() }) { c ->
+                            LiveCard(c, nowSec, focusFor("live", c.key())) {
+                                c.primary?.let {
+                                    opened("live", c.key())
+                                    vm.playLiveFromHome(it.id)
+                                }
                             }
                         }
                     }
@@ -207,13 +339,22 @@ fun TvHomeScreen(state: UiState, vm: MainViewModel) {
         }
         if (recs.isNotEmpty()) {
             item(key = "recs") {
-                TvRow("For you") { PosterRow(recs, ranked = false) { vm.openItem(it) } }
+                TvRow("For you") {
+                    PosterRow(recs, ranked = false, rowState("recs"), { focusFor("recs", it) }) {
+                        opened("recs", it.subjectId); vm.openItem(it)
+                    }
+                }
             }
         }
         items(home.rows, key = { "row-" + it.title }) { row ->
             val ranked = listOf("Trending", "Top", "Ranking", "Most")
                 .any { row.title.contains(it, ignoreCase = true) }
-            TvRow(row.title) { PosterRow(row.items, ranked) { vm.openItem(it) } }
+            val rk = "row-" + row.title
+            TvRow(row.title) {
+                PosterRow(row.items, ranked, rowState(rk), { focusFor(rk, it) }) {
+                    opened(rk, it.subjectId); vm.openItem(it)
+                }
+            }
         }
     }
 }
@@ -236,21 +377,62 @@ private fun TvRow(title: String, content: @Composable () -> Unit) {
             title, color = Color.White, fontSize = 21.sp, fontWeight = FontWeight.Bold,
             modifier = Modifier.padding(start = START.dp),
         )
-        content()
+        EdgeSafeRow(START.dp, 48.dp, content)
+    }
+}
+
+/** "Live now" heading: a LIVE count and the sports on, as in the guide. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun LiveRow(count: Int, sports: List<String>, content: @Composable () -> Unit) {
+    val whole = remember { BringIntoViewRequester() }
+    val scope = rememberCoroutineScope()
+    Column(
+        Modifier
+            .bringIntoViewRequester(whole)
+            .onFocusChanged { if (it.hasFocus) scope.launch { whole.bringIntoView() } },
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Row(Modifier.padding(start = START.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("Live now", color = Color.White, fontSize = 21.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.width(12.dp))
+            Text(
+                "$count LIVE", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold,
+                modifier = Modifier.clip(RoundedCornerShape(6.dp)).background(LiveRed)
+                    .padding(horizontal = 8.dp, vertical = 3.dp),
+            )
+            if (sports.isNotEmpty()) {
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    sports.take(4).joinToString("  ·  "), color = Dim, fontSize = 15.sp,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        EdgeSafeRow(START.dp, 48.dp, content)
     }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun PosterRow(items: List<Item>, ranked: Boolean, onOpen: (Item) -> Unit) {
+private fun PosterRow(
+    items: List<Item>,
+    ranked: Boolean,
+    state: LazyListState,
+    focusFor: (String) -> Modifier,
+    onOpen: (Item) -> Unit,
+) {
     key(items.size, items.firstOrNull()?.subjectId, items.lastOrNull()?.subjectId) {
         LazyRow(
             Modifier.focusGroup().focusRestorer(),
+            state = state,
             contentPadding = PaddingValues(start = START.dp, end = 48.dp),
             horizontalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             itemsIndexed(items, key = { _, it -> it.subjectId }) { i, item ->
-                PosterCardTv(item, rank = if (ranked) i + 1 else null) { onOpen(item) }
+                PosterCardTv(item, rank = if (ranked) i + 1 else null, focusFor(item.subjectId)) {
+                    onOpen(item)
+                }
             }
         }
     }
@@ -260,18 +442,22 @@ private fun PosterRow(items: List<Item>, ranked: Boolean, onOpen: (Item) -> Unit
 @Composable
 private fun Billboard(
     heroes: List<Hero>,
+    initialIndex: Int,
     favIds: Set<String>,
+    history: Collection<WatchHistoryEntity>,
     playFocus: FocusRequester,
     onFocus: (Boolean) -> Unit,
     onScreen: () -> Boolean,
     lastKeyAt: () -> Long,
+    onIndex: (Int) -> Unit,
     onPlay: (Item) -> Unit,
     onInfo: (Item) -> Unit,
     onList: (Item) -> Unit,
 ) {
     val screen = LocalConfiguration.current
-    var index by rememberSaveable { mutableIntStateOf(0) }
+    var index by rememberSaveable { mutableIntStateOf(initialIndex) }
     val hero = heroes[index % heroes.size]
+    LaunchedEffect(index) { onIndex(index) }
     // Never rotate under a focused billboard: Play would start a different
     // title from the one the viewer is reading.
     var focusedHere by remember { mutableStateOf(false) }
@@ -333,11 +519,25 @@ private fun Billboard(
                 ) { h -> BillboardText(h) }
             }
             Row(
+                // UP from the rows lands on Play, not on whichever button
+                // happens to sit above the card (it was More info).
+                Modifier
+                    .focusProperties { enter = { playFocus } }
+                    .focusGroup(),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                // Says what OK will do: the rule Play itself resumes by.
+                val resume = remember(hero, history) {
+                    resumeEntryFor(history, hero.item.subjectId, hero.item.title)
+                }
+                val playLabel = when {
+                    resume == null -> "Play"
+                    resume.season > 0 -> "Resume S${resume.season} E${resume.episode}"
+                    else -> "Resume"
+                }
                 PillButton(
-                    "Play", Icons.Rounded.PlayArrow, primary = true,
+                    playLabel, Icons.Rounded.PlayArrow, primary = true,
                     modifier = Modifier.focusRequester(playFocus),
                 ) { onPlay(hero.item) }
                 PillButton("More info", Icons.Rounded.Info) { onInfo(hero.item) }
@@ -439,13 +639,14 @@ private fun BillboardText(h: Hero) {
 }
 
 @Composable
-private fun ContinueCardTv(h: WatchHistoryEntity, onClick: () -> Unit) {
+private fun ContinueCardTv(h: WatchHistoryEntity, focus: Modifier, onClick: () -> Unit) {
     val shape = RoundedCornerShape(10.dp)
     Column(Modifier.width(228.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Box(
             Modifier
                 .fillMaxWidth()
                 .aspectRatio(16f / 9f)
+                .then(focus)
                 .tvFocusable(shape = shape, scaleOnFocus = 1.08f, borderColor = Color.White, onClick = onClick)
                 .clip(shape)
                 .background(SurfaceElevated),
@@ -486,13 +687,14 @@ private fun ContinueCardTv(h: WatchHistoryEntity, onClick: () -> Unit) {
 }
 
 @Composable
-private fun PosterCardTv(item: Item, rank: Int?, onClick: () -> Unit) {
+private fun PosterCardTv(item: Item, rank: Int?, focus: Modifier, onClick: () -> Unit) {
     val shape = RoundedCornerShape(10.dp)
     Column(Modifier.width(132.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Box(
             Modifier
                 .fillMaxWidth()
                 .aspectRatio(2f / 3f)
+                .then(focus)
                 .tvFocusable(shape = shape, scaleOnFocus = 1.08f, borderColor = Color.White, onClick = onClick)
                 .clip(shape),
         ) {

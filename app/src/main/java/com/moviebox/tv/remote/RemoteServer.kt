@@ -866,6 +866,30 @@ class RemoteServer(
             // Live playback A/B switch. Tunneled video bypasses ExoPlayer's
             // render callbacks, so frame counters read zero either way --
             // the only honest test is to flip it and look at the screen.
+            // Test the update installer end to end with a local APK, without
+            // publishing a release: adb push it to the updates folder, then
+            // POST here over adb forward. Superuser (loopback) only, and only
+            // files in the app's own updates folder.
+            uri == "/api/debug/selfupdate" && method == Method.POST -> {
+                if (!RemoteAccess.isSuperuser(dev)) {
+                    newFixedLengthResponse(
+                        Response.Status.FORBIDDEN, "application/json",
+                        "{\"error\":\"Superuser only\"}",
+                    )
+                } else {
+                    val dir = com.moviebox.tv.debug.UpdateInstaller.updatesDir(context)
+                    val f = p("name")?.let { n -> dir?.let { java.io.File(it, java.io.File(n).name) } }
+                    if (f == null || !f.isFile) {
+                        json("{\"ok\":false,\"error\":\"no such file in the updates folder\"}")
+                    } else {
+                        Thread {
+                            com.moviebox.tv.debug.UpdateInstaller.install(context, f)
+                        }.start()
+                        json("{\"ok\":true}")
+                    }
+                }
+            }
+
             uri == "/api/debug/tunneling" -> {
                 p("on")?.let {
                     com.moviebox.tv.data.LiveTuning.setForceNoTunneling(

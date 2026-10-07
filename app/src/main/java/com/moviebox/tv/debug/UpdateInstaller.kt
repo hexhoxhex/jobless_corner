@@ -88,7 +88,7 @@ object UpdateInstaller {
                     downloadProgress.value = DownloadStatus(
                         100, file.length() / 1_000_000f, file.length() / 1_000_000f,
                     )
-                    withContext(Dispatchers.Main) { install(app, file) }
+                    install(app, file)
                     downloadProgress.value = null
                     return@launch
                 }
@@ -160,6 +160,11 @@ object UpdateInstaller {
         }.getOrDefault(false)
     }
 
+    /** Where downloaded updates live; also the only place the debug
+     *  self-update endpoint will install from. */
+    fun updatesDir(context: Context): File? =
+        context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+
     private fun destinationFile(context: Context, version: String): File {
         val dir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
             ?: context.cacheDir
@@ -175,6 +180,19 @@ object UpdateInstaller {
     }
 
     /**
+     * Install [apk] compiled: an install session carrying its profile
+     * (UpdateCompile), so the update is fast from its first launch instead
+     * of after the TV's next overnight compile. The system still asks the
+     * viewer to confirm. Falls back to the installer screen if the session
+     * cannot be used. Call off the main thread: it copies the APK.
+     */
+    fun install(context: Context, apk: File): Boolean {
+        val dm = UpdateCompile.buildDexMetadata(context, apk)
+        if (UpdateCompile.installWithSession(context, apk, dm)) return true
+        return installViaInstallerScreen(context, apk)
+    }
+
+    /**
      * Open the system install confirmation for [apk]. The user taps once
      * and the upgrade replaces this very process. Because the new APK is
      * signed with the same key (assuming the CI release pipeline) Android
@@ -183,7 +201,7 @@ object UpdateInstaller {
      * Returns true if the intent was dispatched; false if we couldn't
      * resolve a URI for the file (sanity-check during dev).
      */
-    fun install(context: Context, apk: File): Boolean {
+    fun installViaInstallerScreen(context: Context, apk: File): Boolean {
         if (!apk.exists() || apk.length() == 0L) {
             Log.w(TAG, "install skipped — file missing or empty: ${apk.path}")
             return false
