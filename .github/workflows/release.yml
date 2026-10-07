@@ -27,12 +27,6 @@ permissions:
   # release and upload assets via the per-job GITHUB_TOKEN.
   contents: write
 
-env:
-  # Silence the "Node.js 20 actions deprecated" warning. setup-java@v4
-  # and setup-gradle@v4 still ship a node20 binary; this opts them into
-  # node24 ahead of the June 16 2026 hard cutover.
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
-
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
@@ -55,13 +49,16 @@ jobs:
           ref: ${{ steps.tag.outputs.tag }}
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        # v5, not v6: v6 moved caching into a closed-source component
+        # whose separate Terms of Use the upgrade would accept. v5 is
+        # already Node 24 and MIT throughout.
+        uses: gradle/actions/setup-gradle@v5
 
       - name: Decode keystore + write local.properties
         env:
@@ -111,7 +108,7 @@ jobs:
           echo "sha256=$(sha256sum "$dst" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - name: Create / update GitHub release with APK
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: ${{ steps.tag.outputs.tag }}
@@ -153,13 +150,16 @@ jobs:
           ref: ${{ steps.tag.outputs.tag }}
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        # v5, not v6: v6 moved caching into a closed-source component
+        # whose separate Terms of Use the upgrade would accept. v5 is
+        # already Node 24 and MIT throughout.
+        uses: gradle/actions/setup-gradle@v5
 
       - name: Build Windows MSI
         shell: bash
@@ -180,7 +180,7 @@ jobs:
           echo "sha256=$(sha256sum "$dst" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - name: Attach MSI to GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           fail_on_unmatched_files: true
