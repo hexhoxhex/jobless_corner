@@ -264,6 +264,41 @@ object DisguisedSegment {
         return if (got > 0) out to got else null
     }
 
+    /**
+     * Lowest and highest PES presentation timestamp (90 kHz ticks) in the
+     * TS bytes, across all streams — for logging whether consecutive
+     * segments join up. Null when no PTS is found. Read-only, one pass.
+     */
+    fun ptsRange(b: ByteArray, len: Int): Pair<Long, Long>? {
+        var lo = Long.MAX_VALUE
+        var hi = Long.MIN_VALUE
+        var o = 0
+        while (o + PACKET <= len) {
+            if (b[o] != SYNC) { o++; continue }
+            val pusi = (b[o + 1].toInt() and 0x40) != 0
+            val afc = (b[o + 3].toInt() ushr 4) and 0x3
+            var p = o + 4
+            if (afc == 2 || afc == 3) p += 1 + (b[o + 4].toInt() and 0xFF)
+            if (pusi && (afc == 1 || afc == 3) && p + 14 <= o + PACKET &&
+                b[p] == 0.toByte() && b[p + 1] == 0.toByte() && b[p + 2] == 1.toByte()
+            ) {
+                val flags = b[p + 7].toInt() and 0xFF
+                if (flags and 0x80 != 0) {
+                    val q = p + 9
+                    val pts = ((b[q].toLong() and 0x0E) shl 29) or
+                        ((b[q + 1].toLong() and 0xFF) shl 22) or
+                        ((b[q + 2].toLong() and 0xFE) shl 14) or
+                        ((b[q + 3].toLong() and 0xFF) shl 7) or
+                        ((b[q + 4].toLong() and 0xFE) ushr 1)
+                    if (pts < lo) lo = pts
+                    if (pts > hi) hi = pts
+                }
+            }
+            o += PACKET
+        }
+        return if (lo == Long.MAX_VALUE) null else lo to hi
+    }
+
     private fun paeth(a: Int, b: Int, c: Int): Int {
         val p = a + b - c
         val pa = kotlin.math.abs(p - a)

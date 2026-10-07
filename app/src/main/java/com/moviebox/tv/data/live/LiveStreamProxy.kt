@@ -525,8 +525,12 @@ class LiveStreamProxy(
             )
         }
 
+        val segT0 = System.currentTimeMillis()
         var resp = fetchOnce(originalUrl)
         if (resp == null) {
+            // Was silent: a failed segment left no trace in the log.
+            Log.w(DIAG, "PROXY ch=$channelId SEG ${shortSeg(originalUrl)} fetch failed " +
+                "after ${System.currentTimeMillis() - segT0}ms")
             return NanoHTTPD.newFixedLengthResponse(
                 NanoHTTPD.Response.Status.SERVICE_UNAVAILABLE,
                 "text/plain", "segment fetch failed",
@@ -661,16 +665,28 @@ class LiveStreamProxy(
                 }.toByteArray()
             }.getOrNull()
             resp.close()
+            val dlMs = System.currentTimeMillis() - segT0
             if (file == null) {
+                Log.w(DIAG, "PROXY ch=$channelId SEG ${shortSeg(originalUrl)} read failed " +
+                    "after ${dlMs}ms (len=$len)")
                 return NanoHTTPD.newFixedLengthResponse(
                     NanoHTTPD.Response.Status.SERVICE_UNAVAILABLE,
                     "text/plain", "segment read failed",
                 )
             }
             val size = file.size
+            val tU = System.currentTimeMillis()
             val ts = DisguisedSegment.unwrap(file)
             if (ts != null) {
                 val (buf, tsLen) = ts
+                // One line per segment: how long it took to arrive and to
+                // unwrap, and its timestamp span — so a gap between two
+                // consecutive segments, or one arriving too slowly to keep
+                // up, is visible instead of guessed at.
+                val pts = DisguisedSegment.ptsRange(buf, tsLen)
+                Log.i(DIAG, "PROXY ch=$channelId SEGSTAT ${shortSeg(originalUrl)} " +
+                    "bytes=$size/$len dl=${dlMs}ms unwrap=${System.currentTimeMillis() - tU}ms " +
+                    "ts=$tsLen pts=" + (pts?.let { "%.3f..%.3f".format(it.first / 90000.0, it.second / 90000.0) } ?: "none"))
                 if (unwrapLogged.add(channelId)) {
                     Log.i(
                         DIAG,
@@ -867,7 +883,7 @@ class LiveStreamProxy(
             state.lastInnerFetchDurationMs = 0L
             return NanoHTTPD.newFixedLengthResponse(
                 NanoHTTPD.Response.Status.OK,
-                "application/vnd.apple.mpegurl", cachedForFast,
+                "application/vnd.apple.mpegurl", withHoldBack(cachedForFast),
             )
         }
 
@@ -981,9 +997,11 @@ class LiveStreamProxy(
                 // fetches reach our proxy which can detect 403 in one
                 // place, invalidate + re-resolve, and refetch with a
                 // fresh-token URL transparently.
-                val rewrittenBody = rewriteSegmentUrls(
-                    body = servedBody, channelId = channelId,
-                    baseUrl = entry.innerUrl,
+                val rewrittenBody = withHoldBack(
+                    rewriteSegmentUrls(
+                        body = servedBody, channelId = channelId,
+                        baseUrl = entry.innerUrl,
+                    ),
                 )
                 return NanoHTTPD.newFixedLengthResponse(
                     NanoHTTPD.Response.Status.OK,
@@ -1172,6 +1190,75 @@ class LiveStreamProxy(
             builder.header(name, value)
         }
         return builder
+    }
+
+    private val holdBackLogged: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /**
+     * Tell the player how far behind the live edge to sit, measured from the
+     * END OF THIS PLAYLIST: the whole window less 2 s, capped at 30 s — and
+     * take the source's clock out of it.
+     *
+     * Nicktoons, 2026-10-07: 81 rebuffers in one session while Nick had 3.
+     * The player held an absolute 14-22 s wall-clock offset (target 25),
+     * computed from the playlist's PROGRAM-DATE-TIME, and that source's clock
+     * runs ~15 s behind real time, so most of the 25 s were "spent" before a
+     * single segment. Measured: the player sat 6-13 s behind the newest
+     * segment of a 20 s window, its buffer swinging down to 3.1 s, and every
+     * 5 s segment that arrived a little late was a freeze.
+     *
+     * Hence HOLD-BACK (playlist-relative) and NO PROGRAM-DATE-TIME. With the
+     * clock stamps left in, ExoPlayer still anchored on the source's wall
+     * clock even with HOLD-BACK: the gap between that clock and ours jumps by
+     * up to a segment each time one is published, so its default position
+     * landed 1-6 s into the window (measured) — right in the back-edge danger
+     * zone, where the drift seek then looped. Without them the position is
+     * exact, window minus HOLD-BACK, every time. There is no live speed
+     * control without them either, which is the point: the delay a stall
+     * adds stays as cushion for the next slow stretch instead of being sped
+     * back up and lost. (Playlists with EXT-X-DATERANGE keep their stamps;
+     * date ranges are placed by them.)
+     */
+    private fun withHoldBack(original: String): String {
+        if (!original.startsWith("#EXTM3U")) return original
+        val body = if (original.contains("#EXT-X-PROGRAM-DATE-TIME") &&
+            !original.contains("#EXT-X-DATERANGE")
+        ) {
+            original.lineSequence()
+                .filterNot { it.trimStart().startsWith("#EXT-X-PROGRAM-DATE-TIME") }
+                .joinToString("\n")
+        } else original
+        if (body.contains("#EXT-X-SERVER-CONTROL")) return body
+        var target = 0.0
+        var window = 0.0
+        var longest = 0.0
+        for (line in body.lineSequence()) {
+            val t = line.trim()
+            if (t.startsWith("#EXT-X-TARGETDURATION:")) {
+                target = t.substringAfter(':').trim().toDoubleOrNull() ?: 0.0
+            } else if (t.startsWith("#EXTINF:")) {
+                val d = t.substringAfter(':').substringBefore(',').trim().toDoubleOrNull() ?: 0.0
+                window += d
+                if (d > longest) longest = d
+            }
+        }
+        if (window <= 0.0) return body
+        val segment = maxOf(longest, target)
+        // As far back as the window allows, less a 2 s margin: the cushion is
+        // what rides out a source that publishes slower than real time
+        // (Nicktoons measured one 5 s segment per 6.4 s for minutes). Sitting
+        // near the back edge is harmless: what must stay inside the window is
+        // the next segment to LOAD, which is at the front.
+        val hold = (window - HOLD_BACK_MARGIN_S).coerceIn(maxOf(target, 1.0), HOLD_BACK_MAX_S)
+        val nl = body.indexOf('\n')
+        if (nl < 0) return body
+        if (holdBackLogged.add("%.1f".format(hold))) {
+            Log.i(DIAG, "PROXY HOLD-BACK=%.3f (window %.2f s, segment %.2f s)".format(hold, window, segment))
+        }
+        return body.substring(0, nl + 1) +
+            "#EXT-X-SERVER-CONTROL:HOLD-BACK=" +
+            String.format(java.util.Locale.US, "%.3f", hold) + "\n" +
+            body.substring(nl + 1)
     }
 
     /** Rewrite each segment URL in [body] to point at our /seg/$channelId/
@@ -1730,6 +1817,13 @@ class LiveStreamProxy(
          *  trying, which is long enough to ride out a transient blip and
          *  short enough that the user is not left guessing. */
         private const val SOURCE_DOWN_STREAK = 4
+
+        /** Never sit more than this far behind the newest segment, however
+         *  long the source's window is (CNN publishes ~60 s). */
+        private const val HOLD_BACK_MAX_S = 30.0
+
+        /** Distance kept from the back edge of the window. */
+        private const val HOLD_BACK_MARGIN_S = 2.0
 
         /** How long to stop re-resolving a source we have declared down.
          *  Short enough that a recovered channel comes back on the next

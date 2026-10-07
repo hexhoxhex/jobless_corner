@@ -1778,6 +1778,7 @@ private fun VideoPlayer(
     // first stopped advancing. Both reset per channel session.
     var stallLastPos by remember(mediaUrl) { mutableStateOf(Long.MIN_VALUE) }
     var stallSameSince by remember(mediaUrl) { mutableStateOf(0L) }
+    var liveOffsetLogTick by remember(mediaUrl) { mutableStateOf(0) }
     // VOD stall watchdog state (see the else-branch of the 1 s tick).
     var vodStallLastPos by remember(mediaUrl) { mutableStateOf(Long.MIN_VALUE) }
     var vodStallSince by remember(mediaUrl) { mutableStateOf(0L) }
@@ -2014,7 +2015,29 @@ private fun VideoPlayer(
                 //                             kept re-triggering rebuffer
                 //                             before the buffer had actually
                 //                             recovered.
-                .setBufferDurationsMs(22_000, 30_000, 1_500, 5_000)
+                // 2026-10-07: 22/30 s -> 40/60 s, with a 48 MB byte ceiling.
+                // The loader can never get ahead of the live edge, so these
+                // only matter when the source gives us MORE than real time —
+                // and some do it in bursts: Nicktoons ran at 0.62-0.76x real
+                // time for minutes (measured from a PC, independent of the
+                // TV), its lag swinging 10-35 s, then published the backlog
+                // at once. A 30 s cap threw that burst away; banking it is
+                // what carries playback through the next slow stretch.
+                // 48 MB = ~87 s at 4.4 Mbps, ~28 s at 13.8 Mbps, well inside
+                // the TV's 192 MB heap.
+                //
+                // bufferAfterRebuffer 5 s -> 10 s, same day. A stall at the
+                // live edge means the SOURCE is behind, and resuming on one
+                // 5 s segment just stalls again on the next late one: that
+                // was the "plays, freezes, plays" cycle — 10 freezes in 90 s
+                // while Nicktoons ran slow, then 20 clean minutes. Waiting
+                // for two segments halves the freezes and leaves twice the
+                // cushion for the next slow stretch. DefaultLoadControl caps
+                // this at half the live target (18 s hold-back -> 9 s), so
+                // short windows can never wait longer than they hold.
+                .setBufferDurationsMs(40_000, 60_000, 1_500, 10_000)
+                .setTargetBufferBytes(48 * 1024 * 1024)
+                .setPrioritizeTimeOverSizeThresholds(false)
                 .setBackBuffer(0, false)
                 .build()
         } else {
@@ -2491,14 +2514,18 @@ private fun VideoPlayer(
                     // The proactive 1 Hz seek catches catastrophic drift
                     // before BLW; seeks land at exactly target offset so
                     // the player resumes at 1.0× — no slow-motion penalty.
+                    // No target/min/max offset here any more (2026-10-07).
+                    // Those were absolute wall-clock numbers measured against
+                    // the playlist's PROGRAM-DATE-TIME, and sources whose
+                    // clock lags real time quietly lost that much cushion:
+                    // Nicktoons' clock is ~13 s behind, so "25 s behind live"
+                    // was 6-13 s behind the newest segment and it rebuffered
+                    // 81 times in a session. Left unset, ExoPlayer takes the
+                    // HOLD-BACK the proxy writes into each playlist (the
+                    // window less 2 s, measured from the playlist's end; the
+                    // proxy also strips the clock stamps, so no speed control
+                    // eats the cushion back after a stall).
                     MediaItem.LiveConfiguration.Builder()
-                        .setTargetOffsetMs(LIVE_TARGET_OFFSET_MS)
-                        // Bracket the target, and keep the whole range
-                        // inside the ~24 s window. The previous 14-22 s
-                        // range did not even contain the 25 s target it
-                        // was meant to bound.
-                        .setMinOffsetMs(14_000)
-                        .setMaxOffsetMs(22_000)
                         .setMinPlaybackSpeed(1.0f)
                         // v0.1.57: 1.08 → 1.12. Let ExoPlayer's NATIVE
                         // live-offset control catch drift back to target
@@ -2659,7 +2686,13 @@ private fun VideoPlayer(
                 val dur = exo.duration
                 val pos = exo.currentPosition
                 // (c) — anchored to stale window. Most severe; check first.
-                if (dur > 0 && pos < -STALE_FATAL_MS) {
+                // Only when actually stuck: since the cushion became the whole
+                // window (HOLD-BACK, 2026-10-07) the player routinely plays
+                // from a 20-30 s buffer while sitting behind the oldest listed
+                // segment, and re-preparing that would skip 30 s of content
+                // that was about to play.
+                val playingFromBuffer = exo.isPlaying && exo.totalBufferedDuration > 5_000
+                if (dur > 0 && pos < -STALE_FATAL_MS && !playingFromBuffer) {
                     android.util.Log.w(
                         "LiveDiag",
                         "PLAYER STALL_RECOVERY pos=$pos dur=$dur " +
@@ -2699,7 +2732,33 @@ private fun VideoPlayer(
                         stallLastPos = pos
                         stallSameSince = 0L
                     }
+                    // Where the player actually sits vs where it aims — the
+                    // numbers behind every "it keeps buffering" on live.
+                    liveOffsetLogTick += 1
+                    if (liveOffsetLogTick % 10 == 0) {
+                        val w = androidx.media3.common.Timeline.Window()
+                        val tl = exo.currentTimeline
+                        val target = if (!tl.isEmpty) {
+                            tl.getWindow(exo.currentMediaItemIndex, w).liveConfiguration?.targetOffsetMs
+                        } else null
+                        android.util.Log.i(
+                            "LiveDiag",
+                            "PLAYER LIVEOFFSET current=${exo.currentLiveOffset} target=$target " +
+                                "pos=$pos dur=$dur buffered=${exo.totalBufferedDuration} " +
+                                "speed=${exo.playbackParameters.speed}",
+                        )
+                    }
                     // (a) — back-edge drift. Silent seek.
+                    // Unchanged on purpose (a no-op on windows up to ~26 s).
+                    // Tried 2026-10-07 to seek to the default position here
+                    // instead: on Nicktoons' 20 s window the source stalls its
+                    // playlist ~10 s then publishes 2-3 segments at once,
+                    // which drops pos near 0 for a moment — harmless, the next
+                    // segments are still listed — and the seek skipped ~5 s of
+                    // content each time, throwing away the cushion it had
+                    // just regained. Sitting near the back edge is not a
+                    // danger; the loader falling behind is, and that surfaces
+                    // as BehindLiveWindow, which is recovered below.
                     if (pos in 0L..DRIFT_DANGER_MS) {
                         val target = (dur - LIVE_TARGET_OFFSET_MS).coerceAtLeast(0L)
                         if (target > pos + 1_000) {
@@ -3116,10 +3175,10 @@ private fun VideoPlayer(
                                 behindLiveWindow.clear()
                                 // Recover in place; don't escalate to WebView.
                                 runCatching {
-                                    val win = exo.duration
-                                    if (win > 0) {
-                                        exo.seekTo(maxOf(0L, win - LIVE_TARGET_OFFSET_MS))
-                                    } else exo.seekToDefaultPosition()
+                                    // The player's own default position IS
+                                    // the hold-back target; "window - 25 s"
+                                    // was the back edge on a 20 s window.
+                                    exo.seekToDefaultPosition()
                                     exo.prepare()
                                 }
                                 return
@@ -3146,10 +3205,8 @@ private fun VideoPlayer(
                             // to live (e.g. dur - 2 s) was making the
                             // player slow down to 0.95× to "catch back"
                             // to target — visible slow-motion.
-                            val win = exo.duration
-                            if (win > 0) {
-                                exo.seekTo(maxOf(0L, win - LIVE_TARGET_OFFSET_MS))
-                            } else exo.seekToDefaultPosition()
+                            // Default position = the hold-back target.
+                            exo.seekToDefaultPosition()
                             exo.prepare()
                         }
                         return
