@@ -17,6 +17,8 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -206,4 +208,39 @@ private class TvFocusIndicationNode(
             style = Stroke(width = w),
         )
     }
+}
+
+/**
+ * Compose's `focusRestorer()` minus its pin. Use this one for every lazy row.
+ *
+ * Coming back into a row lands on the card you left, as before. What is
+ * gone: on leaving a row, Compose 1.7's FocusRestorerNode PINS the card you
+ * left so it stays composed, and releases that pin on re-entry or detach.
+ * When the row's contents change meanwhile, the lazy list disposes the
+ * pinned card and releases its pins itself — and the restorer's later
+ * release throws "Release should only be called once", killing the app.
+ * Reproduced on the title page every time: focus an episode, UP to the
+ * season tabs, move to another season (the episode row is replaced), BACK.
+ * The same holds for any row whose items change under it (Live now ticks
+ * every minute, home rows refresh).
+ *
+ * The pin only kept a card that had scrolled out of composition
+ * restorable; a row does not scroll while focus is elsewhere, so the card
+ * is still there. If it is not, entry falls back to the default.
+ */
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+fun Modifier.tvFocusRestorer(): Modifier = composed {
+    val requester = remember { androidx.compose.ui.focus.FocusRequester() }
+    this
+        .then(Modifier.focusRequester(requester))
+        .focusProperties {
+            exit = {
+                requester.saveFocusedChild()
+                androidx.compose.ui.focus.FocusRequester.Default
+            }
+            enter = {
+                if (requester.restoreFocusedChild()) androidx.compose.ui.focus.FocusRequester.Cancel
+                else androidx.compose.ui.focus.FocusRequester.Default
+            }
+        }
 }

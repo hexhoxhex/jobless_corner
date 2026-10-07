@@ -42,7 +42,6 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.runtime.key
-import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -132,7 +131,7 @@ fun HomeScreen(state: UiState, vm: MainViewModel) {
                         LazyRow(
                             modifier = Modifier
                                 .focusGroup()
-                                .focusRestorer(),
+                                .tvFocusRestorer(),
                             contentPadding = PaddingValues(horizontal = if (isTv) 32.dp else 16.dp),
                             horizontalArrangement = Arrangement.spacedBy(if (isTv) 16.dp else 12.dp),
                         ) {
@@ -157,7 +156,7 @@ fun HomeScreen(state: UiState, vm: MainViewModel) {
                         LazyRow(
                             modifier = Modifier
                                 .focusGroup()
-                                .focusRestorer(),
+                                .tvFocusRestorer(),
                             contentPadding = PaddingValues(horizontal = if (isTv) 32.dp else 16.dp),
                             horizontalArrangement = Arrangement.spacedBy(if (isTv) 16.dp else 12.dp),
                         ) {
@@ -189,7 +188,7 @@ fun HomeScreen(state: UiState, vm: MainViewModel) {
                     LazyRow(
                         modifier = Modifier
                             .focusGroup()
-                            .focusRestorer(),
+                            .tvFocusRestorer(),
                         contentPadding = PaddingValues(horizontal = 16.dp),
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                     ) {

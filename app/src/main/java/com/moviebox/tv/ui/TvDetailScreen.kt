@@ -55,7 +55,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -582,7 +581,7 @@ private fun SeasonTabs(
         // Full width: it was capped next to the count and cut "Season 6"
         // in half on an 11-season show.
         LazyRow(
-            Modifier.focusRestorer(),
+            Modifier.tvFocusRestorer(),
             contentPadding = PaddingValues(start = SAFE_START.dp, end = 48.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
@@ -629,7 +628,7 @@ private fun EpisodeRow(
     onDownload: (Int) -> Unit,
 ) {
     LazyRow(
-        Modifier.focusRestorer(),
+        Modifier.tvFocusRestorer(),
         contentPadding = PaddingValues(start = SAFE_START.dp, end = 48.dp),
         horizontalArrangement = Arrangement.spacedBy(18.dp),
     ) {
@@ -756,7 +755,7 @@ private fun CastRow(cast: List<com.moviebox.tv.data.CastMember>, onPick: (String
             modifier = Modifier.padding(start = SAFE_START.dp),
         )
         LazyRow(
-            Modifier.focusRestorer(),
+            Modifier.tvFocusRestorer(),
             contentPadding = PaddingValues(start = SAFE_START.dp, end = 48.dp),
             horizontalArrangement = Arrangement.spacedBy(16.dp),
         ) {

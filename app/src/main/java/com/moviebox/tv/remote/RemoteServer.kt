@@ -890,6 +890,23 @@ class RemoteServer(
                 }
             }
 
+            // The last crash's full stack trace (App's crash handler writes
+            // it; the crash screen shows only the message). Superuser only.
+            uri == "/api/debug/lastcrash" -> {
+                if (!RemoteAccess.isSuperuser(dev)) {
+                    newFixedLengthResponse(
+                        Response.Status.FORBIDDEN, "application/json",
+                        "{\"error\":\"Superuser only\"}",
+                    )
+                } else {
+                    val f = java.io.File(context.filesDir, com.moviebox.tv.App.LAST_CRASH_FILE)
+                    newFixedLengthResponse(
+                        Response.Status.OK, "text/plain; charset=utf-8",
+                        if (f.isFile) f.readText() else "no crash recorded",
+                    )
+                }
+            }
+
             uri == "/api/debug/tunneling" -> {
                 p("on")?.let {
                     com.moviebox.tv.data.LiveTuning.setForceNoTunneling(

@@ -3,7 +3,6 @@ package com.moviebox.tv.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusGroup
-import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -226,7 +225,7 @@ private fun ChannelsView(state: UiState, vm: MainViewModel, isTv: Boolean) {
                 // which feels broken.
                 modifier = Modifier
                     .focusGroup()
-                    .focusRestorer(),
+                    .tvFocusRestorer(),
                 columns = GridCells.Fixed(columns),
                 contentPadding = PaddingValues(
                     start = if (isTv) 32.dp else 16.dp,

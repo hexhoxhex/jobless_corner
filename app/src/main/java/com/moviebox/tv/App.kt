@@ -91,12 +91,26 @@ class App : Application(), ImageLoaderFactory {
         /** App-context handle for static helpers that need a Context but live
          *  outside the activity/VM (e.g. the headless WebView play resolver). */
         @Volatile lateinit var instance: App
+
+        /** The last uncaught exception's trace, in filesDir. */
+        const val LAST_CRASH_FILE = "last_crash.txt"
     }
 
     /** Show a friendly crash screen instead of the system "app stopped". */
     private fun installCrashHandler() {
         Thread.setDefaultUncaughtExceptionHandler { _, throwable ->
             Log.e("VijanaBaruBaru", "Uncaught exception", throwable)
+            // Keep the whole trace: the crash screen shows only the message,
+            // and the TV's 64 KiB log had rotated past it within minutes
+            // ("Release should only be called once", 2026-10-07, had to be
+            // reproduced on the emulator to see where it came from). Read it
+            // back with GET /api/debug/lastcrash.
+            runCatching {
+                java.io.File(filesDir, LAST_CRASH_FILE).writeText(
+                    "${java.util.Date()} v${BuildConfig.VERSION_NAME}\n" +
+                        Log.getStackTraceString(throwable),
+                )
+            }
             runCatching {
                 startActivity(
                     Intent(this, CrashActivity::class.java)

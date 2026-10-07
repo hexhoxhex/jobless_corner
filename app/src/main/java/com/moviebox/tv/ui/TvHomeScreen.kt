@@ -60,7 +60,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -300,7 +299,7 @@ fun TvHomeScreen(state: UiState, vm: MainViewModel) {
                         continueWatching.lastOrNull()?.key,
                     ) {
                         LazyRow(
-                            Modifier.focusGroup().focusRestorer(),
+                            Modifier.focusGroup().tvFocusRestorer(),
                             state = rowState("continue"),
                             contentPadding = PaddingValues(start = START.dp, end = 48.dp),
                             horizontalArrangement = Arrangement.spacedBy(18.dp),
@@ -320,7 +319,7 @@ fun TvHomeScreen(state: UiState, vm: MainViewModel) {
             item(key = "live") {
                 LiveRow(liveNow.size, liveNow.map { it.sport }.distinct().filter { it != "Other" }) {
                     LazyRow(
-                        Modifier.focusGroup().focusRestorer(),
+                        Modifier.focusGroup().tvFocusRestorer(),
                         state = rowState("live"),
                         contentPadding = PaddingValues(start = START.dp, end = 48.dp),
                         horizontalArrangement = Arrangement.spacedBy(18.dp),
@@ -424,7 +423,7 @@ private fun PosterRow(
 ) {
     key(items.size, items.firstOrNull()?.subjectId, items.lastOrNull()?.subjectId) {
         LazyRow(
-            Modifier.focusGroup().focusRestorer(),
+            Modifier.focusGroup().tvFocusRestorer(),
             state = state,
             contentPadding = PaddingValues(start = START.dp, end = 48.dp),
             horizontalArrangement = Arrangement.spacedBy(16.dp),

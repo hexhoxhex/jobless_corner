@@ -39,7 +39,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
@@ -126,7 +125,7 @@ fun TvSportsSchedule(state: UiState, vm: MainViewModel) {
         item(key = "filters") {
             EdgeSafeRow(START.dp, 48.dp) {
                 LazyRow(
-                    Modifier.focusRestorer(),
+                    Modifier.tvFocusRestorer(),
                     contentPadding = PaddingValues(start = START.dp, end = 48.dp),
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
@@ -140,7 +139,7 @@ fun TvSportsSchedule(state: UiState, vm: MainViewModel) {
             item(key = "live") {
                 Section("Live now", badge = "${liveNow.size} LIVE") {
                     LazyRow(
-                        Modifier.focusRestorer(),
+                        Modifier.tvFocusRestorer(),
                         contentPadding = PaddingValues(start = START.dp, end = 48.dp),
                         horizontalArrangement = Arrangement.spacedBy(18.dp),
                     ) {
