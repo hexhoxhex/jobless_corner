@@ -62,6 +62,16 @@ import com.moviebox.tv.ui.theme.Surface
 import com.moviebox.tv.ui.theme.TextMuted
 import com.moviebox.tv.ui.theme.TextPrimary
 
+/**
+ * Test switch: lay the app out as on a TV on any device. Set only by
+ * launching with `--ez force_tv true` (see MainActivity), so the TV screens
+ * can be exercised on a phone emulator while the real TV is in use. Has no
+ * effect on a normal launch.
+ */
+object ForceTvLayout {
+    @Volatile var enabled: Boolean = false
+}
+
 /** Read with `val isTv = LocalIsTv.current` from any Composable. */
 val LocalIsTv = compositionLocalOf { false }
 
@@ -244,6 +254,7 @@ private fun BoxScope.ErrorBanner(message: String, onDismiss: () -> Unit) {
  * UI_MODE_TYPE_TELEVISION as a hint.
  */
 private fun detectTv(context: Context, configuration: Configuration): Boolean {
+    if (ForceTvLayout.enabled) return true
     val pm = context.packageManager
     if (pm.hasSystemFeature("android.software.leanback") ||
         pm.hasSystemFeature("amazon.hardware.fire_tv")

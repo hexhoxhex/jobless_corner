@@ -23,6 +23,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (intent?.getBooleanExtra("force_tv", false) == true) {
+            com.moviebox.tv.ui.ForceTvLayout.enabled = true
+        }
         // Init early — Repository.home() (called from the ViewModel's init block
         // the moment AppRoot composes) reads it.
         TastePrefs.init(applicationContext)

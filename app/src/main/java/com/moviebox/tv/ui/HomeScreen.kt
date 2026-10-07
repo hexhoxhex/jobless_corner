@@ -59,6 +59,11 @@ import com.moviebox.tv.ui.theme.TextMuted
 @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable
 fun HomeScreen(state: UiState, vm: MainViewModel) {
+    // TVs get the billboard home (TvHomeScreen.kt); below is the phone home.
+    if (LocalIsTv.current) {
+        TvHomeScreen(state, vm)
+        return
+    }
     // OfflineLong = network has been gone >3min. Take over the whole
     // screen with a clean explainer rather than letting the home try to
     // load forever. Soft "Checking…" banner is rendered inline as the
@@ -360,7 +365,7 @@ private fun HeroBanner(hero: Hero, onClick: () -> Unit) {
 /** Update-available banner shown above the Home hero. Polite, dismissable.
  *  Triggers a browser-intent to the release APK URL on the user's TV. */
 @Composable
-private fun UpdateBanner(
+internal fun UpdateBanner(
     update: com.moviebox.tv.debug.UpdateChecker.Result,
     onUpdate: () -> Unit,
     onDismiss: () -> Unit,
@@ -466,7 +471,7 @@ private fun UpdateBanner(
  *  connectivity. Keeps the rest of the home visible (history, cached
  *  rows) so the user can still scroll through what's already loaded. */
 @Composable
-private fun NetworkCheckingBanner() {
+internal fun NetworkCheckingBanner() {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -496,7 +501,7 @@ private fun NetworkCheckingBanner() {
 
 /** Full-page replacement shown when we've been offline >3 minutes. */
 @Composable
-private fun NetworkOfflinePage(onRetry: () -> Unit) {
+internal fun NetworkOfflinePage(onRetry: () -> Unit) {
     val longGone = com.moviebox.tv.debug.NetworkMonitor.timeInStateMs() >=
         com.moviebox.tv.debug.NetworkMonitor.LONG_FAIL_MS
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {

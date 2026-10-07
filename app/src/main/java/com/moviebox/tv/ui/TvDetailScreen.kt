@@ -499,7 +499,7 @@ private fun SkeletonLines() {
 }
 
 @Composable
-private fun PillButton(
+internal fun PillButton(
     label: String,
     icon: ImageVector?,
     primary: Boolean = false,
@@ -541,7 +541,7 @@ private fun PillButton(
 }
 
 @Composable
-private fun IconAction(icon: ImageVector, description: String, onClick: () -> Unit) {
+internal fun IconAction(icon: ImageVector, description: String, onClick: () -> Unit) {
     val shape = RoundedCornerShape(12.dp)
     Box(
         Modifier

@@ -591,6 +591,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         homeFlow.value = next
                         s.copy(home = next)
                     }
+                    enrichHero(hero)
                 },
                 onRow = { row ->
                     _state.update { s ->
@@ -604,6 +605,35 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     _state.update { it.copy(error = e.message) }
                 },
             )
+        }
+    }
+
+    /** The billboard heroes come from the source's trending list, which has
+     *  no synopsis and only a portrait cover — the TV billboard showed a
+     *  cropped poster and no text. Fold in TMDB's landscape backdrop,
+     *  overview and rating, in the background, one hero at a time. */
+    private fun enrichHero(hero: com.moviebox.tv.data.Hero) {
+        viewModelScope.launch {
+            val meta = runCatching {
+                repo.enrichMetadata(hero.item.title, hero.item.year, hero.item.isSeries)
+            }.getOrNull() ?: return@launch
+            _state.update { s ->
+                val cur = s.home ?: return@update s
+                val heroes = cur.heroes.map { h ->
+                    if (h.item.subjectId != hero.item.subjectId) h
+                    else h.copy(
+                        item = h.item.copy(
+                            overview = h.item.overview?.takeIf { it.isNotBlank() } ?: meta.overview,
+                            rating = h.item.rating?.takeIf { it > 0 } ?: meta.rating,
+                        ),
+                        backdropUrl = meta.backdropUrl ?: h.backdropUrl,
+                        tagline = h.tagline.ifBlank { meta.overview.orEmpty() },
+                    )
+                }
+                val next = cur.copy(heroes = heroes)
+                homeFlow.value = next
+                s.copy(home = next)
+            }
         }
     }
 
@@ -1516,7 +1546,45 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Billboard "Play" on the TV home: open the title (so BACK from the
+     *  player lands on its page, as it would from the title page) and start
+     *  playback as soon as its details arrive — resuming where the viewer
+     *  left off if they have watched it before. */
+    fun playFromHome(item: Item) {
+        openItem(item)
+        autoPlayFor = item.title
+    }
+
+    /** Title (not id: openItem may swap a TMDB id for a source id) that
+     *  should start playing once its details load. Any other openItem clears
+     *  it, so a stale request never fires on a later title. */
+    @Volatile private var autoPlayFor: String? = null
+
+    private fun autoPlayIfRequested(d: Details) {
+        val want = autoPlayFor ?: return
+        val s = _state.value
+        if (s.screen != Screen.DETAIL || s.detailItem?.title != want) return
+        autoPlayFor = null
+        val norm = { t: String -> t.trim().lowercase().replace(Regex("[^a-z0-9]+"), "") }
+        val resume = historyByKey.value.values
+            .filter { it.subjectId == d.subjectId || norm(it.title) == norm(want) }
+            .filter { !it.finished && it.positionMs > 30_000 }
+            .maxByOrNull { it.updatedAt }
+        if (d.isSeries && d.seasons.isNotEmpty()) {
+            if (resume != null && resume.season > 0) {
+                playEpisode(resume.season, resume.episode, restoreResume = true)
+            } else {
+                val first = d.seasons.firstOrNull { it.realEpisodes?.isNotEmpty() ?: (it.episodes > 0) }
+                    ?: d.seasons.first()
+                playEpisode(first.season, first.realEpisodes?.firstOrNull() ?: 1, restoreResume = true)
+            }
+        } else {
+            playMovie()
+        }
+    }
+
     fun openItem(item: Item) {
+        autoPlayFor = null
         // A source pick applies to ONE title; opening another clears it.
         pinnedProvider = null
         rememberCover(item)
@@ -1573,6 +1641,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             runCatching { repo.details(resolvedId, titleHint = item.title) }
                 .onSuccess { d ->
                     _state.update { it.copy(details = d, detailLoading = false) }
+                    autoPlayIfRequested(d)
                     // Verify in the background — the Play button reflects the
                     // result before the user even reaches for it.
                     precheckPlayback(resolvedId, d)
