@@ -1984,6 +1984,10 @@ private fun VideoPlayer(
     val sourceDownState = rememberUpdatedState(onLiveSourceDown)
     val fatalLiveState = rememberUpdatedState(onFatalLiveError)
     val stabilisingState = rememberUpdatedState(onStabilising)
+    // The polling loop below is keyed on Unit, so it must read the title
+    // through this or the phone keeps showing the episode the player
+    // opened on after an auto-advance.
+    val titleState = rememberUpdatedState(title)
     // Track BehindLiveWindow recovery timestamps per-channel-session.
     // remember(mediaUrl) means this resets when the user switches
     // channels, so a previous channel's rotting manifest doesn't
@@ -3086,7 +3090,7 @@ private fun VideoPlayer(
                 }
             }
             RemoteController.updatePlayback(
-                title, exo.currentPosition, exo.duration.coerceAtLeast(0),
+                titleState.value, exo.currentPosition, exo.duration.coerceAtLeast(0),
                 exo.isPlaying,
             )
             // Feed the Debug pane's realtime metrics.

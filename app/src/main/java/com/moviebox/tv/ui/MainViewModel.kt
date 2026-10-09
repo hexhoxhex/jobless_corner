@@ -2779,8 +2779,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             // Mirror it onto the TV home screen's "Continue watching" row so
             // the last thing watched is one click from the launcher, the way
             // the big apps do it. One entry, replaced each time.
-            runCatching {
-                com.moviebox.tv.tv.WatchNext.publish(getApplication(), row)
+            // Off the main thread: it is a cross-process query/delete/insert
+            // and used to run on every 5 s save during playback.
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                runCatching {
+                    com.moviebox.tv.tv.WatchNext.publish(getApplication(), row)
+                }
             }
         }
     }

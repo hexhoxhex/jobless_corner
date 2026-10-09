@@ -4,6 +4,7 @@ import android.content.ContentUris
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.SystemClock
 import android.util.Log
 import androidx.tvprovider.media.tv.TvContractCompat
 import androidx.tvprovider.media.tv.WatchNextProgram
@@ -38,10 +39,33 @@ object WatchNext {
     /** Within this of the end it is finished; drop it from the row. */
     private const val END_SLACK_MS = 20_000L
 
+    /** Playback saves progress every 5 s; the launcher's row only needs a
+     *  fresh position now and then. Each publish is a query, a delete and an
+     *  insert in the TV provider, and wakes the launcher's observer. */
+    private const val MIN_INTERVAL_MS = 60_000L
+
+    /** Set once the provider turns out not to exist (phones, emulators), so
+     *  we stop asking every 5 s for the rest of the process. */
+    @Volatile private var unavailable = false
+    private var lastSig: String? = null
+    private var lastAt = 0L
+
     fun publish(context: Context, h: WatchHistoryEntity) {
+        if (unavailable) return
+        val finished = h.durationMs > 0 && h.positionMs >= h.durationMs - END_SLACK_MS
+        // A new title/episode, or reaching the end, goes out at once; the
+        // same episode moving along is refreshed at most once a minute.
+        if (!finished && h.positionMs < MIN_POSITION_MS) return
+        val sig = h.key + if (finished) "#done" else ""
+        val now = SystemClock.elapsedRealtime()
+        synchronized(this) {
+            if (sig == lastSig && now - lastAt < MIN_INTERVAL_MS) return
+            lastSig = sig
+            lastAt = now
+        }
         runCatching {
             val ctx = context.applicationContext
-            if (h.durationMs > 0 && h.positionMs >= h.durationMs - END_SLACK_MS) {
+            if (finished) {
                 // Finished — clear the row instead of inviting someone to
                 // resume the last 10 seconds of something they completed.
                 clear(ctx)
@@ -93,6 +117,9 @@ object WatchNext {
             Log.i(TAG, "published \"${h.title}\" -> $uri")
         }.onFailure {
             // A launcher without the provider, or one that refuses the write.
+            if (it is IllegalArgumentException &&
+                it.message.orEmpty().contains("Unknown URL")
+            ) unavailable = true
             Log.i(TAG, "not published: ${it.message}")
         }
     }
