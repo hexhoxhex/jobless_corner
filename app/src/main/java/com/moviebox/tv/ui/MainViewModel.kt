@@ -2289,8 +2289,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun onDpadUsed() {
         dpadCount++
         val now = System.currentTimeMillis()
+        // Not over a playing video: the tip landed on the seek bar mid-scrub.
         if (dpadCount >= 8 && now - lastSuggestAt > 180_000 &&
-            !_state.value.showRemote
+            !_state.value.showRemote && _state.value.screen != Screen.PLAYER
         ) {
             dpadCount = 0
             lastSuggestAt = now

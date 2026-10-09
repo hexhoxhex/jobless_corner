@@ -101,6 +101,21 @@ object RemoteController {
      *  navigates the overlay buttons (overlay visible). Defaults to true
      *  because PlayerScreen mounts with the overlay open on entry. */
     @Volatile var playerOverlayVisible: Boolean = true
+
+    /** The player's smooth-scrub entry point (PlayerScreen registers it):
+     *  (forward, key repeat count) -> handled. Null off the player. */
+    @Volatile var scrubHandler: ((Boolean, Int) -> Boolean)? = null
+
+    /** True while a D-pad scrub is under way, so its key repeats keep going
+     *  to the scrub even once the controls are on screen. */
+    @Volatile var scrubActive: (() -> Boolean)? = null
+
+    /** The running activity, for the debug held-key test. */
+    @Volatile var activityRef: WeakReference<android.app.Activity>? = null
+
+    fun dispatchKey(event: android.view.KeyEvent) = main.post {
+        activityRef?.get()?.dispatchKeyEvent(event)
+    }
     private var vmRef: WeakReference<MainViewModel>? = null
 
     @Volatile var nowPlayingTitle: String = ""

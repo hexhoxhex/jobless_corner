@@ -44,6 +44,7 @@ import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
+import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -58,6 +59,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -430,6 +432,85 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
     }
     val seekStep = 10_000L  // mirrors the SPA's ±10s buttons for muscle-memory consistency
 
+    // ---- Smooth D-pad scrubbing (2026-10-09) ----
+    // LEFT / RIGHT (and the remote's rewind / fast-forward keys) move a
+    // preview position along the bar while the video keeps playing; the
+    // player seeks ONCE, [SCRUB_COMMIT_MS] after the last press, or on OK.
+    // It used to seek on every press — each one a rebuffer — and a held key
+    // fired a seek per auto-repeat from a position refreshed only every
+    // 500 ms, so it lurched instead of gliding ("not a 15 sec skip").
+    // A tap moves 10 s; holding speeds up from ~30 s of video per second to
+    // ~90 s and then ~4 min, measured in time held, not key repeats (remotes
+    // repeat at different rates).
+    val scrubScope = androidx.compose.runtime.rememberCoroutineScope()
+    var scrubFrom by remember { mutableLongStateOf(0L) }
+    var scrubHoldStart by remember { mutableLongStateOf(0L) }
+    var scrubLastKey by remember { mutableLongStateOf(0L) }
+    var scrubCommitJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    val commitScrub: () -> Unit = {
+        scrubCommitJob?.cancel()
+        if (scrubbing) {
+            android.util.Log.d("Scrub", "commit seekTo=$scrubTo")
+            exoRef?.seekTo(scrubTo)
+            positionMs = scrubTo
+            scrubbing = false
+        }
+    }
+    val scrubKey: (Boolean, Int) -> Unit = { forward, repeat ->
+        val exo = exoRef
+        val dur = exo?.duration?.takeIf { it > 0 }
+        if (exo != null && dur != null) {
+            val now = SystemClock.uptimeMillis()
+            if (!scrubbing) {
+                scrubbing = true
+                scrubTo = exo.currentPosition
+                scrubFrom = scrubTo
+                scrubLastKey = now
+            }
+            if (repeat == 0) scrubHoldStart = now
+            val step = if (repeat == 0) SCRUB_TAP_MS else {
+                val held = now - scrubHoldStart
+                val perSecond = when {
+                    held < 1_500 -> 30_000L
+                    held < 3_500 -> 90_000L
+                    else -> 240_000L
+                }
+                val dt = (now - scrubLastKey).coerceIn(16L, 250L)
+                (perSecond * dt / 1000).coerceIn(1_000L, maxOf(10_000L, dur / 12))
+            }
+            scrubLastKey = now
+            scrubTo = (scrubTo + if (forward) step else -step)
+                .coerceIn(0L, (dur - 2_000L).coerceAtLeast(0L))
+            android.util.Log.d("Scrub", "key fwd=$forward repeat=$repeat step=$step to=$scrubTo")
+            controlsVisible = true
+            bumpControls()
+            scrubCommitJob?.cancel()
+            scrubCommitJob = scrubScope.launch {
+                kotlinx.coroutines.delay(SCRUB_COMMIT_MS)
+                commitScrub()
+            }
+        }
+    }
+    // MainActivity sees the arrow keys first (so overlay buttons can't
+    // swallow a seek); it hands them here while the controls are hidden or
+    // a scrub is under way.
+    val scrubKeyNow by rememberUpdatedState(scrubKey)
+    val isLiveForScrub by rememberUpdatedState(play?.isLive == true)
+    DisposableEffect(Unit) {
+        com.moviebox.tv.remote.RemoteController.scrubHandler = { forward, repeat ->
+            if (isLiveForScrub) false else {
+                if (!controlsVisible) focusSeekBarOnShow = true
+                scrubKeyNow(forward, repeat)
+                true
+            }
+        }
+        com.moviebox.tv.remote.RemoteController.scrubActive = { scrubbing }
+        onDispose {
+            com.moviebox.tv.remote.RemoteController.scrubHandler = null
+            com.moviebox.tv.remote.RemoteController.scrubActive = null
+        }
+    }
+
     Box(
         Modifier.fillMaxSize().background(Color.Black)
             .focusRequester(playerFocus)
@@ -463,11 +544,11 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                     Key.MediaPlay -> { exo.playWhenReady = true; return@onKeyEvent true }
                     Key.MediaPause -> { exo.playWhenReady = false; return@onKeyEvent true }
                     Key.MediaRewind, Key.MediaSkipBackward -> {
-                        if (!isLiveNow) exo.seekTo((exo.currentPosition - seekStep).coerceAtLeast(0))
+                        if (!isLiveNow) scrubKey(false, evt.nativeKeyEvent.repeatCount)
                         controlsVisible = true; bumpControls(); return@onKeyEvent true
                     }
                     Key.MediaFastForward, Key.MediaSkipForward -> {
-                        if (!isLiveNow) exo.seekTo(exo.currentPosition + seekStep)
+                        if (!isLiveNow) scrubKey(true, evt.nativeKeyEvent.repeatCount)
                         controlsVisible = true; bumpControls(); return@onKeyEvent true
                     }
                     else -> {}
@@ -485,15 +566,15 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                 when (evt.key) {
                     Key.DirectionLeft -> {
                         if (!isLiveNow) {
-                            exo.seekTo((exo.currentPosition - seekStep).coerceAtLeast(0))
                             focusSeekBarOnShow = true
+                            scrubKey(false, evt.nativeKeyEvent.repeatCount)
                         }
                         controlsVisible = true; true
                     }
                     Key.DirectionRight -> {
                         if (!isLiveNow) {
-                            exo.seekTo(exo.currentPosition + seekStep)
                             focusSeekBarOnShow = true
+                            scrubKey(true, evt.nativeKeyEvent.repeatCount)
                         }
                         controlsVisible = true; true
                     }
@@ -953,6 +1034,16 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
             ) {
                 // Live streams don't seek; show only the play/pause toggle.
                 if (play?.isLive != true) {
+                    // Start over: back to 0:00 of what is playing.
+                    SkipBtn(
+                        Icons.Filled.SkipPrevious,
+                        onInteract = bumpControls,
+                    ) {
+                        scrubCommitJob?.cancel()
+                        scrubbing = false
+                        exoRef?.seekTo(0)
+                        positionMs = 0
+                    }
                     SkipBtn(
                         Icons.Filled.Replay10,
                         onInteract = bumpControls,
@@ -1016,18 +1107,16 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                             if (evt.type != KeyEventType.KeyDown) return@onKeyEvent false
                             when (evt.key) {
                                 Key.DirectionLeft -> {
-                                    exoRef?.seekTo((positionMs - seekStep).coerceAtLeast(0))
-                                    bumpControls(); true
+                                    scrubKey(false, evt.nativeKeyEvent.repeatCount); true
                                 }
                                 Key.DirectionRight -> {
-                                    exoRef?.seekTo(
-                                        (positionMs + seekStep)
-                                            .coerceAtMost(durationMs.coerceAtLeast(0)),
-                                    )
-                                    bumpControls(); true
+                                    scrubKey(true, evt.nativeKeyEvent.repeatCount); true
                                 }
                                 Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> {
-                                    exoRef?.let { it.playWhenReady = !it.isPlaying }
+                                    // OK while scrubbing = "go there now";
+                                    // otherwise play / pause as before.
+                                    if (scrubbing) commitScrub()
+                                    else exoRef?.let { it.playWhenReady = !it.isPlaying }
                                     bumpControls(); true
                                 }
                                 else -> false   // UP handled by focusProperties
@@ -1078,6 +1167,29 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                         )
                     }
                 }
+            }
+        }
+
+        // ---- Where a D-pad scrub will land ----
+        if (scrubbing && play != null && !play.isLive) {
+            val delta = scrubTo - scrubFrom
+            // Just above the seek bar, clear of the buttons in the middle.
+            Column(
+                Modifier.align(Alignment.BottomCenter)
+                    .padding(bottom = 120.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(Color(0xB3000000))
+                    .padding(horizontal = 22.dp, vertical = 12.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text(
+                    formatTime(scrubTo), color = Color.White,
+                    fontSize = 34.sp, fontWeight = FontWeight.Bold,
+                )
+                Text(
+                    (if (delta < 0) "Back " else "Forward ") + formatTime(kotlin.math.abs(delta)),
+                    color = Color(0xFFC9D0DA), fontSize = 15.sp,
+                )
             }
         }
 
@@ -1246,6 +1358,12 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
         }
     }
 }
+
+/** A single tap of LEFT / RIGHT on the seek bar. */
+private const val SCRUB_TAP_MS: Long = 10_000L
+
+/** Quiet time after the last press before the player actually seeks. */
+private const val SCRUB_COMMIT_MS: Long = 700L
 
 /** How early (before content end) the Up Next overlay starts showing.
  *  Sized for the typical end-credit length so the user sees the card during

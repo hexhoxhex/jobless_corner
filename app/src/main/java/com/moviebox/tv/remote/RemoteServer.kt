@@ -894,6 +894,46 @@ class RemoteServer(
                 }
             }
 
+            // Hold a remote key down for ?ms= (default 2000) with auto-repeats
+            // every 50 ms, as a physical remote does — the only way to test
+            // hold-to-scrub without a remote in hand (adb can't inject a held
+            // key on these images). Superuser (loopback) only.
+            uri == "/api/debug/holdkey" && method == Method.POST -> {
+                if (!RemoteAccess.isSuperuser(dev)) {
+                    newFixedLengthResponse(
+                        Response.Status.FORBIDDEN, "application/json",
+                        "{\"error\":\"Superuser only\"}",
+                    )
+                } else {
+                    val code = p("key")?.toIntOrNull() ?: android.view.KeyEvent.KEYCODE_DPAD_RIGHT
+                    val ms = (p("ms")?.toLongOrNull() ?: 2_000L).coerceIn(50L, 15_000L)
+                    // Apps may not inject input (INJECT_EVENTS), so the events
+                    // go straight to the activity's dispatchKeyEvent — the
+                    // entry point a physical remote's keys reach too.
+                    Thread {
+                        val down = android.os.SystemClock.uptimeMillis()
+                        var repeat = 0
+                        while (android.os.SystemClock.uptimeMillis() - down < ms) {
+                            RemoteController.dispatchKey(
+                                android.view.KeyEvent(
+                                    down, android.os.SystemClock.uptimeMillis(),
+                                    android.view.KeyEvent.ACTION_DOWN, code, repeat,
+                                ),
+                            )
+                            repeat++
+                            Thread.sleep(if (repeat == 1) 400 else 50)
+                        }
+                        RemoteController.dispatchKey(
+                            android.view.KeyEvent(
+                                down, android.os.SystemClock.uptimeMillis(),
+                                android.view.KeyEvent.ACTION_UP, code, 0,
+                            ),
+                        )
+                    }.start()
+                    json("{\"ok\":true}")
+                }
+            }
+
             // The last crash's full stack trace (App's crash handler writes
             // it; the crash screen shows only the message). Superuser only.
             uri == "/api/debug/lastcrash" -> {

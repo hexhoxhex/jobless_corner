@@ -23,6 +23,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        RemoteController.activityRef = java.lang.ref.WeakReference(this)
         if (intent?.getBooleanExtra("force_tv", false) == true) {
             com.moviebox.tv.ui.ForceTvLayout.enabled = true
         }
@@ -85,7 +86,8 @@ class MainActivity : ComponentActivity() {
 
     /** Notice TV-remote (D-pad) use so we can suggest the phone remote. */
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-        when (keyCode) {
+        // Presses, not a held key's auto-repeats (20 a second).
+        if (event?.repeatCount == 0) when (keyCode) {
             KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN,
             KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,
             KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER ->
@@ -129,27 +131,39 @@ class MainActivity : ComponentActivity() {
                     // MEDIA_REWIND / MEDIA_FAST_FORWARD on dedicated remote
                     // keys still seek unconditionally — those keys have
                     // exactly one meaning.
-                    KeyEvent.KEYCODE_DPAD_LEFT -> {
+                    // Controls hidden (or a scrub under way): the arrows glide
+                    // a preview along the seek bar and the player seeks once
+                    // when they stop (PlayerScreen's scrub). It used to seek
+                    // 10 s per press, and a held key queued a seek on every
+                    // auto-repeat.
+                    KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                        val scrubbing = RemoteController.scrubActive?.invoke() == true
+                        if (overlayUp && !scrubbing) return super.dispatchKeyEvent(event)
+                        val forward = event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT
+                        if (RemoteController.scrubHandler?.invoke(forward, event.repeatCount) == true) {
+                            if (event.repeatCount == 0) vm.onDpadUsed()
+                            return true
+                        }
                         if (overlayUp) return super.dispatchKeyEvent(event)
-                        exo.seekTo((exo.currentPosition - 10_000).coerceAtLeast(0))
-                        vm.onDpadUsed()
-                        return true
-                    }
-                    KeyEvent.KEYCODE_DPAD_RIGHT -> {
-                        if (overlayUp) return super.dispatchKeyEvent(event)
-                        exo.seekTo(exo.currentPosition + 10_000)
+                        exo.seekTo(
+                            if (forward) exo.currentPosition + 10_000
+                            else (exo.currentPosition - 10_000).coerceAtLeast(0),
+                        )
                         vm.onDpadUsed()
                         return true
                     }
                     KeyEvent.KEYCODE_MEDIA_REWIND,
-                    KeyEvent.KEYCODE_MEDIA_SKIP_BACKWARD -> {
-                        exo.seekTo((exo.currentPosition - 10_000).coerceAtLeast(0))
-                        vm.onDpadUsed()
-                        return true
-                    }
+                    KeyEvent.KEYCODE_MEDIA_SKIP_BACKWARD,
                     KeyEvent.KEYCODE_MEDIA_FAST_FORWARD,
                     KeyEvent.KEYCODE_MEDIA_SKIP_FORWARD -> {
-                        exo.seekTo(exo.currentPosition + 10_000)
+                        val forward = event.keyCode == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD ||
+                            event.keyCode == KeyEvent.KEYCODE_MEDIA_SKIP_FORWARD
+                        if (RemoteController.scrubHandler?.invoke(forward, event.repeatCount) != true) {
+                            exo.seekTo(
+                                if (forward) exo.currentPosition + 10_000
+                                else (exo.currentPosition - 10_000).coerceAtLeast(0),
+                            )
+                        }
                         vm.onDpadUsed()
                         return true
                     }
