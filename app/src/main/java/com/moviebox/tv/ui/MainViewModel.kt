@@ -2500,6 +2500,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             // That source can't serve this title — say so and stay on the
             // stream that WAS working rather than leaving a dead player.
             pinnedProvider = null
+            // The chain's "No source has this title" would otherwise sit over
+            // the video that is still playing.
+            com.moviebox.tv.data.live.LiveStatus.clear()
             _state.update {
                 it.copy(
                     play = previous, playLoading = false,
@@ -2534,6 +2537,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             "VodDiag", "re-resolving stream, resume at ${positionMs / 1000}s",
         )
         _state.update { it.copy(error = null) }
+        com.moviebox.tv.net.H5Api.dropCachedStreams()
         resolve()
     }
 
@@ -2549,18 +2553,41 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      *  and a quality drop both failed to get frames moving again. Banning the
      *  failed source is what stops it re-picking the same dead stream. */
     fun failoverProvider() {
-        val current = _state.value.play?.provider
-        val next = Repository.Provider.entries.firstOrNull { !it.label.equals(current, true) }
-            ?: return
-        android.util.Log.w(
-            "VodDiag", "stall failover: '$current' -> '${next.label}'",
-        )
-        pinnedProvider = next
-        _state.update {
-            it.copy(error = "Stream stalled — switching to ${next.label}…")
+        val current = Repository.Provider.entries.firstOrNull {
+            it.label.equals(_state.value.play?.provider, true)
         }
+        // Remember every source that failed for THIS episode and walk on past
+        // all of them. This used to pin "the first provider that isn't the
+        // current one", which only ever went one step and could bounce
+        // between two dead sources.
+        val key = failoverKey()
+        if (failedFor != key) {
+            failedProviders.clear()
+            failedFor = key
+        }
+        current?.let { failedProviders += it }
+        // It was remembered as this title's source because it answered with
+        // a link; that link doesn't play, so stop sending retries there first.
+        val ctx = getApplication<android.app.Application>()
+        if (current != null &&
+            com.moviebox.tv.data.ProviderMemory.preferredFor(ctx, subjectId) == current.label
+        ) com.moviebox.tv.data.ProviderMemory.forget(ctx, subjectId)
+        android.util.Log.w(
+            "VodDiag",
+            "failover: '${current?.label}' failed; skipping " +
+                failedProviders.joinToString { it.label },
+        )
+        // A source the viewer picked whose stream is dead is no longer a
+        // choice to honour.
+        pinnedProvider = null
         resolve()
     }
+
+    /** Sources whose stream failed for the episode in [failedFor]. */
+    private val failedProviders = mutableSetOf<Repository.Provider>()
+    private var failedFor: String? = null
+    private fun failoverKey() =
+        "$subjectId|${_state.value.currentSe}|${_state.value.currentEp}"
 
 
     private fun resolve() {
@@ -2607,6 +2634,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     season = se, episode = ep,
                     dub = dub,
                     only = pinnedProvider,
+                    exclude = if (failedFor == failoverKey()) failedProviders.toSet()
+                    else emptySet(),
                 )
             }
             var primary = attempt(originalSe, originalEp)
@@ -2653,6 +2682,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 val reloadAt = pendingResumeMs
                 pendingResumeMs = null
                 streamReloading = false
+                // A reload that hands back the very link that just failed
+                // can't help: nothing changes for the player, so it sat on
+                // the error with "Loading from VidNest…" up for good. Move on
+                // to another source and resume at the same spot there.
+                if (reloadAt != null && p.mediaUrl == _state.value.play?.mediaUrl) {
+                    android.util.Log.w(
+                        "VodDiag",
+                        "reload returned the link that just failed — trying another source",
+                    )
+                    slowHint.cancel()
+                    pendingResumeMs = reloadAt
+                    failoverProvider()
+                    return@onSuccess
+                }
                 val resume = when {
                     reloadAt != null -> reloadAt
                     skipNow -> 0L

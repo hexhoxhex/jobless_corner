@@ -619,6 +619,7 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
         } else if (play != null && play.mediaUrl.isNotBlank()) {
             VideoPlayer(
                 mediaUrl = play.mediaUrl,
+                forceHls = play.hls,
                 headers = play.headers,
                 // Subtitles are drawn by the app (SubtitleText below), so
                 // the player is not handed the files: its language-based
@@ -1887,6 +1888,8 @@ private fun CircleBtn(
 
 @Composable
 private fun VideoPlayer(
+    /** Treat [mediaUrl] as HLS even when its path doesn't look like one. */
+    forceHls: Boolean = false,
     mediaUrl: String,
     /** Headers this stream's CDN requires (Referer/Origin). See [StreamHeaders]. */
     headers: Map<String, String> = emptyMap(),
@@ -2070,6 +2073,9 @@ private fun VideoPlayer(
     // One shot at "try a different quality" before muting the film, so a
     // variant whose audio ALSO fails can't ping-pong between qualities.
     val audioQualityTried = remember { mutableStateOf(false) }
+    // Re-resolves since the last rendered frame. A source whose fresh links
+    // fail the same way would otherwise be re-resolved forever.
+    val reloadsSinceFrame = remember { mutableStateOf(0) }
     LaunchedEffect(mediaUrl) { audioDisabled.value = false }
 
     // resilience uses it to cap max bitrate after repeated stalls.
@@ -2181,7 +2187,7 @@ private fun VideoPlayer(
 
                 override fun createDataSource(): androidx.media3.datasource.HttpDataSource {
                     delegate.setDefaultRequestProperties(
-                        Constants.mediaHeaders + StreamHeaders.current,
+                        Constants.mediaHeadersFor(StreamHeaders.current),
                     )
                     return delegate.createDataSource()
                 }
@@ -2821,7 +2827,7 @@ private fun VideoPlayer(
             // UnrecognizedInputFormatException instead of using HlsMediaSource.
             val b = MediaItem.Builder().setUri(mediaUrl)
                 .setSubtitleConfigurations(subs)
-            if (looksLikeHls(mediaUrl)) b.setMimeType(MimeTypes.APPLICATION_M3U8)
+            if (forceHls || looksLikeHls(mediaUrl)) b.setMimeType(MimeTypes.APPLICATION_M3U8)
             // Declare DASH the same way. This is what lets the DEFAULT media
             // source factory route the manifest correctly — which matters
             // because only that factory merges sideloaded subtitles into the
@@ -3325,6 +3331,7 @@ private fun VideoPlayer(
                 playingState.value(isPlayingNow)
             }
             override fun onRenderedFirstFrame() {
+                reloadsSinceFrame.value = 0
                 firstFrameState.value()
             }
             override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
@@ -3661,19 +3668,32 @@ private fun VideoPlayer(
                     .HttpDataSource.InvalidResponseCodeException ||
                     cause is androidx.media3.datasource.HttpDataSource
                         .HttpDataSourceException
-                if (looksExpired && exo.currentPosition > 0) {
+                if (looksExpired && exo.currentPosition > 0 &&
+                    reloadsSinceFrame.value < MAX_RELOADS_WITHOUT_FRAME
+                ) {
                     android.util.Log.w(
                         "VodDiag",
                         "VOD source error at ${exo.currentPosition / 1000}s " +
                             "(${cause?.javaClass?.simpleName}) — re-resolving",
                     )
+                    reloadsSinceFrame.value++
                     reloadState.value(exo.currentPosition)
                     return
                 }
                 // VOD: try one notch lower (e.g. 1080P HEVC → 720P / 480P H.264).
-                // If no lower quality is available, the player is left paused
-                // and the user can hit back.
-                downgradeState.value()
+                if (downgradeState.value()) return
+                // Nothing lower to try (the adaptive providers serve a single
+                // "Auto" stream), so this source's stream is dead: move on to
+                // the next source. This used to stop here and leave "Loading
+                // from VidNest…" up forever — Rick and Morty's VidNest link
+                // was a 403 while VixSrc had the episode. The view model skips
+                // every source that already failed for the episode, so this
+                // ends in an error message, never a loop.
+                android.util.Log.w(
+                    "VodDiag",
+                    "VOD ${error.errorCodeName} with no lower quality — trying another source",
+                )
+                failoverState.value()
             }
         }
         exo.addListener(listener)
@@ -3877,6 +3897,10 @@ private fun looksLikeDash(url: String): Boolean {
     val u = url.substringBefore('?').lowercase()
     return u.endsWith(".mpd") || u.contains("playstream.mpd")
 }
+
+/** Fresh links that fail before a frame is shown, after which the source is
+ *  treated as dead rather than re-resolved again. */
+private const val MAX_RELOADS_WITHOUT_FRAME = 2
 
 private fun looksLikeHls(url: String): Boolean {
     val u = url.substringBefore('?').lowercase()

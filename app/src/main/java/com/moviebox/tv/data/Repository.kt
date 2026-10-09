@@ -694,6 +694,10 @@ class Repository(
         episode: Int? = null,
         dub: String = "Original",
         only: Provider? = null,
+        /** Sources whose stream already failed for this episode. Skipped so a
+         *  failover walks on down the list instead of handing back the same
+         *  dead link. Ignored when [only] is set (an explicit pick). */
+        exclude: Set<Provider> = emptySet(),
     ): PlayInfo {
         // A provider that served this title before goes first. Without this
         // every episode re-walks the whole chain — Malcolm in the Middle
@@ -716,6 +720,7 @@ class Repository(
             // the config would rank it lower: the caller asked for that source.
             else -> (listOf(first) + available.filter { it != first })
                 .filter { it == first || available.contains(it) }
+                .filter { it !in exclude }
         }
         var lastError: Throwable? = null
         var tried = 0
@@ -727,7 +732,10 @@ class Repository(
             // before the next is attempted), and silence during that reads as
             // "nothing is happening". The overlay clears on first frame.
             com.moviebox.tv.data.live.LiveStatus.note(
-                if (tried == 1) "Finding a source…"
+                if (tried == 1) {
+                    if (exclude.isEmpty()) "Finding a source…"
+                    else "That source isn't working — trying ${p.label}…"
+                }
                 else "Not on ${order[tried - 2].label} — checking ${p.label}…",
             )
             // Bound the whole chain. Each additional provider adds its own
@@ -775,7 +783,11 @@ class Repository(
         }
         com.moviebox.tv.data.live.LiveStatus.note("No source has this title")
         throw ApiException(
-            lastError?.message ?: "This title isn't available right now.",
+            if (exclude.isNotEmpty() && only == null) {
+                "None of the sources could play this right now."
+            } else {
+                lastError?.message ?: "This title isn't available right now."
+            },
         )
     }
 

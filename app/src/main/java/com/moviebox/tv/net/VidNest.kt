@@ -4,6 +4,7 @@ import com.moviebox.tv.data.PlayInfo
 import com.moviebox.tv.data.Quality
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
@@ -55,6 +56,11 @@ object VidNest {
         .followRedirects(true)
         .build()
 
+    /** For the stream check: a link that hasn't answered in 6 s is no use. */
+    private val probeClient: OkHttpClient = client.newBuilder()
+        .callTimeout(6, TimeUnit.SECONDS)
+        .build()
+
     /** Resolve a TMDB id to a playable HLS stream. season/episode of 0 means
      *  "movie". Returns null when no sub-server carries the title, so the
      *  caller falls through to the next provider. */
@@ -85,46 +91,108 @@ object VidNest {
                 runCatching { streams.getJSONObject(it) }.getOrNull()
             }.filter { it.optString("url").isNotBlank() }
             if (entries.isEmpty()) continue
-            val chosen = entries.firstOrNull {
+            // English first, then the rest in the order given — each one is
+            // only taken if its stream actually answers.
+            val ordered = entries.sortedByDescending {
                 it.optString("language").equals("English", true)
-            } ?: entries.first()
-
-            val url = chosen.optString("url")
-            val headers = chosen.optJSONObject("headers")?.let { h ->
-                h.keys().asSequence().associateWith { k -> h.optString(k) }
-                    .filterValues { v -> v.isNotBlank() }
-            }.orEmpty()
-            val language = chosen.optString("language").ifBlank { "Original" }
-            android.util.Log.i(
-                TAG,
-                "resolved tmdb=$tmdbId s=${season}e=$episode via $server " +
-                    "(${entries.size} audio tracks, picked $language)",
-            )
-            val info = PlayInfo(
-                title = title,
-                // The master playlist — ExoPlayer adapts across its renditions.
-                mediaUrl = url,
-                selected = "Auto",
-                qualities = listOf(Quality("Auto", url)),
-                captions = emptyList(),
-                dubs = emptyList(),
-                selectedDub = language,
-                season = season,
-                episode = episode,
-                episodeTitle = title,
-                durationSec = 0,
-                headers = headers,
-            )
-            // "Original" means the provider named no language, which for this
-            // catalogue is the original soundtrack — good enough. Anything
-            // else named is a dub: hold it aside and try the next server.
-            if (language.equals("English", true) || language == "Original") {
-                return@withContext info
             }
-            if (dubbedFallback == null) dubbedFallback = info
+            for (chosen in ordered) {
+                val url = chosen.optString("url")
+                val headers = chosen.optJSONObject("headers")?.let { h ->
+                    h.keys().asSequence().associateWith { k -> h.optString(k) }
+                        .filterValues { v -> v.isNotBlank() }
+                }.orEmpty()
+                val language = chosen.optString("language").ifBlank { "Original" }
+                val kind = probe(url, headers)
+                if (kind == null) {
+                    android.util.Log.w(
+                        TAG,
+                        "$server $language: the stream refused us — skipping " +
+                            "(${url.substringBefore('?').take(80)})",
+                    )
+                    continue
+                }
+                android.util.Log.i(
+                    TAG,
+                    "resolved tmdb=$tmdbId s=${season}e=$episode via $server " +
+                        "(${entries.size} audio tracks, picked $language, $kind)",
+                )
+                val info = PlayInfo(
+                    title = title,
+                    // The master playlist — ExoPlayer adapts across its renditions.
+                    mediaUrl = url,
+                    selected = "Auto",
+                    qualities = listOf(Quality("Auto", url)),
+                    captions = emptyList(),
+                    dubs = emptyList(),
+                    selectedDub = language,
+                    season = season,
+                    episode = episode,
+                    episodeTitle = title,
+                    durationSec = 0,
+                    headers = headers,
+                    hls = kind == "hls" || chosen.optString("type").equals("hls", true),
+                )
+                // "Original" means the provider named no language, which for this
+                // catalogue is the original soundtrack — good enough. Anything
+                // else named is a dub: hold it aside and try the next server.
+                if (language.equals("English", true) || language == "Original") {
+                    return@withContext info
+                }
+                if (dubbedFallback == null) dubbedFallback = info
+                break
+            }
         }
         dubbedFallback
     }
+
+    /**
+     * Check the stream the way the player will fetch it (same headers):
+     * "hls" for a playlist whose first variant and first segment answer,
+     * "file" for anything else that answers, null when it refuses.
+     *
+     * VidNest keeps handing out links that don't play (goodstream.cc,
+     * 2026-10-09: the player got 403). Without this check that counted as a
+     * success, the app remembered VidNest for the show, and the player sat on
+     * the error. The top playlist can answer while what's behind it doesn't,
+     * so this follows it down to one segment.
+     */
+    private fun probe(url: String, headers: Map<String, String>): String? = runCatching {
+        val h = Constants.mediaHeadersFor(headers)
+        fun request(u: String) = Request.Builder().url(u).apply {
+            h.forEach { (k, v) -> header(k, v) }
+        }
+        // The start of [u]'s body, or null when it refuses or serves a page
+        // (a challenge or error) instead of media.
+        fun open(u: String): String? =
+            probeClient.newCall(request(u).get().build()).execute().use { r ->
+                if (!r.isSuccessful) return@use null
+                val head = r.peekBody(64L * 1024).string()
+                    .trimStart('\uFEFF', ' ', '\r', '\n', '\t')
+                if (r.header("Content-Type").orEmpty().contains("text/html", true) ||
+                    head.startsWith("<")
+                ) null else head
+            }
+        fun firstUri(playlist: String, base: String): String? =
+            playlist.lineSequence().map { it.trim() }
+                .firstOrNull { it.isNotEmpty() && !it.startsWith("#") }
+                ?.let { base.toHttpUrlOrNull()?.resolve(it)?.toString() }
+
+        var text = open(url) ?: return@runCatching null
+        if (!text.startsWith("#EXTM3U")) return@runCatching "file"
+        var base = url
+        if (text.contains("#EXT-X-STREAM-INF")) {
+            val variant = firstUri(text, base) ?: return@runCatching null
+            text = open(variant)?.takeIf { it.startsWith("#EXTM3U") }
+                ?: return@runCatching null
+            base = variant
+        }
+        val segment = firstUri(text, base) ?: return@runCatching "hls"
+        val ok = probeClient.newCall(
+            request(segment).header("Range", "bytes=0-1023").get().build(),
+        ).execute().use { it.isSuccessful }
+        if (ok) "hls" else null
+    }.getOrNull()
 
     /** `{"data":"<custom-base64>"}` → the decoded JSON object. */
     private fun decodePayload(raw: String): JSONObject? = runCatching {

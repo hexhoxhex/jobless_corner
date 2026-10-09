@@ -104,6 +104,11 @@ object H5Api {
      *  resolver if the user re-opens the same title shortly after. */
     private data class CachedStreams(val streams: List<PlayStream>, val expiresAt: Long)
     private val streamCache = java.util.concurrent.ConcurrentHashMap<String, CachedStreams>()
+
+    /** Forget cached links. Called when a link failed in the player, so the
+     *  re-resolve fetches fresh ones instead of handing back the same dead
+     *  link from the 30-minute cache. */
+    fun dropCachedStreams() = streamCache.clear()
     private fun cacheKey(subjectId: String, se: Int, ep: Int) = "$subjectId|$se|$ep"
 
     fun detailPathFor(subjectId: String): String? = detailPathCache[subjectId]

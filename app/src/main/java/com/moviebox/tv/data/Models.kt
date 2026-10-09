@@ -148,6 +148,10 @@ data class PlayInfo(
     val providerSubjectId: String = "",
     /** Live HLS stream — disables resume/quality/dub/autoplay/progress UI. */
     val isLive: Boolean = false,
+    /** The provider says this is an HLS playlist. Some hand out playlist
+     *  links with no .m3u8 in the path, which the player would otherwise
+     *  open as a plain file and fail on. */
+    val hls: Boolean = false,
     /** Optional subtitle row under the title for live streams (e.g. group). */
     val subtitle: String = "",
 )

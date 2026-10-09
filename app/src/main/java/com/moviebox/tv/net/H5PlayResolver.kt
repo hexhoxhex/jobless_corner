@@ -44,6 +44,15 @@ object H5PlayResolver {
      *  this is slack for a slow page, well inside [MAX_WAIT_MS]. */
     private const val PLAY_POLL_MS = 500L
     private const val PLAY_FETCH_TIMEOUT_MS = 12_000L
+
+    /** Gaps before asking the page again after an answer with no streams.
+     *  On the TV (2026-10-09) the one ask went out 1.4 s into the page load,
+     *  before the page's own scripts had run, and came back empty for Rick
+     *  and Morty, while the same ask a moment later in a fresh emulator
+     *  session returned 3 streams. With one ask and no retry, the resolver
+     *  then sat out the whole [MAX_WAIT_MS] for nothing - twice per title,
+     *  counting the subject-level fallback. Five asks over ~13 s, then give up. */
+    private val ASK_AGAIN_AFTER_MS = longArrayOf(1_500, 2_500, 3_500, 4_500)
     /** Startup warm: poll CookieManager every [WARM_POLL_MS] up to
      *  [WARM_MAX_WAIT_MS] for the SPA to mint mb_token. */
     private const val WARM_POLL_MS = 400L
@@ -239,10 +248,24 @@ object H5PlayResolver {
             "&ep=${if (episode > 0) episode else 0}" +
             "&detailPath=$detailPath"
         var asked = false
+        var asks = 0
 
-        fun askPageForStreams() {
-            if (finished || asked) return
-            asked = true
+        fun askOnce() {
+            if (finished) return
+            asks++
+            val n = asks
+            val of = ASK_AGAIN_AFTER_MS.size + 1
+            // Ask again after a pause, or stop waiting once every ask is used.
+            fun again() {
+                if (finished) return
+                val gap = ASK_AGAIN_AFTER_MS.getOrNull(n - 1)
+                if (gap == null) {
+                    Log.w(TAG, "no streams after $n asks — giving up early")
+                    finish(emptyList())
+                } else {
+                    main.postDelayed({ askOnce() }, gap)
+                }
+            }
             runCatching {
                 wv.evaluateJavascript(
                     """
@@ -275,22 +298,41 @@ object H5PlayResolver {
                                     waited += PLAY_POLL_MS
                                     if (waited < PLAY_FETCH_TIMEOUT_MS) {
                                         main.postDelayed(self, PLAY_POLL_MS)
+                                    } else {
+                                        again()
                                     }
                                 }
-                                body.startsWith("ERR:") ->
+                                body.startsWith("ERR:") -> {
                                     Log.w(TAG, "in-page play failed: ${body.take(120)}")
+                                    again()
+                                }
                                 else -> {
+                                    val json = runCatching {
+                                        org.json.JSONObject(body)
+                                    }.getOrNull()
+                                    val data = json?.optJSONObject("data")
                                     val streams = runCatching {
-                                        parseStreams(
-                                            org.json.JSONObject(body)
-                                                .optJSONObject("data"),
-                                        )
+                                        parseStreams(data)
                                     }.getOrDefault(emptyList())
-                                    Log.i(
-                                        TAG,
-                                        "in-page play -> ${streams.size} stream(s)",
-                                    )
-                                    if (streams.isNotEmpty()) finish(streams)
+                                    if (streams.isNotEmpty()) {
+                                        Log.i(
+                                            TAG,
+                                            "in-page play -> ${streams.size} stream(s), ask $n/$of",
+                                        )
+                                        finish(streams)
+                                    } else {
+                                        // Say what the site answered, so the
+                                        // next "not available" explains itself.
+                                        Log.i(
+                                            TAG,
+                                            "in-page play -> 0 stream(s), ask $n/$of " +
+                                                "(code=${json?.opt("code")} " +
+                                                "msg=${json?.optString("message")?.take(60)} " +
+                                                "hasResource=${data?.opt("hasResource")} " +
+                                                "keys=${data?.keys()?.asSequence()?.toList()?.take(12)})",
+                                        )
+                                        again()
+                                    }
                                 }
                             }
                         }
@@ -298,6 +340,12 @@ object H5PlayResolver {
                 }
             }
             main.postDelayed(poll, PLAY_POLL_MS)
+        }
+
+        fun askPageForStreams() {
+            if (finished || asked) return
+            asked = true
+            askOnce()
         }
 
         wv.webViewClient = object : WebViewClient() {

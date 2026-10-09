@@ -52,6 +52,12 @@ object Constants {
             "Accept" to "*/*",
         )
 
+    /** Headers the player sends for one stream: [mediaHeaders], overridden
+     *  by the ones its provider said the CDN needs. One definition, so a
+     *  provider's own stream check asks exactly the way the player will. */
+    fun mediaHeadersFor(stream: Map<String, String>): Map<String, String> =
+        mediaHeaders + stream
+
     // Randomised per-process Android client fingerprint (mirrors the Python
     // _generate_client_info()).
     val userAgent: String
