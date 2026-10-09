@@ -242,6 +242,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Subtitles of what is playing: the shown track, its cues, timing
+     *  offset and where the credits start. Shared by the TV's CC menu and
+     *  the phone remote (see Subtitles.kt). */
+    val subtitles = SubtitleSession(app, viewModelScope)
+
+    /** Key that stays the same across a show's episodes (and its rotating
+     *  subjectIds), for per-show subtitle and credits memory. */
+    fun showKeyFor(play: PlayInfo): String =
+        SubtitleSession.showKeyOf(_state.value.detailItem?.title?.ifBlank { null } ?: play.title)
+
     val continueWatching: StateFlow<List<WatchHistoryEntity>> =
         watchDao.continueWatching()
             .map { list ->

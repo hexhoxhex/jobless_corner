@@ -1296,3 +1296,72 @@ button.icon-btn { flex: 0 0 auto; padding: 8px 10px; }
   word-break: break-word; color: var(--text-2);
 }
 .diag-out.hidden { display: none; }
+
+/* ---------- 2026-10-09 reorganisation: five tabs + Settings ----------
+   Home (browse + Continue watching), Live, Search, Library (history +
+   downloads), Remote. Taste, leagues, theme, devices and debug moved into
+   Settings, opened from the header. */
+#pane-settings { padding: 0 16px; }
+#pane-settings .ph { padding: 0; }
+.set-taste .card { margin-left: 0; margin-right: 0; }
+.set-list { display: flex; flex-direction: column; gap: 8px; }
+.set-item {
+  flex: none; width: 100%; min-height: 52px;
+  justify-content: flex-start; gap: 12px; text-align: left;
+  background: var(--surface); border-radius: var(--radius);
+  padding: 12px 14px;
+}
+.set-item .icon { color: var(--accent); }
+.set-item .set-item-t { flex: 1 1 auto; }
+.set-item .set-chev { transform: rotate(180deg); color: var(--muted); }
+.sub-back { margin: 0 0 6px; }
+
+.lib-section { padding: 0 16px 20px; }
+.lib-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; margin: 2px 0 10px;
+}
+.lib-head h3 { margin: 0; font-size: 1rem; }
+.lib-head button { flex: none; }
+
+.link-btn {
+  flex: none; margin-left: auto; min-height: 0;
+  background: none; padding: 6px 2px;
+  color: var(--accent); font-size: .85rem; font-weight: 600;
+}
+.home-cw {
+  flex: 0 0 46%; min-width: 150px; scroll-snap-align: start;
+  display: flex; flex-direction: column; align-items: stretch; gap: 4px;
+  background: none; padding: 0; border-radius: 0; text-align: left;
+  color: var(--text);
+}
+@media (min-width: 480px) { .home-cw { flex-basis: 34%; } }
+.home-cw-art {
+  position: relative; display: block; aspect-ratio: 16 / 9;
+  border-radius: 12px; overflow: hidden; background: var(--surface-2);
+}
+.home-cw-art img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.home-cw-t {
+  font-weight: 700; font-size: .9rem;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.home-cw-s { color: var(--muted); font-size: .78rem; font-weight: 500; }
+
+.cc-mismatch { margin: 10px 2px 0; color: var(--warn); line-height: 1.4; }
+
+/* Header on one line at phone width: the app name never wraps, the device
+   name gives way (ellipsis) before anything else does. */
+.topbar { gap: 10px; }
+.topbar .title { white-space: nowrap; flex: none; }
+.topbar .right { min-width: 0; flex: 1 1 auto; justify-content: flex-end; }
+.me { min-width: 0; }
+#meLabel { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.me .role { flex: none; }
+.topbar .theme-toggle { flex: none; }
+
+/* Remote: heading aligned with its cards; space above each label in
+   Picture & sound so a label reads with the control below it. */
+#pane-np .ph { padding: 0; }
+#trackCard .label-row { margin-top: 14px; }
+#trackCard .card-h + .label-row { margin-top: 2px; }
+#trackCard .label-row + .row { margin-top: 6px; }

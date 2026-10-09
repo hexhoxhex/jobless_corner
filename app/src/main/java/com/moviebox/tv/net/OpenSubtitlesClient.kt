@@ -38,9 +38,16 @@ object OpenSubtitlesClient {
     private const val OPENSUBS = "https://opensubtitles-v3.strem.io/subtitles"
     private const val UA = "Mozilla/5.0 (Linux; Android 12) MovieBoxTV/0.1"
 
-    /** One selectable subtitle track. [code] is ISO-639-1 (en, ko, es…) for
-     *  ExoPlayer's setPreferredTextLanguage; [name] is the display label. */
-    data class Sub(val code: String, val name: String, val url: String)
+    /** One selectable subtitle track. [code] is ISO-639-1 (en, ko, es…);
+     *  [name] is the display label; [alternates] are the next-ranked files
+     *  for the same language (the player picks the one whose length matches
+     *  the video). */
+    data class Sub(
+        val code: String,
+        val name: String,
+        val url: String,
+        val alternates: List<String> = emptyList(),
+    )
 
     private val http: OkHttpClient by lazy {
         OkHttpClient.Builder()
@@ -60,18 +67,21 @@ object OpenSubtitlesClient {
      * @param season/episode 0 for a movie; >0 for a series episode.
      */
     suspend fun list(
-        title: String, season: Int, episode: Int,
+        title: String, season: Int, episode: Int, year: Int? = null,
     ): List<Sub> = withContext(Dispatchers.IO) {
         val cleanTitle = cleanTitle(title)
         if (cleanTitle.isBlank()) return@withContext emptyList()
         val isSeries = season > 0
-        val imdb = runCatching { imdbId(cleanTitle, isSeries) }.getOrNull()
+        val imdb = runCatching { imdbId(cleanTitle, isSeries, year) }.getOrNull()
             ?: return@withContext emptyList()
         runCatching { subtitlesFor(imdb, season, episode) }.getOrDefault(emptyList())
     }
 
-    private fun imdbId(title: String, isSeries: Boolean): String? {
-        val key = title.lowercase()
+    private fun imdbId(title: String, isSeries: Boolean, year: Int? = null): String? {
+        // Keyed by type and year too: "The Office" (US, 2005) and "The
+        // Office" (UK, 2001) are both an exact name match, and a title-only
+        // key handed the second show the first one's subtitles.
+        val key = "${title.lowercase()}|${if (isSeries) "s" else "m"}|${year ?: ""}"
         imdbCache[key]?.let { return it }
         val want = normalizeName(title)
         if (want.isBlank()) return null
@@ -85,7 +95,13 @@ object OpenSubtitlesClient {
         // wrong trailers. Better to show nothing than the wrong thing.
         val primary = if (isSeries) "series" else "movie"
         val secondary = if (isSeries) "movie" else "series"
-        data class Cand(val id: String, val name: String, val type: String)
+        data class Cand(
+            val id: String,
+            val name: String,
+            val type: String,
+            val from: Int?,
+            val to: Int?,
+        )
         val cands = mutableListOf<Cand>()
         for (type in listOf(primary, secondary)) {
             val q = java.net.URLEncoder.encode(title, "UTF-8")
@@ -102,15 +118,38 @@ object OpenSubtitlesClient {
                         val m = metas.getJSONObject(i)
                         val id = m.optString("id").takeIf { it.startsWith("tt") }
                             ?: continue
-                        cands.add(Cand(id, m.optString("name"), type))
+                        // releaseInfo: "2008", "2005–2013", "2016–".
+                        val years = Regex("\\d{4}").findAll(m.optString("releaseInfo"))
+                            .map { it.value.toInt() }.toList()
+                        cands.add(
+                            Cand(
+                                id, m.optString("name"), type,
+                                years.firstOrNull(),
+                                if (years.size > 1) years.last() else null,
+                            ),
+                        )
                     }
                 }
             }
         }
-        // Exact normalized-name match, preferring the requested type.
-        val match = cands.firstOrNull {
-            normalizeName(it.name) == want && it.type == primary
-        } ?: cands.firstOrNull { normalizeName(it.name) == want }
+        // Exact normalized-name match, preferring the requested type — and,
+        // when we know the year, one from that year (a series: one running
+        // in it). Same-named remakes and the US/UK versions of a show are
+        // otherwise indistinguishable, and their subtitles belong to a
+        // different video entirely.
+        fun yearFits(c: Cand): Boolean {
+            if (year == null || c.from == null) return true
+            // A running series ("2016–") has no end year yet.
+            val end = c.to ?: if (c.type == "series") c.from + 60 else c.from
+            return year in (c.from - 1)..(end + 1)
+        }
+        val exact = cands.filter { normalizeName(it.name) == want }
+        val datedOk = exact.filter { yearFits(it) }
+        if (year != null && exact.isNotEmpty() && datedOk.isEmpty()) {
+            Log.w(TAG, "imdb '$title' ($year) -> exact names but none from that year")
+            return null
+        }
+        val match = datedOk.firstOrNull { it.type == primary } ?: datedOk.firstOrNull()
         if (match != null) {
             imdbCache[key] = match.id
             Log.i(TAG, "imdb '$title' -> ${match.id} (${match.type}, exact)")
@@ -140,14 +179,22 @@ object OpenSubtitlesClient {
             if (!r.isSuccessful) return emptyList()
             val arr = JSONObject(r.body?.string().orEmpty())
                 .optJSONArray("subtitles") ?: return emptyList()
-            // First occurrence per language wins (addon orders by relevance).
+            // Up to three files per language, in the addon's relevance
+            // order. The first is the default; the others let the player
+            // switch to the file whose length matches this video.
             val byLang = LinkedHashMap<String, Sub>()
             for (i in 0 until arr.length()) {
                 val s = arr.getJSONObject(i)
                 val raw = s.optString("lang").lowercase()
                 val url = s.optString("url").takeIf { it.isNotBlank() } ?: continue
                 val code = LANG_2.getOrDefault(raw, raw.take(2))
-                if (byLang.containsKey(code)) continue
+                val have = byLang[code]
+                if (have != null) {
+                    if (have.alternates.size < 2 && url != have.url) {
+                        byLang[code] = have.copy(alternates = have.alternates + url)
+                    }
+                    continue
+                }
                 val name = LANG_NAMES.getOrDefault(raw, raw.uppercase())
                 byLang[code] = Sub(code, name, url)
             }

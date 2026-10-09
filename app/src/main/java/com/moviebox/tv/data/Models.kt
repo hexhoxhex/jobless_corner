@@ -105,7 +105,23 @@ data class Details(
 /** A selectable quality. [mediaUrl] is null when it must be re-resolved. */
 data class Quality(val label: String, val mediaUrl: String?)
 
-data class CaptionTrack(val code: String, val name: String, val url: String)
+data class CaptionTrack(
+    val code: String,
+    val name: String,
+    val url: String,
+    /** True for subtitles found by title on OpenSubtitles rather than served
+     *  with the stream. They can be timed for another release of the video,
+     *  so the app prefers the source's own track and lists both. */
+    val external: Boolean = false,
+    /** Other OpenSubtitles files for the same language, best-ranked first.
+     *  The app picks whichever one's length matches the video's, which
+     *  weeds out files for another episode or another cut. */
+    val alternates: List<String> = emptyList(),
+) {
+    /** Unique per track in a list: the source's and OpenSubtitles' English
+     *  are both "en", so the language code alone cannot tell them apart. */
+    val id: String get() = if (external) "$code~os" else code
+}
 
 data class PlayInfo(
     val title: String,

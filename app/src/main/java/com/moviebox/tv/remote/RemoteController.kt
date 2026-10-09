@@ -155,27 +155,40 @@ object RemoteController {
      *  Sourced from the play resolution's caption list (aoneroom captions +
      *  OpenSubtitles languages). Empty for live TV / titles with no subs. */
     val availableSubtitles: List<Pair<String, String>>
-        get() = vm?.state?.value?.play?.captions?.map { it.code to it.name }
+        get() = vm?.state?.value?.play?.captions?.map { it.id to it.name }
             ?: emptyList()
 
-    /** Currently-selected subtitle language code on the TV player, or null =
-     *  off. Tracked here (set by [setSubtitle]) and reset when the played
-     *  item changes so the remote's CC menu reflects the live state. */
-    @Volatile var currentSubtitleLang: String? = null
-        private set
+    /** Id of the subtitle track shown on the TV, or null = off. Read from
+     *  the same session the TV's CC menu uses, so the two always agree. */
+    val currentSubtitleLang: String?
+        get() = vm?.subtitles?.state?.value?.selectedId
 
-    /** Enable a subtitle language on the TV player (null/blank = turn off).
-     *  Mirrors the APK player's CC dropdown: toggles the TEXT track type
-     *  and sets the preferred text language on the player's
-     *  trackSelectionParameters. Must run on the player's thread. */
+    val subtitleOffsetMs: Long
+        get() = vm?.subtitles?.state?.value?.offsetMs ?: 0L
+
+    val creditsStartMs: Long?
+        get() = vm?.subtitles?.state?.value?.creditsStartMs
+
+    /** The offset was measured from the audio by the TV. */
+    val subtitleAuto: Boolean
+        get() = vm?.subtitles?.state?.value?.autoSynced == true
+
+    /** The chosen subtitles are for another video and are hidden. */
+    val subtitleMismatch: Boolean
+        get() = vm?.subtitles?.state?.value?.mismatch == true
+
+    fun setSubtitleOffset(ms: Long) = main.post { vm?.subtitles?.setOffset(ms) }
+
+    /** Show a subtitle track on the TV (null/blank = off). [code] is a
+     *  track id ("en", "en~os") or, from an older phone page, a bare
+     *  language code — the source's own track is used then. The app draws
+     *  subtitles itself, so the player's own text track is kept off. */
     fun setSubtitle(code: String?) = main.post {
+        vm?.subtitles?.select(code?.takeIf { it.isNotBlank() })
         val p = player ?: return@post
-        val lang = code?.takeIf { it.isNotBlank() }
-        currentSubtitleLang = lang
-        val params = p.trackSelectionParameters.buildUpon()
-            .setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_TEXT, lang == null)
-        if (lang != null) params.setPreferredTextLanguage(lang)
-        p.trackSelectionParameters = params.build()
+        p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
+            .setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_TEXT, true)
+            .build()
     }
 
     private val vm: MainViewModel? get() = vmRef?.get()

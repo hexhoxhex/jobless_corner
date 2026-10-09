@@ -216,16 +216,33 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
     var scrubbing by remember { mutableStateOf(false) }
     var scrubTo by remember { mutableLongStateOf(0L) }
     var exoRef by remember { mutableStateOf<androidx.media3.common.Player?>(null) }
-    // Currently-selected subtitle language code, or null = subtitles off.
-    // Drives the Subtitles dropdown in the VOD control overlay; applied to
-    // the player via trackSelectionParameters (no DefaultTrackSelector
-    // reference needed). Reset to off when the played item changes.
-    var subtitleLang by remember { mutableStateOf<String?>(null) }
+    // Subtitles: the app draws them (Subtitles.kt). The session remembers
+    // the viewer's choice per show and keeps the TV menu and the phone
+    // remote in step; it is re-bound to every new item, which re-applies
+    // that choice instead of silently resetting to "Off".
+    val subs by vm.subtitles.state.collectAsState()
+    // While the app shows a track, the stream's own subtitles (some HLS
+    // sources carry them) stay off, so the two never appear together.
+    LaunchedEffect(subs.selectedId, exoRef) {
+        val exo = exoRef ?: return@LaunchedEffect
+        if (subs.selectedId != null) {
+            exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
+                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                .build()
+        }
+    }
+    LaunchedEffect(play?.mediaUrl) {
+        val p = play
+        if (p != null && !p.isLive && p.mediaUrl.isNotBlank()) {
+            vm.subtitles.bind(p, vm.showKeyFor(p))
+        } else if (p?.isLive == true) {
+            vm.subtitles.clear()
+        }
+    }
 
     /** Audio language the viewer picked for THIS stream, if any. Null means
      *  "whatever the player chose", which prefers English already. */
     var audioLang by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(play?.mediaUrl) { subtitleLang = null }
     // True once the player fires STATE_ENDED for THIS movie/episode — the
     // definitive "content actually finished" signal. The movie / end-of-
     // series auto-advance keys off this instead of a duration estimate,
@@ -242,7 +259,22 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
     val upNext = nextEpisodeFor(state)
     val nearEnd = play != null && !play.isLive && durationMs > 0 &&
         positionMs >= (durationMs - SKIP_BUTTON_WINDOW_MS)
-    val endish = nearEnd || contentEnded
+    // The closing song / "thank you for watching" part of an episode:
+    // from where the dialogue ends (read from the subtitles) or, without
+    // subtitles, where the viewer pressed Next on earlier episodes of the
+    // show. Viewers asked not to sit through it: the next episode counts
+    // down from here.
+    val creditsStart = subs.creditsStartMs
+    val inCredits = play != null && !play.isLive && creditsStart != null &&
+        durationMs > 0 && positionMs >= creditsStart && !contentEnded
+    // "Keep watching" applies to THIS episode only. It used to switch
+    // autoplay off for the rest of the session, so one Cancel and no
+    // episode ever followed on by itself again.
+    var creditsDismissed by remember(play?.mediaUrl) { mutableStateOf(false) }
+    var endDismissed by remember(play?.mediaUrl) { mutableStateOf(false) }
+    val creditsCountdown = inCredits && !creditsDismissed
+    val endish = (nearEnd && !creditsDismissed) || creditsCountdown ||
+        (contentEnded && !endDismissed)
     val nextPick = recommendations.firstOrNull {
         it.subjectId != state.detailItem?.subjectId
     }
@@ -289,6 +321,7 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                 if (!scrubbing) positionMs = it.currentPosition
                 durationMs = it.duration.coerceAtLeast(0)
             }
+            if (!isLiveContent && durationMs > 0) vm.subtitles.onDuration(durationMs)
             kotlinx.coroutines.delay(500)
         }
     }
@@ -506,7 +539,11 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
             VideoPlayer(
                 mediaUrl = play.mediaUrl,
                 headers = play.headers,
-                captions = play.captions,
+                // Subtitles are drawn by the app (SubtitleText below), so
+                // the player is not handed the files: its language-based
+                // choice could not tell two English tracks apart, had no
+                // timing offset, and kept a choice the menu had reset.
+                captions = emptyList(),
                 contentKey = vm.contentKey,
                 onEnded = {
                     // Live streams don't "end" in the normal sense. For VOD
@@ -847,28 +884,36 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                         // handle is needed here.
                         if (play.captions.isNotEmpty()) {
                             val current = play.captions
-                                .firstOrNull { it.code == subtitleLang }?.name
+                                .firstOrNull { it.id == subs.selectedId }?.name
+                                ?.let { if (subs.mismatch) "$it (doesn't match)" else it }
                                 ?: "Off"
                             val options = listOf("Off" to "") +
-                                play.captions.map { it.name to it.code }
+                                play.captions.map { it.name to it.id }
                             Dropdown(
                                 "CC: $current", options,
                                 onInteract = bumpControls,
                             ) { picked ->
-                                val exo = exoRef
-                                if (exo != null) {
-                                    subtitleLang = picked.ifBlank { null }
+                                vm.subtitles.select(picked.ifBlank { null })
+                                // The app draws subtitles; keep the player's
+                                // own text track (in-stream ones) off so the
+                                // two never show at once.
+                                exoRef?.let { exo ->
                                     exo.trackSelectionParameters =
                                         exo.trackSelectionParameters.buildUpon()
-                                            .setTrackTypeDisabled(
-                                                C.TRACK_TYPE_TEXT,
-                                                picked.isBlank(),  // "Off" → disable text
-                                            )
-                                            .apply {
-                                                if (picked.isNotBlank())
-                                                    setPreferredTextLanguage(picked)
-                                            }
+                                            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
                                             .build()
+                                }
+                            }
+                            if (subs.selectedId != null) {
+                                // Timing: positive = subtitles later. Kept
+                                // per subtitle file (episodes' files differ).
+                                Dropdown(
+                                    "Sync: ${offsetLabel(subs.offsetMs)}" +
+                                        if (subs.autoSynced) " (auto)" else "",
+                                    SUB_OFFSETS.map { offsetLabel(it) to it.toString() },
+                                    onInteract = bumpControls,
+                                ) { picked ->
+                                    picked.toLongOrNull()?.let { vm.subtitles.setOffset(it) }
                                 }
                             }
                         }
@@ -1036,6 +1081,48 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
             }
         }
 
+        // ---- Subtitles ----
+        // A file that turned out to be for another video is not drawn; say
+        // so for a few seconds rather than leave the viewer wondering.
+        if (play != null && !play.isLive && subs.selectedId != null && subs.mismatch) {
+            var noteVisible by remember(subs.selectedId) { mutableStateOf(true) }
+            LaunchedEffect(subs.selectedId) {
+                kotlinx.coroutines.delay(8_000)
+                noteVisible = false
+            }
+            if (noteVisible) {
+                val name = play.captions.firstOrNull { it.id == subs.selectedId }?.name ?: "These"
+                SubtitleText(
+                    "$name subtitles are for a different video, so they are hidden.",
+                    Modifier.align(Alignment.BottomCenter)
+                        .padding(start = 48.dp, end = 48.dp, bottom = 40.dp),
+                )
+            }
+        }
+        // Position read straight from the player every 100 ms (the 500 ms
+        // tick is too coarse for dialogue), minus the offset.
+        if (play != null && !play.isLive && subs.selectedId != null && subs.cues.isNotEmpty()) {
+            var line by remember { mutableStateOf<String?>(null) }
+            LaunchedEffect(subs.cues, subs.offsetMs) {
+                while (true) {
+                    val pos = exoRef?.currentPosition ?: 0L
+                    line = subs.cues.textAt(pos - subs.offsetMs)
+                    kotlinx.coroutines.delay(100)
+                }
+            }
+            line?.let {
+                SubtitleText(
+                    it,
+                    Modifier.align(Alignment.BottomCenter)
+                        .padding(
+                            start = 48.dp, end = 48.dp,
+                            // Above the controls when they are up.
+                            bottom = if (controlsVisible) 150.dp else 40.dp,
+                        ),
+                )
+            }
+        }
+
         // ---- Up Next overlay (VOD series, last 30s of an episode) ----
         // Netflix-style: appears bottom-right ~30s before the end with a
         // countdown + next episode info + Play Now / Cancel buttons. Auto-
@@ -1070,30 +1157,47 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
             exit = androidx.compose.animation.fadeOut(),
         ) {
             if (upNext != null) {
-                var counter by remember(upNext, contentEnded) {
+                // Counts down in the credits, or after the file ends.
+                // Otherwise (the last 40 s with no credits estimate) the
+                // card is a manual Next button.
+                val counting = (creditsCountdown || (contentEnded && !endDismissed)) &&
+                    state.autoplayNext
+                // Leaving the episode for the next one from here: record it
+                // as finished, or Continue watching would offer it again
+                // (the credits start before the "finished" mark).
+                val advance = {
+                    val p = play
+                    if (p != null && durationMs > 0) {
+                        vm.saveProgress(durationMs, durationMs, p.season, p.episode)
+                    }
+                    vm.playEpisode(upNext.first, upNext.second)
+                }
+                var counter by remember(upNext, counting) {
                     mutableStateOf(AUTO_ADVANCE_SECONDS)
                 }
-                // Auto-advance countdown ONLY once the file has genuinely
-                // ended. Before that the card is a manual Next button.
-                LaunchedEffect(contentEnded, upNext, state.autoplayNext) {
-                    if (!contentEnded) return@LaunchedEffect
+                LaunchedEffect(counting, upNext) {
+                    if (!counting) return@LaunchedEffect
                     counter = AUTO_ADVANCE_SECONDS
-                    while (counter > 0 && state.autoplayNext) {
+                    while (counter > 0) {
                         kotlinx.coroutines.delay(1_000)
                         counter -= 1
                     }
-                    if (state.autoplayNext) {
-                        vm.playEpisode(upNext.first, upNext.second)
-                    }
+                    advance()
                 }
                 UpNextCard(
                     nextSeason = upNext.first,
                     nextEpisode = upNext.second,
-                    // null = manual mode (just a Next button, no timer);
-                    // a number = the auto-advance countdown after the end.
-                    secondsRemaining = if (contentEnded) counter else null,
-                    onPlayNow = { vm.playEpisode(upNext.first, upNext.second) },
-                    onDismiss = { vm.setAutoplay(false) },
+                    // null = manual mode (just a Next button, no timer).
+                    secondsRemaining = if (counting) counter else null,
+                    onPlayNow = {
+                        if (!contentEnded && durationMs > 0) {
+                            vm.subtitles.noteNextPressed(durationMs - positionMs)
+                        }
+                        advance()
+                    },
+                    onDismiss = {
+                        if (contentEnded) endDismissed = true else creditsDismissed = true
+                    },
                 )
             }
         }
@@ -1113,21 +1217,23 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                 var counter by remember(nextPick, contentEnded) {
                     mutableStateOf(AUTO_ADVANCE_SECONDS)
                 }
-                LaunchedEffect(contentEnded, nextPick, state.autoplayNext) {
-                    if (!contentEnded) return@LaunchedEffect
+                val counting = contentEnded && !endDismissed && state.autoplayNext
+                LaunchedEffect(counting, nextPick) {
+                    if (!counting) return@LaunchedEffect
                     counter = AUTO_ADVANCE_SECONDS
-                    while (counter > 0 && state.autoplayNext) {
+                    while (counter > 0) {
                         kotlinx.coroutines.delay(1_000)
                         counter -= 1
                     }
-                    if (state.autoplayNext) vm.openItem(nextPick)
+                    vm.openItem(nextPick)
                 }
                 UpNextItemCard(
                     title = nextPick.title,
                     coverUrl = nextPick.coverUrl,
-                    secondsRemaining = if (contentEnded) counter else null,
+                    secondsRemaining = if (counting) counter else null,
                     onPlayNow = { vm.openItem(nextPick) },
-                    onDismiss = { vm.setAutoplay(false) },
+                    // This title only: autoplay stays on for the next one.
+                    onDismiss = { endDismissed = true },
                 )
             }
         }
@@ -1388,9 +1494,9 @@ private fun UpNextCard(
     ) {
         Column(horizontalAlignment = Alignment.Start) {
             // secondsRemaining null = manual mode (button only, no timer);
-            // non-null = auto-advance countdown after the file end.
+            // non-null = the auto-advance countdown.
             Text(
-                if (secondsRemaining != null) "Up next in ${secondsRemaining}s"
+                if (secondsRemaining != null) "Next episode in ${secondsRemaining}s"
                 else "Up next",
                 color = Color(0xFFE8B341),
                 fontWeight = FontWeight.Bold, fontSize = 12.sp,
@@ -1425,7 +1531,7 @@ private fun UpNextCard(
                         .clickable(interactionSource = remember { MutableInteractionSource() }, indication = ownFocusIndication(), onClick = onDismiss)
                         .padding(horizontal = 14.dp, vertical = 7.dp),
                 ) {
-                    Text("Cancel",
+                    Text("Keep watching",
                         color = Color.White,
                         fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
                 }
@@ -1808,6 +1914,7 @@ private fun VideoPlayer(
         mutableStateOf(noTunneling)
     }
     var lastKey by remember { mutableStateOf<String?>(null) }
+    var lastUrl by remember { mutableStateOf<String?>(null) }
     val liveState = rememberUpdatedState(isLive)
 
     // Live-stream resilience tracker. Kept outside ExoPlayer.Listener so the
@@ -2385,6 +2492,19 @@ private fun VideoPlayer(
                             "renderer(s); ${out.size} left (hardware)",
                     )
                 }
+
+                // The audio passes through SpeechTapSink unchanged; it keeps
+                // a speech-energy reading per 50 ms that the subtitle check
+                // lines the cues up against (SpeechTap.kt). Both the platform
+                // and the ffmpeg audio renderer are built with this sink.
+                override fun buildAudioSink(
+                    context: android.content.Context,
+                    enableFloatOutput: Boolean,
+                    enableAudioTrackPlaybackParams: Boolean,
+                ): androidx.media3.exoplayer.audio.AudioSink? =
+                    super.buildAudioSink(
+                        context, enableFloatOutput, enableAudioTrackPlaybackParams,
+                    )?.let { SpeechTapSink(it) }
             }
                 .setEnableDecoderFallback(true)
                 .setExtensionRendererMode(
@@ -2465,6 +2585,14 @@ private fun VideoPlayer(
     // residual bug: audio strip ran correctly but playback never resumed.
     LaunchedEffect(mediaUrl, contentKey, preferSoftwareDecoder, noTunneling) {
         if (mediaUrl.isBlank()) return@LaunchedEffect
+        // Next episode requested: the episode number (contentKey) changes at
+        // once, its stream URL a moment later. Reloading the OLD URL under
+        // the new key restarted the previous episode at its resume point,
+        // and the new episode then "kept" that position as if only the
+        // quality had changed: the next episode began mid-way whenever the
+        // previous one had been resumed (measured: E2 started at 11:44,
+        // E1's resume point). Wait for the new URL instead.
+        if (!isLive && mediaUrl == lastUrl && contentKey != lastKey) return@LaunchedEffect
         val item = if (isLive) {
             // 12s target offset = our "head space" buffer behind the live edge.
             // ExoPlayer will resync toward this target after rebuffer events.
@@ -2592,6 +2720,7 @@ private fun VideoPlayer(
         else exo.setMediaItem(item, seekTo)
         exo.prepare()
         lastKey = contentKey
+        lastUrl = mediaUrl
     }
 
     // Push state to the mobile remote every 1s; persist resume pos every ~5s.

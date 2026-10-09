@@ -252,7 +252,9 @@ async function boot() {
    them instead of reloading or exiting the whole SPA — that reload was what
    made navigation "reset" and feel broken. popstate re-renders whatever view
    the browser hands back, so Back/Forward Just Work. */
-const ROOT_TABS = ["browse", "live", "search", "np", "dl", "prefs", "debug", "devices", "settings"];
+// Five tabs, each one job: Home, Live, Search, Library, Remote. Settings
+// (with Devices and Debug under it) opens from the header.
+const ROOT_TABS = ["browse", "live", "search", "library", "np", "debug", "devices", "settings"];
 let originTab = "browse";   // last root tab — pushed frames highlight it + Back falls back to it
 
 function showPane(name) {
@@ -268,18 +270,17 @@ function showPane(name) {
   const btn = document.querySelector(`.tab[data-pane="${tabFor}"]`);
   if (btn) btn.classList.add("active");
   if (name === "np") refresh();
-  if (name === "dl") loadDownloads();
+  if (name === "library") { loadDownloads(); loadHistory(); }
   if (name === "devices") loadDevices();
   if (name === "debug") openDebug();
   else closeDebug();
-  if (name === "browse" && !browseLoaded) loadBrowse();
+  if (name === "browse") { if (!browseLoaded) loadBrowse(); loadHistory(); }
   if (name === "live" && !liveLoaded) loadLive();
-  if (name === "prefs") loadPrefs();
 }
 
 function renderView(view) {
   showPane(view.pane);
-  if (view.pane === "settings") loadSettings();
+  if (view.pane === "settings") { loadSettings(); loadPrefs(); }
   if (view.pane === "details"  && view.ctx) renderDetailsContent(view.ctx);
   if (view.pane === "episodes" && view.ctx) renderEpisodes(view.ctx);
   // A search frame can carry its query, so going back to it (or forward into
@@ -319,11 +320,15 @@ window.addEventListener("popstate", (e) => {
 $$(".tab").forEach(b => b.onclick = () => selectTab(b.dataset.pane));
 $("#searchBack") && ($("#searchBack").onclick = () => history.back());
 
-// Topbar Devices + Debug shortcuts (superuser only — visibility from fetchMe()).
+// Settings opens from the header; Devices and Debug (superuser only —
+// visibility from fetchMe()) open from inside Settings and come back to it.
+$("#settingsBtn") && ($("#settingsBtn").onclick = () => selectTab("settings"));
 const devicesBtn = $("#devicesBtn");
 if (devicesBtn) devicesBtn.onclick = () => selectTab("devices");
 const debugBtn = $("#debugBtn");
 if (debugBtn) debugBtn.onclick = () => selectTab("debug");
+$$(".sub-back").forEach(b => b.onclick = () => selectTab(b.dataset.back));
+$("#homeCwAll") && ($("#homeCwAll").onclick = () => selectTab("library"));
 
 /* ---------- Update banner ---------- */
 async function checkUpdate() {
@@ -976,7 +981,7 @@ $("#dDl").onclick = async () => {
     p.set("ep", $("#dEpisode").value || "1");
   }
   await post("/api/downloads/start?" + p.toString());
-  toast("Queued for download"); selectTab("dl");
+  toast("Queued for download"); selectTab("library");
 };
 
 /* ---------- now playing ---------- */
@@ -1194,7 +1199,7 @@ function syncTracks(s) {
   $("#ccRow").hidden = !hasCc;
   if (hasCc) {
     const ccSel = $("#ccSel");
-    const sig = "OFF|" + subs.map(x => x.code).join("|") + "::" + (s.subtitle || "");
+    const sig = "OFF|" + subs.map(x => x.code + "=" + x.name).join("|") + "::" + (s.subtitle || "");
     if (ccSel.dataset.sig !== sig) {
       ccSel.dataset.sig = sig;
       ccSel.innerHTML = "";
@@ -1210,7 +1215,39 @@ function syncTracks(s) {
         toast(ccSel.value ? "Subtitles: " + (ccSel.selectedOptions[0]?.textContent || ccSel.value) : "Subtitles off");
       };
     }
+    // Timing: shown while subtitles are on. Positive = later.
+    const on = !!s.subtitle;
+    $("#ccSyncRow").hidden = !on || !!s.subtitleMismatch;
+    $("#ccMismatch").hidden = !(on && s.subtitleMismatch);
+    if (on) {
+      const sync = $("#ccSync");
+      if (!sync.options.length) {
+        SUB_OFFSETS.forEach(ms => {
+          const o = document.createElement("option");
+          o.value = String(ms); o.textContent = offsetLabel(ms); sync.appendChild(o);
+        });
+        sync.onchange = async () => {
+          await post("/api/subtitle/offset?ms=" + encodeURIComponent(sync.value));
+          toast("Subtitles: " + offsetLabel(Number(sync.value)));
+        };
+      }
+      const cur = Number(s.subtitleOffsetMs || 0);
+      if (!SUB_OFFSETS.includes(cur) && !sync.querySelector(`option[value="${cur}"]`)) {
+        const o = document.createElement("option");
+        o.value = String(cur); o.textContent = offsetLabel(cur); sync.appendChild(o);
+      }
+      if (document.activeElement !== sync) sync.value = String(cur);
+      $("#ccSyncNote").textContent = s.subtitleAuto ? "set automatically" : "";
+    }
   }
+}
+
+// Same steps as the TV's Sync menu. Positive = subtitles later.
+const SUB_OFFSETS = [-5000, -3000, -2000, -1500, -1000, -500, 0, 500, 1000, 1500, 2000, 3000, 5000];
+function offsetLabel(ms) {
+  if (!ms) return "In sync";
+  const sec = (Math.abs(ms) / 1000).toFixed(1);
+  return ms < 0 ? `${sec} s earlier` : `${sec} s later`;
 }
 
 function fillSelect(sel, options, current, onPick) {
@@ -1359,7 +1396,7 @@ $("#npScrub").addEventListener("change", async (e) => {
 });
 
 /* ---------- history ---------- */
-$("#histClear")?.addEventListener("click", async () => {
+$("#cwClear")?.addEventListener("click", async () => {
   if (!confirm("Clear all continue-watching history?")) return;
   try { await post("/api/history/clear"); } catch (e) {}
   loadHistory();
@@ -1367,6 +1404,7 @@ $("#histClear")?.addEventListener("click", async () => {
 });
 async function loadHistory() {
   let items = []; try { items = await get("/api/history"); } catch (e) {}
+  renderHomeCw(items);
   const el = $("#history"); el.innerHTML = "";
   if (!items.length) {
     el.innerHTML = `<div class="muted small">Nothing watched yet.</div>`; return;
@@ -1388,6 +1426,38 @@ async function loadHistory() {
     h.innerHTML = `${escapeHtml(heading)} <span class="hist-count">${rows.length}</span>`;
     el.appendChild(h);
     rows.forEach(it => el.appendChild(historyRow(it)));
+  });
+}
+
+/** Home's Continue watching: the last few titles as cards, tap to resume on
+ *  the TV. The full list (and removing rows) is in Library. */
+function renderHomeCw(items) {
+  const wrap = $("#homeCw"), row = $("#homeCwRow");
+  if (!wrap || !row) return;
+  const recent = items.filter(it => it.kind !== "channel").slice(0, 12);
+  wrap.classList.toggle("hidden", recent.length === 0);
+  row.innerHTML = "";
+  recent.forEach(it => {
+    const pct = Math.round((it.progress || 0) * 100);
+    const label = it.season > 0 ? `S${it.season} · E${it.episode}` : "Movie";
+    const card = document.createElement("button");
+    card.className = "home-cw";
+    card.innerHTML = `
+      <span class="home-cw-art">
+        <img loading="lazy" src="${it.cover}" alt="" onerror="this.style.opacity=.25" />
+        <span class="cw-bar"><span style="width:${pct}%"></span></span>
+      </span>
+      <span class="home-cw-t">${escapeHtml(it.title)}</span>
+      <span class="home-cw-s">${label}</span>`;
+    card.onclick = async () => {
+      await post("/api/play?" + new URLSearchParams({
+        subjectId: it.subjectId, title: it.title, cover: it.cover, type: it.type,
+        se: it.season || "", ep: it.episode || "",
+      }));
+      toast("Playing on TV…");
+      selectTab("np");
+    };
+    row.appendChild(card);
   });
 }
 
@@ -2496,7 +2566,7 @@ function savePrefs(patch) {
 /* ---------- polling ---------- */
 setInterval(() => {
   if (active === "np")     refresh();
-  if (active === "dl")     loadDownloads();
+  if (active === "library") loadDownloads();
   if (active === "devices") loadDevices();
 }, 1500);
 

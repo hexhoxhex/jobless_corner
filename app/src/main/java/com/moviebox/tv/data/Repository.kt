@@ -755,7 +755,7 @@ class Repository(
                 kotlinx.coroutines.withTimeout(PER_PROVIDER_TIMEOUT_MS) {
                     resolvePlay(
                         subjectId = id, resolution = resolution, season = season,
-                        episode = episode, dub = dub, titleHint = title,
+                        episode = episode, dub = dub, titleHint = title, year = year,
                     )
                 }
             }
@@ -834,6 +834,9 @@ class Repository(
         episode: Int? = null,
         dub: String = "Original",
         titleHint: String? = null,
+        /** Release year, when known: keeps the OpenSubtitles lookup on the
+         *  right film or show among same-named ones. */
+        year: Int? = null,
         // Internal guard: allow ONE title-based re-resolution when the
         // given subjectId is dead (404 / 0 streams). Prevents infinite
         // recursion — the retry passes false.
@@ -1044,6 +1047,7 @@ class Repository(
                         episode = episode,
                         dub = dub,
                         titleHint = hint,
+                        year = year,
                         allowReresolve = false,
                     )
                 }
@@ -1088,16 +1092,25 @@ class Repository(
         // them. Bounded by a 6 s timeout so a slow lookup never blocks
         // playback. Languages aoneroom already provides are not
         // duplicated. See [OpenSubtitlesClient].
+        //
+        // Languages the source already has are listed too, marked as
+        // OpenSubtitles: when the source's own file is for the wrong episode
+        // or badly timed, the viewer needs another one to switch to. The
+        // player prefers the source's track.
         val subTitle = titleHint?.takeIf { it.isNotBlank() } ?: h5Detail?.title
         val externalCaptions = if (subTitle != null) {
-            val existing = aoneroomCaptions.map { it.code.take(2).lowercase() }.toSet()
             kotlinx.coroutines.withTimeoutOrNull(6_000) {
                 com.moviebox.tv.net.OpenSubtitlesClient.list(
                     title = subTitle, season = season ?: 0, episode = episode ?: 0,
+                    year = year,
                 )
             }.orEmpty()
-                .filter { it.code.lowercase() !in existing }
-                .map { CaptionTrack(it.code, it.name, it.url) }
+                .map {
+                    CaptionTrack(
+                        it.code, "${it.name} (OpenSubtitles)", it.url,
+                        external = true, alternates = it.alternates,
+                    )
+                }
         } else emptyList()
         val captions = aoneroomCaptions + externalCaptions
 

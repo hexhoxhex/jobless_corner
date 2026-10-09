@@ -185,14 +185,11 @@
         <span id="meLabel">…</span>
         <span id="meRole" class="role"></span>
       </div>
-      <button id="debugBtn" class="theme-toggle hidden" aria-label="Debug">
-        <svg class="icon"><use href="#i-bulb"/></svg>
-      </button>
-      <button id="devicesBtn" class="theme-toggle hidden" aria-label="Devices">
-        <svg class="icon"><use href="#i-users"/></svg>
-      </button>
-      <button id="themeBtn" class="theme-toggle" aria-label="Theme">
-        <svg class="icon"><use id="themeIcon" href="#i-sun"/></svg>
+      <!-- Everything that is set up once (taste, leagues, theme, devices,
+           debug, problem reports) lives behind this one button, so the
+           bottom bar holds only what is used every evening. -->
+      <button id="settingsBtn" class="theme-toggle" aria-label="Settings">
+        <svg class="icon"><use href="#i-gear"/></svg>
       </button>
     </div>
   </header>
@@ -310,8 +307,9 @@
     <div id="epGrid" class="ep-grid"></div>
   </section>
 
-  <!-- NOW PLAYING -->
+  <!-- REMOTE (now playing) -->
   <section id="pane-np" class="pane">
+    <h2 class="ph">Remote</h2>
     <!-- Empty state — shown when the TV isn't playing anything. Keeps the
          controls hidden so the page doesn't look like a pile of dead
          buttons. -->
@@ -400,6 +398,7 @@
       </div>
     </div>
     <div class="card" id="trackCard" hidden>
+      <h3 class="card-h">Picture &amp; sound</h3>
       <div class="row label-row" id="qaLabels">
         <span class="muted">Quality</span>
         <span class="muted">Audio</span>
@@ -425,66 +424,35 @@
         <div class="row">
           <select id="ccSel" class="select-pill"></select>
         </div>
+        <!-- Timing, for subtitles that come too early or too late. The TV
+             also measures it from the audio and fills it in by itself. -->
+        <div id="ccSyncRow" hidden>
+          <div class="row label-row">
+            <span class="muted">Subtitle timing</span>
+            <span id="ccSyncNote" class="muted small"></span>
+          </div>
+          <div class="row">
+            <select id="ccSync" class="select-pill"></select>
+          </div>
+        </div>
+        <p id="ccMismatch" class="cc-mismatch small" hidden>
+          These subtitles are for a different video, so the TV hides them.
+          Pick another language or file.
+        </p>
       </div>
-    </div>
-    <div class="card">
-      <div class="row label-row">
-        <h3 style="margin:0">Continue watching</h3>
-        <button id="histClear" class="ghost small">Clear all</button>
-      </div>
-      <div id="history" class="list"></div>
     </div>
   </section>
 
-  <!-- BROWSE -->
+  <!-- HOME -->
   <section id="pane-browse" class="pane">
-    <h2 class="ph">Browse</h2>
+    <h2 class="ph">Home</h2>
+    <div id="homeCw" class="row-h hidden">
+      <h3>Continue watching
+        <button id="homeCwAll" class="link-btn">See all</button>
+      </h3>
+      <div class="scroller" id="homeCwRow"></div>
+    </div>
     <div id="browseRows"></div>
-  </section>
-
-  <!-- PREFERENCES -->
-  <section id="pane-prefs" class="pane" style="padding:0 16px">
-    <h2 class="ph" style="padding:0">Your taste</h2>
-    <p class="muted small">
-      Picked networks float to the top of Browse. Deny languages are filtered
-      out of Search and Browse.
-    </p>
-
-    <div class="card">
-      <h3 class="card-h">Streaming services</h3>
-      <div id="prefNetworks" class="chips"></div>
-    </div>
-
-    <div class="card">
-      <h3 class="card-h">Favourite genres</h3>
-      <div id="prefGenres" class="chips"></div>
-    </div>
-
-    <div class="card">
-      <h3 class="card-h">Languages to hide</h3>
-      <div id="prefLangs" class="chips"></div>
-    </div>
-
-    <!-- Leagues: the schedule groups football by league, and this is where
-         someone adds one of their own (e.g. "Eliteserien", or a grouping
-         that collects the competitions they care about). -->
-    <div class="card">
-      <h3 class="card-h">Leagues</h3>
-      <p class="muted small" style="margin-top:0">
-        The schedule groups football by league. Add your own to pull the
-        competitions you follow into their own heading.
-      </p>
-      <div id="leagueList" class="chips"></div>
-      <div class="row" style="margin-top:12px; gap:8px">
-        <input id="leagueName" type="text" placeholder="League name"
-               autocomplete="off" style="flex:1 1 auto; min-width:0" />
-        <button id="leagueAdd" class="primary">Add</button>
-      </div>
-      <input id="leaguePatterns" type="text" autocomplete="off"
-             style="width:100%; margin-top:8px"
-             placeholder="Optional: words to match, comma separated" />
-      <div id="leagueStatus" class="muted small" style="margin-top:8px"></div>
-    </div>
   </section>
 
   <!-- DOWNLOADS -->
@@ -570,6 +538,71 @@
     <h2 class="ph">Settings</h2>
 
     <div class="set-group">
+      <div class="set-head">App</div>
+      <div class="set-list">
+        <button id="themeBtn" class="set-item" aria-label="Theme">
+          <svg class="icon"><use id="themeIcon" href="#i-sun"/></svg>
+          <span class="set-item-t">Light or dark theme</span>
+        </button>
+        <button id="devicesBtn" class="set-item hidden">
+          <svg class="icon"><use href="#i-users"/></svg>
+          <span class="set-item-t">Devices and pair code</span>
+          <svg class="icon sm set-chev"><use href="#i-chevron-left"/></svg>
+        </button>
+        <button id="debugBtn" class="set-item hidden">
+          <svg class="icon"><use href="#i-bulb"/></svg>
+          <span class="set-item-t">Debug</span>
+          <svg class="icon sm set-chev"><use href="#i-chevron-left"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <div class="set-group set-taste">
+      <div class="set-head">Your taste</div>
+
+    <p class="muted small">
+      Picked networks float to the top of Browse. Deny languages are filtered
+      out of Search and Browse.
+    </p>
+
+    <div class="card">
+      <h3 class="card-h">Streaming services</h3>
+      <div id="prefNetworks" class="chips"></div>
+    </div>
+
+    <div class="card">
+      <h3 class="card-h">Favourite genres</h3>
+      <div id="prefGenres" class="chips"></div>
+    </div>
+
+    <div class="card">
+      <h3 class="card-h">Languages to hide</h3>
+      <div id="prefLangs" class="chips"></div>
+    </div>
+
+    <!-- Leagues: the schedule groups football by league, and this is where
+         someone adds one of their own (e.g. "Eliteserien", or a grouping
+         that collects the competitions they care about). -->
+    <div class="card">
+      <h3 class="card-h">Leagues</h3>
+      <p class="muted small" style="margin-top:0">
+        The schedule groups football by league. Add your own to pull the
+        competitions you follow into their own heading.
+      </p>
+      <div id="leagueList" class="chips"></div>
+      <div class="row" style="margin-top:12px; gap:8px">
+        <input id="leagueName" type="text" placeholder="League name"
+               autocomplete="off" style="flex:1 1 auto; min-width:0" />
+        <button id="leagueAdd" class="primary">Add</button>
+      </div>
+      <input id="leaguePatterns" type="text" autocomplete="off"
+             style="width:100%; margin-top:8px"
+             placeholder="Optional: words to match, comma separated" />
+      <div id="leagueStatus" class="muted small" style="margin-top:8px"></div>
+    </div>
+    </div>
+
+    <div class="set-group">
       <div class="set-head">This TV</div>
       <div id="setInfo" class="set-rows"></div>
     </div>
@@ -593,17 +626,31 @@
     </div>
   </section>
 
-  <section id="pane-dl" class="pane">
-    <h2 class="ph">Downloads</h2>
-    <div id="downloads" class="list" style="padding:0 16px"></div>
-    <div id="dlEmpty" class="empty hidden">
-      <svg class="icon"><use href="#i-download"/></svg>
-      <p>No downloads yet.<br/>Open a title from Search and tap Download.</p>
+  <!-- LIBRARY -->
+  <section id="pane-library" class="pane">
+    <h2 class="ph">Library</h2>
+    <div class="lib-section">
+      <div class="lib-head">
+        <h3>Continue watching</h3>
+        <button id="cwClear" class="ghost small">Clear all</button>
+      </div>
+      <div id="history" class="list"></div>
+    </div>
+    <div class="lib-section">
+      <div class="lib-head"><h3>Downloads</h3></div>
+      <div id="downloads" class="list"></div>
+      <div id="dlEmpty" class="empty hidden">
+        <svg class="icon"><use href="#i-download"/></svg>
+        <p>No downloads yet.<br/>Open a title from Search and tap Download.</p>
+      </div>
     </div>
   </section>
 
   <!-- DEBUG (superuser only) -->
   <section id="pane-debug" class="pane" style="padding:0 16px">
+    <button class="back sub-back" data-back="settings">
+      <svg class="icon"><use href="#i-chevron-left"/></svg> Settings
+    </button>
     <div class="debug-head">
       <div>
         <h2 class="ph" style="padding:0;margin:0">Debug</h2>
@@ -655,6 +702,9 @@
 
   <!-- DEVICES (superuser only) -->
   <section id="pane-devices" class="pane" style="padding:0 16px">
+    <button class="back sub-back" data-back="settings">
+      <svg class="icon"><use href="#i-chevron-left"/></svg> Settings
+    </button>
     <h2 class="ph" style="padding:0">Devices</h2>
     <div class="card">
       <div class="row label-row"><span class="muted">Pair code</span></div>
@@ -672,7 +722,7 @@
   <!-- Bottom nav -->
   <nav class="tabbar">
     <button class="tab" data-pane="browse">
-      <svg class="icon"><use href="#i-flame"/></svg><i>Browse</i>
+      <svg class="icon"><use href="#i-flame"/></svg><i>Home</i>
     </button>
     <button class="tab" data-pane="live">
       <svg class="icon"><use href="#i-live"/></svg><i>Live</i>
@@ -680,17 +730,11 @@
     <button class="tab" data-pane="search">
       <svg class="icon"><use href="#i-search"/></svg><i>Search</i>
     </button>
+    <button class="tab" data-pane="library">
+      <svg class="icon"><use href="#i-download"/></svg><i>Library</i>
+    </button>
     <button class="tab" data-pane="np">
-      <svg class="icon"><use href="#i-now"/></svg><i>Now</i>
-    </button>
-    <button class="tab" data-pane="dl">
-      <svg class="icon"><use href="#i-download"/></svg><i>Downloads</i>
-    </button>
-    <button class="tab" data-pane="prefs">
-      <svg class="icon"><use href="#i-tune"/></svg><i>Taste</i>
-    </button>
-    <button class="tab" data-pane="settings">
-      <svg class="icon"><use href="#i-gear"/></svg><i>Settings</i>
+      <svg class="icon"><use href="#i-now"/></svg><i>Remote</i>
     </button>
   </nav>
 </main>
