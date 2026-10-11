@@ -759,6 +759,16 @@ class Repository(
                 )
                 break
             }
+            // MovieBox has said its free plays are used up: go straight on,
+            // unless links for this episode are already in hand (they cost
+            // nothing) or the viewer picked MovieBox themselves.
+            if (p == Provider.AONEROOM && only == null &&
+                com.moviebox.tv.net.H5Api.isLimited &&
+                !com.moviebox.tv.net.H5Api.hasLinksFor(subjectId, season ?: 0, episode ?: 0)
+            ) {
+                android.util.Log.i("Failover", "MovieBox skipped: its free plays are used up for now")
+                continue
+            }
             val id = runCatching {
                 kotlinx.coroutines.withTimeoutOrNull(LOOKUP_TIMEOUT_MS) {
                     idForProvider(p, subjectId, title, year, isSeries)
@@ -873,6 +883,25 @@ class Repository(
             )
         }
     }
+
+    /** True for a MovieBox catalogue id (not a TMDB- or provider-keyed one). */
+    fun isMovieBoxId(subjectId: String): Boolean =
+        Provider.of(subjectId) == Provider.AONEROOM && !subjectId.startsWith("tmdb:")
+
+    /** MovieBox's own catalogue flag for [subjectId]: whether it says it has
+     *  the video. A detail request, which costs nothing — unlike resolving a
+     *  stream, which spends one of MovieBox's few free plays. Null when
+     *  unknown (not a MovieBox id, or the lookup failed). */
+    suspend fun movieBoxHasVideo(subjectId: String, titleHint: String?): Boolean? {
+        if (!isMovieBoxId(subjectId)) return null
+        val dp = runCatching { detailPathTolerant(subjectId, titleHint) }.getOrNull()
+            ?: return null
+        return runCatching { com.moviebox.tv.net.H5Api.detail(dp)?.hasResource }.getOrNull()
+    }
+
+    /** TMDB's seasons of a series as (season, episode count); empty if none. */
+    suspend fun tmdbSeasons(tmdbId: Int): List<Pair<Int, Int>> =
+        runCatching { tmdb.seasonsOf(tmdbId) }.getOrDefault(emptyList())
 
     /** TMDB (id, isTv) for what's playing: from the provider id when the
      *  stream came from a TMDB-keyed source, otherwise by title. Null without

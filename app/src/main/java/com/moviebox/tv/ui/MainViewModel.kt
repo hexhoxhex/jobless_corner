@@ -1900,34 +1900,30 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      * responses in a row).
      */
     private suspend fun probeHiddenSeasons(resolvedId: String, expectedDetailId: String) {
+        // TMDB-keyed ids already take their seasons from TMDB.
+        if (!repo.isMovieBoxId(resolvedId)) return
         val cur = _state.value
         val known = cur.details?.seasons.orEmpty().mapNotNull { it.season }
             .toMutableList()
-        val highest = known.maxOrNull() ?: 0
-        if (highest >= HIDDEN_SEASON_PROBE_MAX) return
-        val discovered = mutableListOf<Int>()
-        var consecutiveGaps = 0
-        for (se in (highest + 1)..HIDDEN_SEASON_PROBE_MAX) {
-            val result = runCatching {
-                com.moviebox.tv.net.H5Api.play(
-                    subjectId = resolvedId,
-                    season = se, episode = 1,
-                    detailPath = com.moviebox.tv.net.H5Api.detailPathFor(resolvedId) ?: "",
-                )
-            }.getOrNull()
-            if (result != null && result.streams.isNotEmpty()) {
-                discovered.add(se)
-                consecutiveGaps = 0
-                android.util.Log.i(
-                    "SeasonProbe",
-                    "$resolvedId hidden season discovered: S$se (streams=${result.streams.size})",
-                )
-            } else {
-                consecutiveGaps += 1
-                if (consecutiveGaps >= 2) break // two empties → no more seasons
-            }
-        }
+        val title = cur.details?.title?.ifBlank { null }
+            ?: cur.detailItem?.title?.ifBlank { null } ?: return
+        // Seasons the catalogue page didn't list, from TMDB. This used to ask
+        // MovieBox to PLAY episode 1 of each season past the last known one —
+        // a full play request per season, on every series page opened, out
+        // of MovieBox's few free plays. The source chain (7Movies first)
+        // plays whatever is picked.
+        val tm = repo.tmdbFor(resolvedId, title, cur.detailItem?.year, isSeries = true)
+            ?: return
+        if (!tm.second) return
+        val tmdbSeasons = repo.tmdbSeasons(tm.first)
+        val counts = tmdbSeasons.toMap()
+        val discovered = tmdbSeasons.map { it.first }
+            .filter { it >= 1 && it !in known && (counts[it] ?: 0) > 0 }
         if (discovered.isEmpty()) return
+        android.util.Log.i(
+            "SeasonProbe",
+            "$resolvedId: TMDB lists seasons the catalogue didn't: $discovered",
+        )
         val cur2 = _state.value
         if (cur2.details?.subjectId != expectedDetailId ||
             cur2.detailItem?.subjectId != resolvedId
@@ -1938,13 +1934,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             // so we estimate from S1's count (typical for most series).
             // realEpisodes is left null so the user-visible flow can still
             // refine via enumeration if available.
-            val s1Eps = curDetails.seasons.firstOrNull()?.episodes ?: 10
             val newSeasons = curDetails.seasons.toMutableList()
             for (se in discovered) {
                 if (newSeasons.none { it.season == se }) {
-                    newSeasons.add(curDetails.seasons.first().copy(
-                        season = se, episodes = s1Eps, realEpisodes = null,
-                    ))
+                    val n = counts[se] ?: continue
+                    newSeasons.add(
+                        com.moviebox.tv.data.SeasonInfo(
+                            season = se, episodes = n, resolutions = emptyList(),
+                            realEpisodes = (1..n).toList(),
+                        ),
+                    )
                 }
             }
             newSeasons.sortBy { it.season }
@@ -1969,23 +1968,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val s1 = d.seasons.firstOrNull()?.season ?: 1
             val title = d.title.ifBlank { _state.value.detailItem?.title.orEmpty() }
             val isSeries = d.isSeries
-            suspend fun tryResolve(id: String) = runCatching {
-                repo.resolvePlay(
-                    subjectId = id,
-                    resolution = quality,
-                    season = if (isSeries) s1 else null,
-                    episode = if (isSeries) 1 else null,
-                    dub = dub,
-                    titleHint = title,
-                )
-            }
+            // Ask MovieBox's catalogue, not its player. Resolving a stream
+            // here spent one of MovieBox's few free plays (limited=true,
+            // freeNum=3 — 2026-10-11) on every title page opened, before
+            // anything was watched: browsing a handful of pages used them up.
+            val movieBoxId = repo.isMovieBoxId(resolvedId)
+            suspend fun hasVideo(id: String) = repo.movieBoxHasVideo(id, title) == true
 
-            // 1. Try the tapped subjectId first.
-            val first = tryResolve(resolvedId)
-            var workingId: String? = if (first.isSuccess &&
-                first.getOrNull()?.mediaUrl?.isNotBlank() == true) {
-                resolvedId
-            } else null
+            // 1. The tapped subjectId first. Ids tied to another source (a
+            //    7Movies/VidNest/TMDB pick) aren't swapped to a MovieBox
+            //    entry; the check below asks the other sources about them.
+            var workingId: String? =
+                if (movieBoxId && hasVideo(resolvedId)) resolvedId else null
 
             // 2. If the tapped subjectId has no streams, AUTO-PICK from search
             //    instead of telling the user to "pick from search" manually.
@@ -1995,7 +1989,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             //    7721864815710718808 (works). We search the same title,
             //    iterate matching items, and swap to the first playable one.
             //    Transparent to the user — they see "Play" not "pick".
-            if (workingId == null && title.isNotBlank()) {
+            if (workingId == null && movieBoxId && title.isNotBlank()) {
                 val matches = runCatching {
                     repo.search(keyword = title, type = SubjectType.ALL)
                 }.getOrNull().orEmpty()
@@ -2024,8 +2018,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         "precheck fallback: tapped $resolvedId failed, " +
                             "trying $cand.subjectId for \"${cand.title}\"",
                     )
-                    val r = tryResolve(cand.subjectId)
-                    if (r.isSuccess && r.getOrNull()?.mediaUrl?.isNotBlank() == true) {
+                    if (hasVideo(cand.subjectId)) {
                         workingId = cand.subjectId
                         break
                     }
@@ -2115,6 +2108,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                             season = if (isSeries) s1 else null,
                             episode = if (isSeries) 1 else null,
                             dub = dub,
+                            // Never MovieBox from here: its catalogue said
+                            // no above, and asking its player would spend a
+                            // free play on a page view.
+                            exclude = setOf(Repository.Provider.AONEROOM),
                         ).mediaUrl.isNotBlank()
                     }.getOrDefault(false)
                     val now = _state.value
@@ -2579,7 +2576,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             "VodDiag", "re-resolving stream, resume at ${positionMs / 1000}s",
         )
         _state.update { it.copy(error = null) }
-        com.moviebox.tv.net.H5Api.dropCachedStreams()
+        com.moviebox.tv.net.H5Api.dropCachedStreams(_state.value.play?.mediaUrl)
         resolve()
     }
 

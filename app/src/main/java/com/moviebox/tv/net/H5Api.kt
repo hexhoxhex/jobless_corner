@@ -98,18 +98,134 @@ object H5Api {
      *  Cleared with the process; no persistence needed. */
     private val detailPathCache = java.util.concurrent.ConcurrentHashMap<String, String>()
 
-    /** Cached resolved streams per (subjectId, season, episode). The signed
-     *  mp4 URLs carry a `t=` timestamp valid for ~3h, but we expire entries
-     *  at 30 min — well inside that window, and avoids re-running the WebView
-     *  resolver if the user re-opens the same title shortly after. */
+    /** Resolved links per (subjectId, season, episode).
+     *
+     *  MovieBox rations free plays (limited=true, freeNum=3 seen 2026-10-11),
+     *  so a link it has handed out is worth keeping for as long as it works.
+     *  Each signed mp4 URL carries `t=<signing time, epoch s>` and lasts ~3 h:
+     *  entries live until [LINK_LIFE_MS] after the oldest signature (30 min
+     *  when there is no `t=`; they used to expire at 30 min regardless), and
+     *  survive an app restart, so resuming after an update or a TV reboot
+     *  doesn't spend another play. */
     private data class CachedStreams(val streams: List<PlayStream>, val expiresAt: Long)
     private val streamCache = java.util.concurrent.ConcurrentHashMap<String, CachedStreams>()
+    private const val LINK_LIFE_MS = 150 * 60_000L
+    private const val LINK_FALLBACK_MS = 30 * 60_000L
+    private const val LINKS_PREFS = "moviebox_links"
+    private const val MAX_KEPT_LINKS = 40
+    @Volatile private var keptLoaded = false
+    private val SIGNED_AT = Regex("[?&]t=(\\d{10})(?:&|$)")
 
-    /** Forget cached links. Called when a link failed in the player, so the
-     *  re-resolve fetches fresh ones instead of handing back the same dead
-     *  link from the 30-minute cache. */
-    fun dropCachedStreams() = streamCache.clear()
     private fun cacheKey(subjectId: String, se: Int, ep: Int) = "$subjectId|$se|$ep"
+
+    /** Links for this episode that are still good, or null. */
+    private fun cachedLinks(key: String): List<PlayStream>? {
+        loadKeptLinks()
+        val c = streamCache[key] ?: return null
+        if (c.expiresAt > System.currentTimeMillis()) return c.streams
+        streamCache.remove(key)
+        saveKeptLinks()
+        return null
+    }
+
+    private fun keepLinks(key: String, streams: List<PlayStream>) {
+        val now = System.currentTimeMillis()
+        val signed = streams.mapNotNull { s ->
+            SIGNED_AT.find(s.url)?.groupValues?.get(1)?.toLongOrNull()
+        }.minOrNull()
+        val expires = if (signed != null) signed * 1000 + LINK_LIFE_MS else now + LINK_FALLBACK_MS
+        if (expires <= now + 60_000) return
+        loadKeptLinks()
+        streamCache[key] = CachedStreams(streams, expires)
+        // Bounded: the soonest-to-expire go first.
+        if (streamCache.size > MAX_KEPT_LINKS) {
+            streamCache.entries.sortedBy { it.value.expiresAt }
+                .take(streamCache.size - MAX_KEPT_LINKS)
+                .forEach { streamCache.remove(it.key) }
+        }
+        saveKeptLinks()
+    }
+
+    /** True when good links for this episode are already in hand, so playing
+     *  it from MovieBox costs nothing even while its free plays are used up. */
+    fun hasLinksFor(subjectId: String, se: Int, ep: Int): Boolean =
+        cachedLinks(cacheKey(subjectId, se, ep)) != null
+
+    /** Forget a link that failed in the player, so the re-resolve fetches a
+     *  fresh one instead of handing the same dead link back from the cache.
+     *  Null forgets everything. */
+    fun dropCachedStreams(failedUrl: String? = null) {
+        loadKeptLinks()
+        if (failedUrl == null) streamCache.clear()
+        else streamCache.entries.removeAll { e -> e.value.streams.any { it.url == failedUrl } }
+        saveKeptLinks()
+    }
+
+    private fun loadKeptLinks() {
+        if (keptLoaded) return
+        keptLoaded = true
+        runCatching {
+            val raw = com.moviebox.tv.App.instance
+                .getSharedPreferences(LINKS_PREFS, android.content.Context.MODE_PRIVATE)
+                .getString("links", null) ?: return
+            val now = System.currentTimeMillis()
+            val o = JSONObject(raw)
+            for (key in o.keys()) {
+                val e = o.optJSONObject(key) ?: continue
+                val exp = e.optLong("exp")
+                if (exp <= now) continue
+                val arr = e.optJSONArray("streams") ?: continue
+                val streams = (0 until arr.length()).mapNotNull { i ->
+                    val s = arr.optJSONObject(i) ?: return@mapNotNull null
+                    PlayStream(
+                        url = s.optString("url").takeIf { it.isNotBlank() } ?: return@mapNotNull null,
+                        resolution = s.optInt("res"),
+                        format = s.optString("format"),
+                        id = s.optString("id"),
+                        durationSec = s.optInt("dur"),
+                    )
+                }
+                if (streams.isNotEmpty()) streamCache.putIfAbsent(key, CachedStreams(streams, exp))
+            }
+        }
+    }
+
+    private fun saveKeptLinks() {
+        runCatching {
+            val o = JSONObject()
+            streamCache.forEach { (key, c) ->
+                val arr = JSONArray()
+                c.streams.forEach { s ->
+                    arr.put(
+                        JSONObject().put("url", s.url).put("res", s.resolution)
+                            .put("format", s.format).put("id", s.id).put("dur", s.durationSec),
+                    )
+                }
+                o.put(key, JSONObject().put("exp", c.expiresAt).put("streams", arr))
+            }
+            com.moviebox.tv.App.instance
+                .getSharedPreferences(LINKS_PREFS, android.content.Context.MODE_PRIVATE)
+                .edit().putString("links", o.toString()).apply()
+        }
+    }
+
+    /** Set when MovieBox answers that this session's free plays are used up.
+     *  Until then the app doesn't ask it for new links — every ask would be
+     *  refused anyway, and asking cost the viewer ~25 s before the next
+     *  source got its turn. */
+    @Volatile private var limitedUntil = 0L
+    private const val LIMITED_BACKOFF_MS = 30 * 60_000L
+
+    val isLimited: Boolean get() = System.currentTimeMillis() < limitedUntil
+
+    fun noteLimited(freeNum: Any?) {
+        limitedUntil = System.currentTimeMillis() + LIMITED_BACKOFF_MS
+        android.util.Log.w(
+            "H5Api",
+            "MovieBox says this session's free plays are used up (freeNum=$freeNum) — " +
+                "not asking it for new links for ${LIMITED_BACKOFF_MS / 60_000} min",
+        )
+    }
 
     fun detailPathFor(subjectId: String): String? = detailPathCache[subjectId]
 
@@ -271,13 +387,19 @@ object H5Api {
         // is still good for ~3h on the CDN; we expire at 30 min to be safe.
         // Saves the user the 2-4s WebView round trip on re-opens.
         val ckey = cacheKey(subjectId, season, episode)
-        streamCache[ckey]?.takeIf { it.expiresAt > System.currentTimeMillis() }?.let {
-            android.util.Log.i("H5Api", "stream cache HIT $ckey (${it.streams.size} streams)")
-            it.streams.forEachIndexed { i, s ->
+        cachedLinks(ckey)?.let { streams ->
+            android.util.Log.i("H5Api", "stream cache HIT $ckey (${streams.size} streams)")
+            streams.forEachIndexed { i, s ->
                 android.util.Log.i("H5Api", "  stream[$i] ${s.resolution}p ${s.format} " +
                     "${s.durationSec}s -> ${s.url.take(200)}")
             }
-            return@withContext PlayResult(it.streams, hasResource = true)
+            return@withContext PlayResult(streams, hasResource = true)
+        }
+        // Free plays used up: don't ask (see [noteLimited]).
+        if (isLimited) {
+            throw com.moviebox.tv.data.ApiException(
+                "MovieBox's free plays are used up for now.",
+            )
         }
         // Prime the proxy with a movie-page hit: this is what mints a
         // resource-capable `token` cookie. Without it, the play call returns
@@ -295,7 +417,7 @@ object H5Api {
         val data = raw?.let { runCatching { JSONObject(it).optJSONObject("data") }.getOrNull() }
         val direct = data?.let { parseStreamsList(it) } ?: emptyList()
         if (direct.isNotEmpty()) {
-            streamCache[ckey] = CachedStreams(direct, System.currentTimeMillis() + 30 * 60_000L)
+            keepLinks(ckey, direct)
             return@withContext PlayResult(direct, hasResource = data?.optBoolean("hasResource") ?: true)
         }
         // Direct HTTP returned 0 streams (typical: the proxy requires a real
@@ -308,7 +430,7 @@ object H5Api {
             season = season, episode = episode,
         )
         if (viaWebView.isNotEmpty()) {
-            streamCache[ckey] = CachedStreams(viaWebView, System.currentTimeMillis() + 30 * 60_000L)
+            keepLinks(ckey, viaWebView)
             viaWebView.forEachIndexed { i, s ->
                 android.util.Log.i("H5Api", "  webview[$i] ${s.resolution}p ${s.format} " +
                     "${s.durationSec}s -> ${s.url.take(200)}")

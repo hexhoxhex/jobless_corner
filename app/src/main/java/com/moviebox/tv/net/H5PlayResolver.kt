@@ -317,9 +317,16 @@ object H5PlayResolver {
                                     if (streams.isNotEmpty()) {
                                         Log.i(
                                             TAG,
-                                            "in-page play -> ${streams.size} stream(s), ask $n/$of",
+                                            "in-page play -> ${streams.size} stream(s), ask $n/$of " +
+                                                "(limited=${data?.opt("limited")} " +
+                                                "freeNum=${data?.opt("freeNum")})",
                                         )
                                         finish(streams)
+                                    } else if (data?.optBoolean("limited") == true) {
+                                        // Free plays used up: asking again
+                                        // only makes the viewer wait.
+                                        H5Api.noteLimited(data.opt("freeNum"))
+                                        finish(emptyList())
                                     } else {
                                         // Say what the site answered, so the
                                         // next "not available" explains itself.
