@@ -1038,6 +1038,11 @@ async function refresh() {
       }
     }
     $("#npTitle").textContent = s.title || "Nothing playing";
+    const skipBtn = $("#npSkip");
+    if (skipBtn) {
+      skipBtn.hidden = !s.skip;
+      if (s.skip) $("#npSkipLabel").textContent = s.skip;
+    }
     // Remember what's playing so the hero can open its details on tap.
     nowPlayingItem = s.subjectId ? {
       subjectId: s.subjectId,
@@ -1283,6 +1288,11 @@ $("#pp").onclick = () => {
 $("#epNext")?.addEventListener("click", () => post("/api/episode/next"));
 $("#epPrev")?.addEventListener("click", () => post("/api/episode/prev"));
 $("#npClose")?.addEventListener("click", () => post("/api/player/close"));
+$("#npSkip")?.addEventListener("click", async () => {
+  await post("/api/skip");
+  $("#npSkip").hidden = true;
+  refresh();
+});
 // "All episodes" → open the real season/episode picker for the playing series.
 $("#epList")?.addEventListener("click", () => {
   const s = lastState;

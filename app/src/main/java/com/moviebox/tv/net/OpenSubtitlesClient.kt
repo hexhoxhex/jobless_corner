@@ -77,6 +77,13 @@ object OpenSubtitlesClient {
         runCatching { subtitlesFor(imdb, season, episode) }.getOrDefault(emptyList())
     }
 
+    /** Same as [list] for a title whose IMDb id is already known — skips the
+     *  search by name, which took ~25 s for Rick and Morty on 2026-10-11. */
+    suspend fun listByImdb(imdb: String, season: Int, episode: Int): List<Sub> =
+        withContext(Dispatchers.IO) {
+            runCatching { subtitlesFor(imdb, season, episode) }.getOrDefault(emptyList())
+        }
+
     private fun imdbId(title: String, isSeries: Boolean, year: Int? = null): String? {
         // Keyed by type and year too: "The Office" (US, 2005) and "The
         // Office" (UK, 2001) are both an exact name match, and a title-only

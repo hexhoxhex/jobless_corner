@@ -977,6 +977,8 @@ button.icon-btn { flex: 0 0 auto; padding: 8px 10px; }
   overflow: hidden; }
 .np-desc.expanded { display: block; }
 .np-desc[hidden] { display: none; }
+.np-skip { width: 100%; justify-content: center; margin: 4px 0 10px; }
+.np-skip[hidden] { display: none; }
 
 /* ---- Continue Watching cards ---- */
 .list .cw-item { padding: 10px; align-items: center; gap: 12px; }

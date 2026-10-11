@@ -231,6 +231,19 @@ class TmdbRepository(token: String = BuildConfig.TMDB_TOKEN) {
             .map { it.seasonNumber to it.episodeCount }
     }
 
+    private val imdbIds = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /** IMDb id ("tt…") for a TMDB title, or null. Keys subtitle lookups
+     *  exactly, without the slow search by name. */
+    suspend fun imdbIdOf(tmdbId: Int, isTv: Boolean): String? {
+        val key = "${if (isTv) "tv" else "movie"}:$tmdbId"
+        imdbIds[key]?.let { return it }
+        val id = runCatching { api.externalIds(if (isTv) "tv" else "movie", tmdbId).imdbId }
+            .getOrNull()?.takeIf { it.startsWith("tt") } ?: return null
+        imdbIds[key] = id
+        return id
+    }
+
     /** TMDB id + whether it's a series, for a source title. Lets the play
      *  failover chain address TMDB-keyed providers (VixSrc) for a title that
      *  only came from aoneroom/4KHDHub. Null when there's no confident match. */

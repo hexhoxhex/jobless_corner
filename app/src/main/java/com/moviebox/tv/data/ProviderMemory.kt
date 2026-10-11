@@ -20,7 +20,11 @@ import android.content.Context
  */
 object ProviderMemory {
 
-    private const val PREFS = "provider_memory"
+    // "_v2" since v0.1.292: 7Movies became the first source, and every
+    // title already watched remembered its old one (MovieBox, mostly), so
+    // the new order would only ever have applied to titles never played.
+    // Starting fresh lets each title learn again.
+    private const val PREFS = "provider_memory_v2"
     private const val MAX = 300
 
     /** Provider label that last served [subjectId], or null. */

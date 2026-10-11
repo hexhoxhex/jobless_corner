@@ -329,7 +329,13 @@ object H5PlayResolver {
                                                 "(code=${json?.opt("code")} " +
                                                 "msg=${json?.optString("message")?.take(60)} " +
                                                 "hasResource=${data?.opt("hasResource")} " +
-                                                "keys=${data?.keys()?.asSequence()?.toList()?.take(12)})",
+                                                // limited=true + freeNum: MovieBox rations
+                                                // free plays per session (seen 2026-10-11).
+                                                // Not limitedCode: it carries the viewer's
+                                                // uid and public IP.
+                                                "limited=${data?.opt("limited")} " +
+                                                "freeNum=${data?.opt("freeNum")} " +
+                                                "vipLocked=${data?.opt("vipLocked")})",
                                         )
                                         again()
                                     }

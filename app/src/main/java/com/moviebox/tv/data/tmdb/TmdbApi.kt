@@ -57,6 +57,13 @@ interface TmdbApi {
         @Query("append_to_response") append: String = "videos,credits",
     ): TmdbDetailDto
 
+    /** The title's IMDb id, which keys subtitle lookups exactly. */
+    @GET("{kind}/{id}/external_ids")
+    suspend fun externalIds(
+        @Path("kind") kind: String,
+        @Path("id") id: Int,
+    ): TmdbExternalIds
+
     @GET("tv/{id}")
     suspend fun tvDetail(
         @Path("id") id: Int,
@@ -137,6 +144,11 @@ data class TmdbDetailDto(
     // Populated by append_to_response=videos,credits.
     val videos: TmdbVideos? = null,
     val credits: TmdbCredits? = null,
+)
+
+@JsonClass(generateAdapter = true)
+data class TmdbExternalIds(
+    @Json(name = "imdb_id") val imdbId: String? = null,
 )
 
 @JsonClass(generateAdapter = true)

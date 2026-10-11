@@ -182,7 +182,17 @@ object RemoteController {
         get() = vm?.subtitles?.state?.value?.offsetMs ?: 0L
 
     val creditsStartMs: Long?
-        get() = vm?.subtitles?.state?.value?.creditsStartMs
+        get() = vm?.let { it.skipTimesFor(it.state.value.play)?.creditsStartMs }
+            ?: vm?.subtitles?.state?.value?.creditsStartMs
+
+    /** "Skip intro" / "Skip recap" while the TV is in one (The Intro DB
+     *  times), else null. Set by the player. */
+    @Volatile var skipLabel: String? = null
+
+    /** Jumps past the current intro/recap. Set by the player. */
+    @Volatile var skipAction: (() -> Unit)? = null
+
+    fun skip() = main.post { skipAction?.invoke() }
 
     /** The offset was measured from the audio by the TV. */
     val subtitleAuto: Boolean

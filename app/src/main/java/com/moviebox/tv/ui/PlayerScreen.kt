@@ -45,6 +45,7 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -223,6 +224,8 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
     // remote in step; it is re-bound to every new item, which re-applies
     // that choice instead of silently resetting to "Off".
     val subs by vm.subtitles.state.collectAsState()
+    val skipTimesState by vm.skipTimes.collectAsState()
+    val skipTimes = skipTimesState?.takeIf { it.mediaUrl == play?.mediaUrl }?.times
     // While the app shows a track, the stream's own subtitles (some HLS
     // sources carry them) stay off, so the two never appear together.
     LaunchedEffect(subs.selectedId, exoRef) {
@@ -262,11 +265,12 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
     val nearEnd = play != null && !play.isLive && durationMs > 0 &&
         positionMs >= (durationMs - SKIP_BUTTON_WINDOW_MS)
     // The closing song / "thank you for watching" part of an episode:
-    // from where the dialogue ends (read from the subtitles) or, without
+    // where The Intro DB says the credits start when it knows the episode,
+    // else where the dialogue ends (read from the subtitles) or, without
     // subtitles, where the viewer pressed Next on earlier episodes of the
     // show. Viewers asked not to sit through it: the next episode counts
     // down from here.
-    val creditsStart = subs.creditsStartMs
+    val creditsStart = skipTimes?.creditsStartMs ?: subs.creditsStartMs
     val inCredits = play != null && !play.isLive && creditsStart != null &&
         durationMs > 0 && positionMs >= creditsStart && !contentEnded
     // "Keep watching" applies to THIS episode only. It used to switch
@@ -323,7 +327,10 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                 if (!scrubbing) positionMs = it.currentPosition
                 durationMs = it.duration.coerceAtLeast(0)
             }
-            if (!isLiveContent && durationMs > 0) vm.subtitles.onDuration(durationMs)
+            if (!isLiveContent && durationMs > 0) {
+                vm.subtitles.onDuration(durationMs)
+                play?.let { vm.lookUpSkipTimes(it, durationMs) }
+            }
             kotlinx.coroutines.delay(500)
         }
     }
@@ -511,6 +518,35 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
         }
     }
 
+    // The intro or recap being played right now, if The Intro DB marked one.
+    // The pill stops a second before its end so a skip always moves forward.
+    val activeSkip = if (play != null && !play.isLive) {
+        skipTimes?.segments?.firstOrNull {
+            positionMs >= it.startMs && positionMs < it.endMs - SKIP_SEGMENT_TAIL_MS
+        }
+    } else null
+    val skipLabel = if (activeSkip?.kind == "recap") "Skip recap" else "Skip intro"
+    val skipSegment: () -> Unit = {
+        activeSkip?.let { seg ->
+            scrubCommitJob?.cancel()
+            scrubbing = false
+            exoRef?.seekTo(seg.endMs)
+            positionMs = seg.endMs
+        }
+    }
+    val skipSegmentState = rememberUpdatedState(skipSegment)
+    LaunchedEffect(activeSkip != null, skipLabel) {
+        com.moviebox.tv.remote.RemoteController.skipLabel =
+            if (activeSkip != null) skipLabel else null
+    }
+    DisposableEffect(Unit) {
+        com.moviebox.tv.remote.RemoteController.skipAction = { skipSegmentState.value() }
+        onDispose {
+            com.moviebox.tv.remote.RemoteController.skipAction = null
+            com.moviebox.tv.remote.RemoteController.skipLabel = null
+        }
+    }
+
     Box(
         Modifier.fillMaxSize().background(Color.Black)
             .focusRequester(playerFocus)
@@ -578,7 +614,17 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                         }
                         controlsVisible = true; true
                     }
-                    Key.DirectionCenter, Key.Enter, Key.NumPadEnter,
+                    Key.DirectionCenter, Key.Enter, Key.NumPadEnter -> {
+                        // During an intro or recap OK skips it, as the pill on
+                        // screen says, instead of bringing up the controls.
+                        if (activeSkip != null && !isLiveNow) {
+                            skipSegment()
+                        } else {
+                            focusSeekBarOnShow = false
+                            controlsVisible = true
+                        }
+                        true
+                    }
                     Key.DirectionUp, Key.DirectionDown -> {
                         focusSeekBarOnShow = false
                         controlsVisible = true; true
@@ -1261,6 +1307,17 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
         // early; the next item always starts fresh at 0:00. (upNext,
         // nearEnd, endish, showUpNext, endOfContent, endOfSeries, nextPick
         // are computed once near the top so the key handler can see them.)
+        // "Skip intro": only while the controls are down, so it never competes
+        // with the overlay's buttons for OK. A tap also works on phones.
+        AnimatedVisibility(
+            visible = activeSkip != null && !controlsVisible && !upNextCardVisible,
+            modifier = Modifier.align(Alignment.BottomEnd)
+                .padding(end = 22.dp, bottom = 82.dp),
+            enter = androidx.compose.animation.fadeIn(),
+            exit = androidx.compose.animation.fadeOut(),
+        ) {
+            SkipPill(label = skipLabel, onSkip = skipSegment)
+        }
         AnimatedVisibility(
             visible = showUpNext,
             modifier = Modifier.align(Alignment.BottomEnd)
@@ -1365,6 +1422,9 @@ private const val SCRUB_TAP_MS: Long = 10_000L
 
 /** Quiet time after the last press before the player actually seeks. */
 private const val SCRUB_COMMIT_MS: Long = 700L
+
+/** The skip pill goes away this long before the intro/recap ends. */
+private const val SKIP_SEGMENT_TAIL_MS = 1_000L
 
 /** How early (before content end) the Up Next overlay starts showing.
  *  Sized for the typical end-credit length so the user sees the card during
@@ -1576,6 +1636,34 @@ private fun nextEpisodeFor(state: UiState): Pair<Int, Int>? {
         // filtered, or details are mid-refresh). Best effort: the first
         // tuple that sorts after it.
         flat.firstOrNull { (s, e) -> s > se || (s == se && e > ep) }
+    }
+}
+
+@Composable
+private fun SkipPill(label: String, onSkip: () -> Unit) {
+    Row(
+        Modifier.clip(RoundedCornerShape(22.dp))
+            .background(Color(0xEE0A0C12))
+            .border(1.dp, Color(0x55FFFFFF), RoundedCornerShape(22.dp))
+            // Not focusable: the player surface keeps focus and turns OK
+            // into a skip while this is showing.
+            .pointerInput(onSkip) { detectTapGestures(onTap = { onSkip() }) }
+            .padding(start = 16.dp, end = 10.dp, top = 10.dp, bottom = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Filled.FastForward, contentDescription = null,
+            tint = Color.White, modifier = Modifier.size(22.dp))
+        Spacer(Modifier.width(8.dp))
+        Text(label, color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+        Spacer(Modifier.width(10.dp))
+        Box(
+            Modifier.clip(RoundedCornerShape(6.dp))
+                .background(Color(0x33FFFFFF))
+                .padding(horizontal = 7.dp, vertical = 2.dp),
+        ) {
+            Text("OK", color = Color(0xCCFFFFFF), fontWeight = FontWeight.SemiBold,
+                fontSize = 12.sp)
+        }
     }
 }
 

@@ -60,9 +60,17 @@ object ProviderConfig {
         val ranked = defaults.filterNot { disabled.contains(it.label) }
         if (order.isEmpty()) return ranked.ifEmpty { defaults }
         val position = order.withIndex().associate { (i, label) -> label to i }
-        return ranked
-            .sortedBy { position[it.label] ?: Int.MAX_VALUE }
-            .ifEmpty { defaults }
+        val result = ranked.filter { it.label in position }
+            .sortedBy { position[it.label] }
+            .toMutableList()
+        // A provider the file doesn't name keeps its built-in place, as the
+        // doc above (and the file's own comment) promise. It used to go LAST,
+        // so a source added in a release (7Movies, first since v0.1.292) sat
+        // behind everything until the file was edited.
+        ranked.filter { it.label !in position }.forEach { p ->
+            result.add(defaults.indexOf(p).coerceIn(0, result.size), p)
+        }
+        return result.ifEmpty { defaults }
     }
 
     /** Load from cache immediately, then refresh from the network if stale.

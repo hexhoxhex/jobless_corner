@@ -344,6 +344,10 @@
       <input id="npScrub" type="range" min="0" max="1000" value="0"
              class="pos-slider" aria-label="Position" />
       <div class="time"><span id="npPos">0:00</span><span id="npDur">0:00</span></div>
+      <!-- Shown while the TV is in an intro or recap The Intro DB knows. -->
+      <button id="npSkip" class="primary np-skip" hidden>
+        <svg class="icon"><use href="#i-skip-next"/></svg> <span id="npSkipLabel">Skip intro</span>
+      </button>
       <div class="row">
         <button id="back10">
           <svg class="icon"><use href="#i-back10"/></svg>

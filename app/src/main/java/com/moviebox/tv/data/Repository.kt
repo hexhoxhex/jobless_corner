@@ -655,9 +655,12 @@ class Repository(
      *  origin is visible and switchable. */
     enum class Provider(val label: String) {
         // Order is the failover order for a title with no explicit source.
-        // MovieBox first (streaming-sized files, measured smooth), then the
-        // TMDB-keyed adaptive-HLS providers, then 4KHDHub, whose download-
-        // oriented rips are the least suited to streaming.
+        // 7Movies first (the user's pick, 2026-10-11: up to 1080p from
+        // several servers), then MovieBox (streaming-sized files, measured
+        // smooth), then the TMDB-keyed adaptive-HLS providers, then 4KHDHub,
+        // whose download-oriented rips are the least suited to streaming.
+        // The published provider config can reorder or disable any of them.
+        SEVENMOVIES("7Movies"),
         AONEROOM("MovieBox"),
         VIDNEST("VidNest"),
         ICEFY("Icefy"),
@@ -666,6 +669,7 @@ class Repository(
 
         companion object {
             fun of(subjectId: String): Provider = when {
+                subjectId.startsWith(com.moviebox.tv.net.SevenMovies.PREFIX) -> SEVENMOVIES
                 subjectId.startsWith(com.moviebox.tv.net.VidNest.PREFIX) -> VIDNEST
                 subjectId.startsWith(com.moviebox.tv.net.Icefy.PREFIX) -> ICEFY
                 subjectId.startsWith(com.moviebox.tv.net.VixSrc.PREFIX) -> VIXSRC
@@ -709,7 +713,12 @@ class Repository(
                 Provider.entries.firstOrNull { it.label == label }
             }
         } else null
-        val first = only ?: remembered ?: Provider.of(subjectId)
+        // An item tied to one source (a VixSrc or 7Movies id) still asks that
+        // source first. A catalogue item no longer does: every catalogue id
+        // counted as MovieBox's, so MovieBox went first whatever the config
+        // said and the configured order never applied to most titles.
+        val keyed = Provider.of(subjectId).takeIf { it != Provider.AONEROOM }
+        val first = only ?: remembered ?: keyed
         // Remote config decides which providers are live and in what order —
         // a source that dies is a published file edit, not an app release.
         // Falls back to the built-in list if the config is absent or bad.
@@ -718,7 +727,7 @@ class Repository(
             only != null -> listOf(only)
             // Whatever the item is already keyed to still goes first, even if
             // the config would rank it lower: the caller asked for that source.
-            else -> (listOf(first) + available.filter { it != first })
+            else -> (listOfNotNull(first) + available.filter { it != first })
                 .filter { it == first || available.contains(it) }
                 .filter { it !in exclude }
         }
@@ -803,6 +812,9 @@ class Repository(
             Provider.VIXSRC -> tmdb.matchId(title, year, isSeries)?.let { (id, isTv) ->
                 "${com.moviebox.tv.net.VixSrc.PREFIX}${if (isTv) "tv" else "movie"}:$id"
             }
+            Provider.SEVENMOVIES -> tmdb.matchId(title, year, isSeries)?.let { (id, isTv) ->
+                "${com.moviebox.tv.net.SevenMovies.PREFIX}${if (isTv) "tv" else "movie"}:$id"
+            }
             Provider.VIDNEST -> tmdb.matchId(title, year, isSeries)?.let { (id, isTv) ->
                 "${com.moviebox.tv.net.VidNest.PREFIX}${if (isTv) "tv" else "movie"}:$id"
             }
@@ -821,6 +833,7 @@ class Repository(
     private fun tmdbKeyOf(subjectId: String): Pair<Int, Boolean>? {
         val prefixes = listOf(
             "tmdb:",
+            com.moviebox.tv.net.SevenMovies.PREFIX,
             com.moviebox.tv.net.VidNest.PREFIX,
             com.moviebox.tv.net.Icefy.PREFIX,
             com.moviebox.tv.net.VixSrc.PREFIX,
@@ -830,6 +843,47 @@ class Repository(
         val id = rest.substringAfterLast(':').toIntOrNull() ?: return null
         return id to rest.startsWith("tv")
     }
+
+    /** Lookups a play waits on only up to a deadline. Outside the caller's
+     *  scope on purpose: a structured child that blocks in OkHttp can't be
+     *  cancelled, and its parent would wait for it anyway (a 25 s subtitle
+     *  search held 7Movies' start by 17 s on 2026-10-11). */
+    private val sideScope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO,
+    )
+
+    /** OpenSubtitles tracks for a TMDB-keyed title: by IMDb id from TMDB
+     *  (fast and exact), else by name like the MovieBox path. */
+    private fun openSubtitlesAsync(
+        tmdbId: Int, isTv: Boolean, title: String, season: Int, episode: Int, year: Int?,
+    ) = sideScope.async {
+        val imdb = runCatching { tmdb.imdbIdOf(tmdbId, isTv) }.getOrNull()
+        val subs = when {
+            imdb != null ->
+                com.moviebox.tv.net.OpenSubtitlesClient.listByImdb(imdb, season, episode)
+            title.isNotBlank() -> com.moviebox.tv.net.OpenSubtitlesClient.list(
+                title = title, season = season, episode = episode, year = year,
+            )
+            else -> emptyList()
+        }
+        subs.map {
+            CaptionTrack(
+                it.code, "${it.name} (OpenSubtitles)", it.url,
+                external = true, alternates = it.alternates,
+            )
+        }
+    }
+
+    /** TMDB (id, isTv) for what's playing: from the provider id when the
+     *  stream came from a TMDB-keyed source, otherwise by title. Null without
+     *  a confident match. Used to look up skip times ([com.moviebox.tv.net.IntroDb]). */
+    suspend fun tmdbFor(
+        providerSubjectId: String, title: String, year: Int?, isSeries: Boolean,
+    ): Pair<Int, Boolean>? =
+        tmdbKeyOf(providerSubjectId)
+            ?: title.takeIf { it.isNotBlank() }?.let {
+                runCatching { tmdb.matchId(it, year, isSeries) }.getOrNull()
+            }
 
     /** Loose title equality for cross-provider matching — provider titles carry
      *  their own decorations ("S1-S5", "[English]", release tags). */
@@ -885,6 +939,32 @@ class Repository(
                 season = season, episode = episode, dub = dub,
                 titleHint = titleHint, allowReresolve = allowReresolve,
             )
+        }
+        // 7Movies: TMDB-keyed HLS from several servers (see SevenMovies).
+        if (subjectId.startsWith(com.moviebox.tv.net.SevenMovies.PREFIX)) {
+            val rest = subjectId.removePrefix(com.moviebox.tv.net.SevenMovies.PREFIX)
+            val isTv = rest.startsWith("tv:")
+            val tmdbId = rest.substringAfterLast(':').toIntOrNull()
+                ?: throw ApiException("This title isn't available right now.")
+            val se = if (isTv) (season ?: 1) else 0
+            val ep = if (isTv) (episode ?: 1) else 0
+            // Subtitles look-up runs alongside the stream search.
+            val subs = openSubtitlesAsync(tmdbId, isTv, titleHint.orEmpty(), se, ep, year)
+            val info = com.moviebox.tv.net.SevenMovies.resolvePlay(
+                tmdbId = tmdbId, season = se, episode = ep,
+                title = titleHint.orEmpty(), resolution = resolution,
+            ) ?: run {
+                subs.cancel()
+                throw ApiException("This title isn't available right now.")
+            }
+            // Have the next episode ready by the time this one ends.
+            if (isTv) com.moviebox.tv.net.SevenMovies.warm(tmdbId, se, ep + 1)
+            // A little longer for subtitles once the stream is ready, never
+            // more: a slow lookup must not hold playback up.
+            val captions = kotlinx.coroutines.withTimeoutOrNull(SUBS_GRACE_MS) {
+                subs.await()
+            }.orEmpty()
+            return info.copy(captions = info.captions + captions)
         }
         // VidNest: TMDB-keyed adaptive HLS. Its CDN requires the Referer that
         // came back with the stream, which travels in PlayInfo.headers.
@@ -1247,6 +1327,8 @@ class Repository(
          *  budget the others need. Wide enough for the aoneroom WebView
          *  resolver, which legitimately takes 10-20 s on a cold start. */
         private const val PER_PROVIDER_TIMEOUT_MS = 30_000L
+        /** How long a ready stream waits for its subtitle list. */
+        private const val SUBS_GRACE_MS = 4_000L
         /** Cap on the cheap "does this provider have the title" lookup. */
         private const val LOOKUP_TIMEOUT_MS = 12_000L
 

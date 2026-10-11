@@ -138,6 +138,9 @@ class RemoteServer(
             // turns subtitles off; any other value enables that language's
             // track on the TV player.
             // Subtitle timing from the phone, ms (positive = later).
+            uri == "/api/skip" && method == Method.POST -> {
+                RemoteController.skip(); ok()
+            }
             uri == "/api/subtitle/offset" && method == Method.POST -> {
                 RemoteController.setSubtitleOffset(p("ms")?.toLongOrNull() ?: 0L); ok()
             }
@@ -1315,6 +1318,7 @@ class RemoteServer(
         // Where the next-episode countdown starts (closing credits), -1 if
         // unknown.
         .put("creditsStartMs", RemoteController.creditsStartMs ?: -1L)
+        .put("skip", RemoteController.skipLabel ?: "")
         .toString()
 
     /** Cap on feeds probed in one request — each costs a short read. */

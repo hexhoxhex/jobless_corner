@@ -252,6 +252,48 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun showKeyFor(play: PlayInfo): String =
         SubtitleSession.showKeyOf(_state.value.detailItem?.title?.ifBlank { null } ?: play.title)
 
+    /** Intro, recap and credits times for the stream that is playing, from
+     *  The Intro DB; null when it has none (or until it answers). Drives the
+     *  player's "Skip intro" pill and brings the next-episode countdown to
+     *  where the credits really start. */
+    private val _skipTimes = MutableStateFlow<SkipTimes?>(null)
+    val skipTimes: StateFlow<SkipTimes?> = _skipTimes.asStateFlow()
+    private var skipTimesFor: String? = null
+
+    /** [times] belong to the stream at [mediaUrl] only: while the next title
+     *  loads, the previous one's intro must not offer a skip (position 0:00
+     *  fell inside Rick and Morty S1E3's intro as a film started). */
+    data class SkipTimes(val mediaUrl: String, val times: com.moviebox.tv.net.IntroDb.Times)
+
+    /** Skip times for [play], or null when they are for something else. */
+    fun skipTimesFor(play: PlayInfo?): com.moviebox.tv.net.IntroDb.Times? =
+        _skipTimes.value?.takeIf { play != null && it.mediaUrl == play.mediaUrl }?.times
+
+    /** Called by the player once [play]'s duration is known; looks the times
+     *  up once per stream. */
+    fun lookUpSkipTimes(play: PlayInfo, durationMs: Long) {
+        if (play.isLive || durationMs <= 0) return
+        val key = play.mediaUrl
+        if (skipTimesFor == key) return
+        skipTimesFor = key
+        _skipTimes.value = null
+        val item = _state.value.detailItem
+        viewModelScope.launch {
+            val tm = repo.tmdbFor(
+                providerSubjectId = play.providerSubjectId,
+                title = item?.title?.ifBlank { null } ?: play.title,
+                year = item?.year,
+                isSeries = play.season > 0,
+            ) ?: return@launch
+            val times = com.moviebox.tv.net.IntroDb.lookup(
+                tmdbId = tm.first, isTv = tm.second,
+                season = play.season, episode = play.episode,
+                durationMs = durationMs,
+            ) ?: return@launch
+            if (skipTimesFor == key) _skipTimes.value = SkipTimes(key, times)
+        }
+    }
+
     val continueWatching: StateFlow<List<WatchHistoryEntity>> =
         watchDao.continueWatching()
             .map { list ->
