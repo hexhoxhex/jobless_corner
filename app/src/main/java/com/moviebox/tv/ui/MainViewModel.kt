@@ -864,10 +864,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val nonTunnelingChannels = mutableSetOf<String>()
 
     private companion object {
-        /** Never auto-switch more often than this. Two minutes is longer
-         *  than a recoverable CDN wobble, so a feed gets a real chance to
-         *  settle before we give up on it. */
-        const val AUTO_SWITCH_COOLDOWN_MS = 2 * 60 * 1000L
+        /** Never auto-switch on a stall more often than this. It was two
+         *  minutes, and viewers reported the app "switches by itself" over a
+         *  match (2026-10-14): a feed gets a real chance to settle first. */
+        const val AUTO_SWITCH_COOLDOWN_MS = 10 * 60 * 1000L
+
+        /** After the viewer picks a feed themselves, leave it alone this
+         *  long unless it turns out broken. */
+        const val MANUAL_PICK_GRACE_MS = 5 * 60 * 1000L
+
+        /** Moving away from a BROKEN feed (repeats, bad audio timing) may
+         *  happen sooner than a stall switch, but not back-to-back. */
+        const val BROKEN_SWITCH_GAP_MS = 3 * 60 * 1000L
 
         /** Rest after an attempt that found no better feed.
          *
@@ -914,6 +922,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 logo = ch.logo, group = ch.group,
                 now = System.currentTimeMillis(),
             )
+        }
+        // The viewer's own pick: leave it alone for a while (see
+        // autoSwitchFeed) and give it a fresh pool of alternates.
+        if (!switchingAutomatically) {
+            lastManualPickAt = android.os.SystemClock.elapsedRealtime()
+            autoSwitchTried.clear()
         }
         // Reset the auto-failover tried-set when the user manually picks
         // a channel. Auto-failover itself also calls playChannel, but that
@@ -1178,9 +1192,23 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val alternates = liveRepo.alternatesForEventOn(
             failingChannelId, channels, schedule, nowSec,
         )
-        val next = alternates.firstOrNull {
-            it.id != failingChannelId && it.id !in triedFailoverAlternates
-        } ?: run {
+        // Same language only, and never a feed already seen broken: this used
+        // to take the FIRST alternate listed for the event, whatever its
+        // commentary — an English viewer whose feed hiccupped three times
+        // could land on a Polish one ("it switches by itself").
+        val failingName = channels.firstOrNull { it.id == failingChannelId }?.name
+            ?: _state.value.currentLiveChannel?.takeIf { it.id == failingChannelId }?.name
+        val myLang = com.moviebox.tv.data.live.ChannelLanguage.guess(failingName)
+        val next = alternates.asSequence()
+            .filter { it.id != failingChannelId && it.id !in triedFailoverAlternates }
+            .filter {
+                com.moviebox.tv.data.live.ChannelLanguage.compatible(
+                    myLang, com.moviebox.tv.data.live.ChannelLanguage.guess(it.name),
+                )
+            }
+            .filter { com.moviebox.tv.data.live.FeedRanker.brokenReason(it.id) == null }
+            .sortedBy { com.moviebox.tv.data.live.ChannelLanguage.preference(it.name) }
+            .firstOrNull() ?: run {
             android.util.Log.i(
                 "LiveDiag",
                 "AUTO_FAILOVER ch=$failingChannelId exhausted — " +
@@ -1214,7 +1242,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(
             error = "Switched to ${next.displayName} — original feed had issues.",
         ) }
-        playChannel(next)
+        switchingAutomatically = true
+        try { playChannel(next) } finally { switchingAutomatically = false }
     }
 
     /** Truly-last-resort fallback. Only called after refreshLiveStream has
@@ -1407,42 +1436,71 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var lastAutoSwitchAt = 0L
     @Volatile private var autoSwitchInFlight = false
     private var lastAutoSwitchFailedAt = 0L
+    /** When the viewer last picked a live channel themselves. */
+    @Volatile private var lastManualPickAt = 0L
+    /** True while an automatic switch is starting a channel, so playChannel
+     *  doesn't mistake it for the viewer's own pick. */
+    @Volatile private var switchingAutomatically = false
+
+    init {
+        // A feed seen broken while playing (the proxy saw it repeat chunks,
+        // or the player saw its audio timing fail): move off it once.
+        com.moviebox.tv.data.live.FeedRanker.onBroken = { channelId, why ->
+            viewModelScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+                if (_state.value.currentLiveChannel?.id == channelId &&
+                    _state.value.play?.isLive == true
+                ) {
+                    autoSwitchFeed("broken: $why", urgent = true, brokenWhy = why)
+                }
+            }
+        }
+    }
 
     /**
-     * The current feed can't sustain playback — move to a mirror that can.
+     * Move to a better mirror of the same match.
      *
-     * Only fires on a measured bandwidth-bound stall, never on an ordinary
-     * hiccup, and never more than once per [AUTO_SWITCH_COOLDOWN_MS] so a
-     * bad night can't turn into channel roulette. If nothing has been
-     * measured yet it probes first, which costs a few seconds but beats
-     * switching blind to a feed that may be worse.
+     * The viewer asked for this to happen far less (2026-10-14: "it switches
+     * by itself"), and only to feeds they would accept:
+     *  - same commentary language only ([ChannelLanguage.compatible]);
+     *  - never on a thin buffer alone ([urgent] false) — only when playback
+     *    has actually stalled, or the feed is broken ([brokenWhy]);
+     *  - not within [MANUAL_PICK_GRACE_MS] of the viewer's own pick unless
+     *    the feed is broken;
+     *  - at most once per [AUTO_SWITCH_COOLDOWN_MS] for stalls (a broken
+     *    feed: [BROKEN_SWITCH_GAP_MS]), never back to a feed already tried,
+     *    never to one marked broken;
+     *  - and it says why.
      */
-    fun autoSwitchFeed(reason: String, urgent: Boolean = false) {
-        val current = _state.value.currentLiveChannel?.id ?: return
+    fun autoSwitchFeed(
+        reason: String,
+        urgent: Boolean = false,
+        brokenWhy: String? = null,
+        /** Diagnostics: skip the waiting rules (language still applies). */
+        force: Boolean = false,
+    ) {
+        val currentCh = _state.value.currentLiveChannel ?: return
+        val current = currentCh.id
+        val broken = brokenWhy != null
         val now = android.os.SystemClock.elapsedRealtime()
-        // One attempt at a time, and a long rest after an attempt that found
-        // nothing.
-        //
-        // Only a SUCCESSFUL switch used to arm the cooldown. When no mirror
-        // qualified, the attempt returned without it, so on a dying stream
-        // the stall trigger fired every ~25 s and every firing probed up to
-        // six more feeds — each a 3-4 s resolve against the same failing
-        // origin. Measured on Sky Sports Premier League (phantemlis, 11 of 17
-        // masters HTTP 500): 7 fruitless attempts in 3 minutes, all of it
-        // extra load on a stream already stalled 86% of the time. "No better
-        // feed exists" does not change in half a minute.
+        if (!urgent) {
+            // A feed that is still playing on a thin buffer stays. This used
+            // to move viewers pre-emptively, which they saw as random switching.
+            android.util.Log.i("LiveDiag", "AUTOSWITCH not switching (still playing) reason=$reason")
+            return
+        }
         if (autoSwitchInFlight) {
             android.util.Log.i("LiveDiag", "AUTOSWITCH skipped (attempt in flight) reason=$reason")
             return
         }
-        // ...but "nothing better a while ago" must not gag a switch when the
-        // feed has since DIED or started starving. Measured on a Premier
-        // League match: the stall trigger fired three times while the buffer
-        // sat under a second, and each firing was answered with
-        // "AUTOSWITCH suppressed (nothing better found 118s/173s/216s ago)".
-        // The viewer watched a frozen picture while the one mechanism that
-        // could rescue them was resting.
-        if (!urgent &&
+        if (!force && !broken && lastManualPickAt != 0L && now - lastManualPickAt < MANUAL_PICK_GRACE_MS) {
+            android.util.Log.i(
+                "LiveDiag",
+                "AUTOSWITCH suppressed (viewer picked this feed " +
+                    "${(now - lastManualPickAt) / 1000}s ago) reason=$reason",
+            )
+            return
+        }
+        if (!force && !broken &&
             lastAutoSwitchFailedAt != 0L &&
             now - lastAutoSwitchFailedAt < AUTO_SWITCH_FAILED_COOLDOWN_MS
         ) {
@@ -1453,15 +1511,27 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             )
             return
         }
-        if (now - lastAutoSwitchAt < AUTO_SWITCH_COOLDOWN_MS) {
+        val gap = if (broken) BROKEN_SWITCH_GAP_MS else AUTO_SWITCH_COOLDOWN_MS
+        if (!force && lastAutoSwitchAt != 0L && now - lastAutoSwitchAt < gap) {
             android.util.Log.i(
-                "LiveDiag", "AUTOSWITCH suppressed (cooldown) reason=$reason",
+                "LiveDiag", "AUTOSWITCH suppressed (switched ${(now - lastAutoSwitchAt) / 1000}s ago) reason=$reason",
             )
             return
         }
-        val siblings = siblingFeeds(current)
+        val lang = com.moviebox.tv.data.live.ChannelLanguage
+        val myLang = lang.guess(currentCh.name)
+        val siblings = siblingFeeds(current).filter { (id, name) ->
+            id == current || lang.compatible(myLang, lang.guess(name))
+        }
+        val currentName = currentCh.displayName
+        val langWord = if (myLang == com.moviebox.tv.data.live.ChannelLanguage.Guess.ENGLISH) "English " else ""
         if (siblings.size <= 1) {
-            android.util.Log.i("LiveDiag", "AUTOSWITCH no siblings for $current")
+            android.util.Log.i("LiveDiag", "AUTOSWITCH no ${langWord}siblings for $current")
+            if (broken) {
+                com.moviebox.tv.data.live.LiveStatus.note(
+                    "$currentName: $brokenWhy. No other ${langWord}feed for this match.",
+                )
+            }
             return
         }
         autoSwitchInFlight = true
@@ -1473,18 +1543,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             if (pick == null) {
                 // Nothing fresh enough to trust — measure, then decide.
                 com.moviebox.tv.data.live.LiveStatus.note(
-                    "Checking other feeds for this match…",
+                    "Checking other ${langWord}feeds for this match…",
                 )
-                // One at a time, stopping at the first usable answer.
-                //
-                // probeAll measured the whole batch before anyone looked at
-                // the results, so a congested match cost six resolves and six
-                // segment samples — pulled over the same thin pipe the
-                // stalling stream was fighting for. Measured: six probe
-                // resolves inside three minutes while the viewer's buffer sat
-                // under a second. Spend the bandwidth only until there is
-                // something to switch to.
-                val candidates = siblings.keys.filter { it !in exclude }
+                // One at a time, stopping at the first usable answer, so
+                // checking doesn't starve the stream it's trying to rescue.
+                val candidates = siblings.keys
+                    .filter { it !in exclude && ranker.brokenReason(it) == null }
                     .take(AUTO_SWITCH_PROBE_LIMIT)
                 for (cand in candidates) {
                     runCatching { liveProxy.probe(cand) }.getOrNull()
@@ -1492,8 +1556,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     pick = ranker.best(siblings.keys, exclude, names = siblings)
                     if (pick != null) break
                 }
-                // Still nothing? Take the best that can at least keep up,
-                // rather than leaving the viewer on a feed that cannot.
+                // Still nothing? Take the best that can at least keep up.
                 if (pick == null) {
                     pick = ranker.best(
                         siblings.keys, exclude,
@@ -1516,10 +1579,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 lastAutoSwitchFailedAt = android.os.SystemClock.elapsedRealtime()
                 android.util.Log.w(
                     "LiveDiag",
-                    "AUTOSWITCH found no feed clearing headroom " +
-                        "${com.moviebox.tv.data.live.FeedRanker.MIN_HEADROOM} " +
-                        "among ${siblings.size} — resting " +
-                        "${AUTO_SWITCH_FAILED_COOLDOWN_MS / 60_000} min",
+                    "AUTOSWITCH found no better ${langWord}feed among ${siblings.size} — staying",
+                )
+                com.moviebox.tv.data.live.LiveStatus.note(
+                    if (broken) "$currentName: $brokenWhy. No healthier ${langWord}feed right now."
+                    else "No better ${langWord}feed for this match right now.",
                 )
                 return@launch
             }
@@ -1527,15 +1591,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             android.util.Log.w(
                 "LiveDiag",
                 "AUTOSWITCH $current -> ${pick.channelId} ($name) " +
-                    "headroom=${pick.headroom} " +
-                    "lang=${com.moviebox.tv.data.live.ChannelLanguage.guess(name)} " +
-                    "reason=$reason",
+                    "headroom=${pick.headroom} lang=${lang.guess(name)} reason=$reason",
             )
             autoSwitchTried.add(current)
             lastAutoSwitchAt = android.os.SystemClock.elapsedRealtime()
-            com.moviebox.tv.data.live.LiveStatus.note("Switching to $name…")
+            val why = brokenWhy ?: "it kept stalling"
+            com.moviebox.tv.data.live.LiveStatus.note(
+                "Switching to $name — $currentName: $why",
+            )
             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                playScheduleChannel(pick.channelId)
+                switchingAutomatically = true
+                try { playScheduleChannel(pick.channelId) } finally { switchingAutomatically = false }
             }
           } finally {
             autoSwitchInFlight = false

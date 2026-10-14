@@ -64,6 +64,36 @@ object FeedRanker {
         results[r.channelId] = Ranked(r, System.currentTimeMillis())
     }
 
+    /**
+     * Feeds seen broken while being played, and why.
+     *
+     * A speed probe can't tell a healthy feed from one that plays badly:
+     * TNT Sports 4 UK (Roma vs Real Madrid, 2026-10-14) measured 4.9x
+     * headroom — one of the best — while it re-sent chunks of the match it
+     * had already sent and carried audio whose timestamps ran a third short,
+     * so the player re-aligned its clock every 0.4 s (stutter, bad sound).
+     * The proxy and the player report what they see; a broken feed is left
+     * out of every automatic pick for [BROKEN_FOR_MS].
+     */
+    private val broken = ConcurrentHashMap<String, Pair<Long, String>>()
+    const val BROKEN_FOR_MS = 15 * 60 * 1000L
+
+    /** Called with (channelId, reason) when a feed is first marked broken. */
+    @Volatile var onBroken: ((String, String) -> Unit)? = null
+
+    fun markBroken(channelId: String, why: String) {
+        val fresh = brokenReason(channelId) == null
+        broken[channelId] = System.currentTimeMillis() to why
+        if (fresh) {
+            Log.w(TAG, "FEEDS ch=$channelId marked broken: $why")
+            runCatching { onBroken?.invoke(channelId, why) }
+        }
+    }
+
+    /** Why [channelId] was marked broken, or null when it isn't (any more). */
+    fun brokenReason(channelId: String): String? =
+        broken[channelId]?.takeIf { System.currentTimeMillis() - it.first < BROKEN_FOR_MS }?.second
+
     /** A fixture that kicked off this long ago may still be on air. */
     private const val ON_AIR_BEFORE_SEC = 3 * 60 * 60L
 
@@ -150,6 +180,7 @@ object FeedRanker {
     ): LiveStreamProxy.ProbeResult? {
         val usable = candidates.asSequence()
             .filter { it !in excluding }
+            .filter { brokenReason(it) == null }
             .mapNotNull { cached(it)?.result }
             .filter { it.ok && it.headroom >= minHeadroom }
             .toList()

@@ -756,6 +756,11 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                 onBandwidthBound = { urgent ->
                     vm.autoSwitchFeed("bandwidth-bound", urgent = urgent)
                 },
+                onFeedBroken = { why ->
+                    state.currentLiveChannel?.id?.let {
+                        com.moviebox.tv.data.live.FeedRanker.markBroken(it, why)
+                    }
+                },
                 onCodecFlapping = {
                     state.currentLiveChannel?.id?.let {
                         vm.markChannelAsCodecFlapping(it)
@@ -1423,6 +1428,11 @@ private const val SCRUB_TAP_MS: Long = 10_000L
 /** Quiet time after the last press before the player actually seeks. */
 private const val SCRUB_COMMIT_MS: Long = 700L
 
+/** Live audio re-alignments that mark a feed broken: this many inside the
+ *  window (the broken feed measured ~2.5 a second; healthy ones ~none). */
+private const val AUDIO_JUMPS_TO_BREAK = 10
+private const val AUDIO_JUMP_WINDOW_MS = 30_000L
+
 /** The skip pill goes away this long before the intro/recap ends. */
 private const val SKIP_SEGMENT_TAIL_MS = 1_000L
 
@@ -2050,6 +2060,9 @@ private fun VideoPlayer(
     /** The feed cannot keep up. [urgent] when playback has actually
      *  stalled, as opposed to a pre-emptive thin-buffer check. */
     onBandwidthBound: (urgent: Boolean) -> Unit = {},
+    /** The live feed plays badly in a way no connection can fix (its audio
+     *  timing is broken). [why] is said to the viewer. */
+    onFeedBroken: (why: String) -> Unit = {},
     /** Fired the first time AUDIO_TRACK_INIT_FAILED hits on a live
      *  channel. Caller is expected to mark the channel as needing
      *  tunneling OFF and bump a rebuild revision; the next prepare
@@ -2075,6 +2088,10 @@ private fun VideoPlayer(
     val sourceDownState = rememberUpdatedState(onLiveSourceDown)
     val fatalLiveState = rememberUpdatedState(onFatalLiveError)
     val stabilisingState = rememberUpdatedState(onStabilising)
+    val feedBrokenState = rememberUpdatedState(onFeedBroken)
+    // Live audio re-alignments (see onAudioSinkError below), per channel.
+    val audioJumps = remember { mutableListOf<Long>() }
+    val feedBrokenReported = remember { mutableStateOf(false) }
     // The polling loop below is keyed on Unit, so it must read the title
     // through this or the phone keeps showing the episode the player
     // opened on after an auto-advance.
@@ -2164,7 +2181,11 @@ private fun VideoPlayer(
     // Re-resolves since the last rendered frame. A source whose fresh links
     // fail the same way would otherwise be re-resolved forever.
     val reloadsSinceFrame = remember { mutableStateOf(0) }
-    LaunchedEffect(mediaUrl) { audioDisabled.value = false }
+    LaunchedEffect(mediaUrl) {
+        audioDisabled.value = false
+        synchronized(audioJumps) { audioJumps.clear() }
+        feedBrokenReported.value = false
+    }
 
     // resilience uses it to cap max bitrate after repeated stalls.
     val trackSelector = remember(isLive, noTunneling) {
@@ -3811,6 +3832,40 @@ private fun VideoPlayer(
                     if (!didDowngrade) {
                         stabilisingState.value(null)
                     }
+                }
+            }
+            // Live-only: a feed whose audio timestamps don't match its sound.
+            //
+            // The audio sink re-aligns its clock whenever the incoming
+            // timestamps are more than 200 ms from where the sound it has
+            // played says they should be. TNT Sports 4 UK (2026-10-14) did it
+            // every 0.4 s, always 202.7 ms: the decoded sound ran a third
+            // longer than its timestamps. Each re-alignment is a click or a
+            // gap, and video follows the audio clock, so the picture hitched
+            // too — "the volume becomes bad". A healthy feed does this rarely
+            // if ever, so a burst means the feed is broken, not the network.
+            override fun onAudioSinkError(
+                eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+                audioSinkError: Exception,
+            ) {
+                if (!liveState.value) return
+                if (audioSinkError !is
+                    androidx.media3.exoplayer.audio.AudioSink.UnexpectedDiscontinuityException
+                ) return
+                val now = SystemClock.elapsedRealtime()
+                val n = synchronized(audioJumps) {
+                    audioJumps.add(now)
+                    audioJumps.removeAll { now - it > AUDIO_JUMP_WINDOW_MS }
+                    audioJumps.size
+                }
+                if (n >= AUDIO_JUMPS_TO_BREAK && !feedBrokenReported.value) {
+                    feedBrokenReported.value = true
+                    android.util.Log.w(
+                        "LiveDiag",
+                        "PLAYER audio re-aligned $n times in " +
+                            "${AUDIO_JUMP_WINDOW_MS / 1000}s — this feed's audio timing is broken",
+                    )
+                    feedBrokenState.value("its sound is out of step with the picture")
                 }
             }
             // Live-only: hardware-decoder flap detection. Each codec

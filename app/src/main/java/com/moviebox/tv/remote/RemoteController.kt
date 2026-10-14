@@ -419,7 +419,11 @@ object RemoteController {
     fun forceWebPlayer() = main.post { vm?.forceFallbackToWebPlayer() }
 
     /** Exercise the auto-switch path on demand (diagnostics). */
-    fun forceAutoSwitch() { vm?.autoSwitchFeed("manual") }
+    fun forceAutoSwitch() = main.post { vm?.autoSwitchFeed("manual", urgent = true, force = true) }
+
+    /** Diagnostics: mark a live feed broken, as the proxy/player would. */
+    fun markFeedBroken(channelId: String, why: String) =
+        com.moviebox.tv.data.live.FeedRanker.markBroken(channelId, why)
 
     /** Kick off a background probe of every mirror of this fixture. */
     fun rankFeeds(channelId: String) { vm?.rankFeeds(channelId) }

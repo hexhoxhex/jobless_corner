@@ -60,6 +60,11 @@ object ChannelLanguage {
      *  the British one. */
     private val ENGLISH_BRANDS = listOf(
         "sky sports", "supersport", "stan sport", "tnt sports",
+        // US/UK/IE/CA/AU broadcasters whose feeds carry no country word.
+        // "Paramount+" (CBS, the Champions League's US home) came back
+        // UNKNOWN, so it lost to foreign feeds when picking a mirror.
+        "paramount", "cbs", "nbc", "peacock", "espn", "fox sports",
+        "premier sports", "bt sport", "tsn", "optus",
     )
     private val NON_ENGLISH_BRANDS = listOf(
         "movistar", "telemundo", "univision", "tudn", "deportes",
@@ -79,9 +84,12 @@ object ChannelLanguage {
         // Brand beats absence-of-market: "Telemundo" names no country but
         // is not an English feed.
         if (NON_ENGLISH_BRANDS.any { n.contains(it) }) return Guess.OTHER
-        if (ENGLISH_BRANDS.any { n.contains(it) }) return Guess.ENGLISH
         val nonEnglish = NON_ENGLISH_MARKERS.any { marker(n, it) }
         val english = ENGLISH_MARKERS.any { marker(n, it) }
+        // A non-English market beats an English brand: "TNT Sports Chile",
+        // "ESPN Argentina" and "Fox Sports Mexico" are Spanish feeds.
+        if (nonEnglish && !english) return Guess.OTHER
+        if (ENGLISH_BRANDS.any { n.contains(it) }) return Guess.ENGLISH
         return when {
             nonEnglish && !english -> Guess.OTHER
             english && !nonEnglish -> Guess.ENGLISH
@@ -105,6 +113,20 @@ object ChannelLanguage {
     }
 
     /** Ranking preference: English first, unknown next, other last. */
+    /**
+     * Whether a viewer on a [from] feed may be moved, automatically, to a
+     * [to] feed. Automatic switching must never change the commentary
+     * language under someone: an English feed only gives way to another
+     * English one, an unknown one to English or unknown. A viewer already on
+     * a foreign feed may be moved anywhere (English is still preferred by
+     * [preference]).
+     */
+    fun compatible(from: Guess, to: Guess): Boolean = when (from) {
+        Guess.ENGLISH -> to == Guess.ENGLISH
+        Guess.UNKNOWN -> to == Guess.ENGLISH || to == Guess.UNKNOWN
+        Guess.OTHER -> true
+    }
+
     fun preference(channelName: String?): Int = when (guess(channelName)) {
         Guess.ENGLISH -> 0
         Guess.UNKNOWN -> 1

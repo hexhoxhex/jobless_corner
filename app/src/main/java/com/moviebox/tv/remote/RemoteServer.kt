@@ -1002,6 +1002,19 @@ class RemoteServer(
                 RemoteController.forceAutoSwitch()
                 ok()
             }
+            uri == "/api/debug/markbroken" && method == Method.POST -> {
+                if (!RemoteAccess.isSuperuser(dev)) {
+                    newFixedLengthResponse(
+                        Response.Status.FORBIDDEN, "application/json",
+                        "{\"error\":\"Superuser only\"}",
+                    )
+                } else {
+                    RemoteController.markFeedBroken(
+                        p("id").orEmpty(), p("why").orEmpty().ifBlank { "marked broken for a test" },
+                    )
+                    ok()
+                }
+            }
 
             uri == "/api/live/feeds" -> {
                 val id = p("id").orEmpty().ifBlank {
@@ -1037,8 +1050,12 @@ class RemoteServer(
                 val arr = JSONArray()
                 // Measured feeds first, best headroom at the top; unmeasured
                 // trail behind in catalog order.
+                // Broken feeds last, whatever their speed: a fast feed that
+                // repeats chunks or has broken audio timing is not "best".
                 val sorted = siblings.entries.sortedWith(
-                    compareByDescending<Map.Entry<String, String>> {
+                    compareBy<Map.Entry<String, String>> {
+                        if (ranker.brokenReason(it.key) != null) 1 else 0
+                    }.thenByDescending {
                         ranker.cached(it.key)?.result?.headroom ?: -1f
                     }
                 )
@@ -1052,6 +1069,7 @@ class RemoteServer(
                             com.moviebox.tv.data.live.ChannelLanguage
                                 .guess(name).name,
                         )
+                    ranker.brokenReason(cid)?.let { o.put("broken", it) }
                     ranker.cached(cid)?.result?.let { r ->
                         o.put("ok", r.ok)
                             .put("playlist_ms", r.playlistMs)

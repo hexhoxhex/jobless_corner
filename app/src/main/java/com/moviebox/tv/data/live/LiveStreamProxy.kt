@@ -687,6 +687,7 @@ class LiveStreamProxy(
                 Log.i(DIAG, "PROXY ch=$channelId SEGSTAT ${shortSeg(originalUrl)} " +
                     "bytes=$size/$len dl=${dlMs}ms unwrap=${System.currentTimeMillis() - tU}ms " +
                     "ts=$tsLen pts=" + (pts?.let { "%.3f..%.3f".format(it.first / 90000.0, it.second / 90000.0) } ?: "none"))
+                pts?.let { notePts(channelId, originalUrl, it) }
                 if (unwrapLogged.add(channelId)) {
                     Log.i(
                         DIAG,
@@ -723,6 +724,44 @@ class LiveStreamProxy(
     /** Channels already reported as serving disguised segments; one log line
      *  per channel per session, not one per segment. */
     private val unwrapLogged: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /** Per channel: the last segment's URL and the end of its timestamps. */
+    private val lastSegPts = ConcurrentHashMap<String, Pair<String, Long>>()
+    /** Per channel: when a re-sent chunk of the match was seen. */
+    private val repeats = ConcurrentHashMap<String, MutableList<Long>>()
+
+    /**
+     * Spot a feed re-sending part of the match it already sent: a NEW
+     * segment (different URL) whose timestamps start well before where the
+     * previous one ended. TNT Sports 4 UK did it on 2026-10-14 — two
+     * segments 6 s apart, both pts 54256.888..54262.628 — and the player,
+     * handed the same seconds twice, rebuffered and lost its place in the
+     * live window. Twice inside [REPEAT_WINDOW_MS] marks the feed broken
+     * (see [FeedRanker.markBroken]); a retry of the same URL doesn't count.
+     */
+    private fun notePts(channelId: String, url: String, range: Pair<Long, Long>) {
+        val prev = lastSegPts.put(channelId, url to range.second) ?: return
+        if (prev.first == url) return
+        val back = prev.second - range.first // 90 kHz ticks
+        // 1-60 s backwards: a repeat. More is a restart/discontinuity (or
+        // the 33-bit clock wrapping), not the same seconds sent twice.
+        if (back < REPEAT_MIN_TICKS || back > REPEAT_MAX_TICKS) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        val seen = repeats.getOrPut(channelId) { mutableListOf() }
+        val count = synchronized(seen) {
+            seen.add(now)
+            seen.removeAll { now - it > REPEAT_WINDOW_MS }
+            seen.size
+        }
+        Log.w(
+            DIAG,
+            "PROXY ch=$channelId REPEAT: segment starts ${"%.1f".format(back / 90000.0)}s " +
+                "before the previous one ended ($count in ${REPEAT_WINDOW_MS / 60_000} min)",
+        )
+        if (count >= REPEATS_TO_BREAK) {
+            FeedRanker.markBroken(channelId, "it keeps repeating parts of the match")
+        }
+    }
 
     /** Carry the OLD segment's last path component into the NEW inner
      *  playlist's path. Live CDNs use stable segment numbering at the
@@ -1834,6 +1873,12 @@ class LiveStreamProxy(
         private const val DEAD_SEGMENT_MEMORY = 64
 
         /** Probe reads at most this much of one segment... */
+        /** A re-sent chunk: the new segment starts 1-60 s before the last ended. */
+        private const val REPEAT_MIN_TICKS = 90_000L
+        private const val REPEAT_MAX_TICKS = 60L * 90_000L
+        private const val REPEAT_WINDOW_MS = 3 * 60_000L
+        private const val REPEATS_TO_BREAK = 2
+
         private const val PROBE_BYTES = 512L * 1024
         /** ...or this long, whichever comes first. Keeps a health check
          *  from stealing the bandwidth it is trying to measure. */

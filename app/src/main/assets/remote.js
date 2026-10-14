@@ -1843,7 +1843,7 @@ async function loadSettings() {
     rows.push(["This session", `${t.rebuffers ?? 0} rebuffers, ${t.freezes ?? 0} freezes, ${t.httpErrors ?? 0} errors`]);
     const feeds = d.feeds || [];
     if (feeds.length) {
-      const ok = feeds.filter(f => f.ok).length;
+      const ok = feeds.filter(f => f.ok && !f.broken).length;
       rows.push(["Feeds measured", `${ok} usable of ${feeds.length}`]);
     }
   } catch (e) {
