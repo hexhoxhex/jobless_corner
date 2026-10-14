@@ -320,7 +320,7 @@ class TmdbRepository(token: String = BuildConfig.TMDB_TOKEN) {
      *  "(Version française)"), season ranges ("S5-S12", "Season 3"), and a
      *  trailing year. Without this, "Bleach [English]" normalizes to
      *  "bleachenglish" and never matches TMDB's "bleach". */
-    private fun cleanTitle(s: String): String = s
+    private fun cleanTitle(s: String): String = com.moviebox.tv.data.TitleClean.stripEpisodeLabel(s)
         .replace(Regex("\\[[^\\]]*\\]"), " ")                 // [English], [Version française]
         .replace(Regex("\\([^)]*\\)"), " ")                    // (Version française), (2004)
         .replace(Regex("\\bS\\d{1,2}(\\s*-\\s*S?\\d{1,2})?\\b", RegexOption.IGNORE_CASE), " ")

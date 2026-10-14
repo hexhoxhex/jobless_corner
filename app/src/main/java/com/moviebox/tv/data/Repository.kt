@@ -708,11 +708,14 @@ class Repository(
         // misses on MovieBox and VidNest (~5 s each) before VixSrc answers,
         // so each episode change sat on a black screen for ~6 s.
         val ctx = com.moviebox.tv.App.instance
-        val remembered = if (only == null) {
-            ProviderMemory.preferredFor(ctx, subjectId)?.let { label ->
-                Provider.entries.firstOrNull { it.label == label }
-            }
-        } else null
+        // The source that served this title before NO LONGER goes first.
+        // It pinned shows to whatever played them once: Family Guy played
+        // from MovieBox's Spanish copy once (its title came in garbled, so
+        // 7Movies couldn't be asked), and every episode after went to
+        // MovieBox first (2026-10-15). The configured order (7Movies first)
+        // always applies; a source that lacks a title costs about a second
+        // (7Movies answers 451 at once).
+        val remembered: Provider? = null
         // An item tied to one source (a VixSrc or 7Movies id) still asks that
         // source first. A catalogue item no longer does: every catalogue id
         // counted as MovieBox's, so MovieBox went first whatever the config

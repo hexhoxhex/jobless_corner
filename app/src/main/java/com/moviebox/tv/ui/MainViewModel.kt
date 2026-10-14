@@ -333,7 +333,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     // arrive newest-first from the DAO, so distinctBy keeps
                     // the freshest). Distinct same-title-different-show
                     // collisions are rare enough to accept.
-                    .distinctBy { it.title.trim().lowercase().replace(Regex("[^a-z0-9]+"), "") }
+                    // Keyed by the SHOW (TitleClean.showKey): "S13E5 · Family
+                    // Guy", "Family Guy" and "Family Guy S1-S23" were three
+                    // cards of one show (2026-10-15).
+                    .map { it.copy(title = com.moviebox.tv.data.TitleClean.stripEpisodeLabel(it.title)) }
+                    .distinctBy { com.moviebox.tv.data.TitleClean.showKey(it.title) }
                     .take(30)
                     .toList()
             }
@@ -2409,6 +2413,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         subjectId: String, title: String, coverUrl: String?, type: Int,
         season: Int?, episode: Int?, year: Int? = null,
     ) {
+        // The phone has sent the player's label ("S13E5 · Family Guy") as the
+        // show's name; see TitleClean.
+        @Suppress("NAME_SHADOWING")
+        val title = com.moviebox.tv.data.TitleClean.stripEpisodeLabel(title)
         // A source pick applies to ONE title; opening another clears it.
         pinnedProvider = null
         // Flip the TV INSTANTLY to a "loading the new pick" state. Previously
@@ -2905,7 +2913,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val row = WatchHistoryEntity(
                     key = key,
                     subjectId = subjectId,
-                    title = item?.title ?: play.title,
+                    title = com.moviebox.tv.data.TitleClean.stripEpisodeLabel(item?.title ?: play.title),
                     // Fall back to the per-subjectId cover map so a re-save
                     // during an auto-advance (when detailItem briefly loses
                     // its cover) doesn't write null and erase the poster on
@@ -2945,7 +2953,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _state.update {
             it.copy(
                 detailItem = Item(
-                    subjectId = h.subjectId, title = h.title,
+                    subjectId = h.subjectId,
+                    title = com.moviebox.tv.data.TitleClean.stripEpisodeLabel(h.title),
                     type = SubjectType.fromCode(h.type), year = h.year,
                     rating = null, coverUrl = h.coverUrl, seasonCount = 0,
                     genres = h.genres.split(",").map { g -> g.trim() }

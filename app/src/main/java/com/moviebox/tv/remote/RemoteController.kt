@@ -181,6 +181,13 @@ object RemoteController {
     val subtitleOffsetMs: Long
         get() = vm?.subtitles?.state?.value?.offsetMs ?: 0L
 
+    /** The playing show's own name, without the player's "S1E2 · " label —
+     *  what the phone must send back when it asks for another episode. */
+    val showTitle: String
+        get() = com.moviebox.tv.data.TitleClean.stripEpisodeLabel(
+            vm?.state?.value?.detailItem?.title?.ifBlank { null } ?: nowPlayingTitle,
+        )
+
     val creditsStartMs: Long?
         get() = vm?.let { it.skipTimesFor(it.state.value.play)?.creditsStartMs }
             ?: vm?.subtitles?.state?.value?.creditsStartMs

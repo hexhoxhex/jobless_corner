@@ -1302,7 +1302,12 @@ $("#epList")?.addEventListener("click", () => {
   // se=1 ep=1 so it can fetch the season list from /api/details — the
   // picker has its own "show came back empty" handling.
   openEpisodePicker({
-    subjectId: s.subjectId, title: s.title, year: s.year,
+    // The show's name, not the player's "S13E5 · Family Guy" label: sent back
+    // as the title, the label stopped the TV finding the show anywhere but
+    // MovieBox (its Spanish copy).
+    subjectId: s.subjectId,
+    title: s.showTitle || (s.title || "").replace(/^S\d+E\d+\s*[·-]\s*/i, ""),
+    year: s.year,
     type: s.type != null ? s.type : 1, cover: "",
     se: s.season ?? 1, ep: s.episode ?? 1,
   });

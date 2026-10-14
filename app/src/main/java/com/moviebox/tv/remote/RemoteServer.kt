@@ -1288,6 +1288,7 @@ class RemoteServer(
 
     private fun stateJson(): String = JSONObject()
         .put("title", RemoteController.nowPlayingTitle)
+        .put("showTitle", RemoteController.showTitle)
         .put("position", RemoteController.positionMs)
         .put("duration", RemoteController.durationMs)
         .put("playing", RemoteController.isPlaying)
