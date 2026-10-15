@@ -98,7 +98,157 @@ class LiveResolver(
      * leader).
      */
     fun reportRouteWorked(channelId: String) {
+        // A backup that rescued one channel says nothing about where every
+        // channel should start (the first test made /plus, a slow server,
+        // the route tried first for all of them).
+        if (channelId in onBackup) return
         lastRoute[channelId]?.let { noteWinningPath(it) }
+    }
+
+    /** Channels currently playing from a backup route (see [fromBackup]). */
+    private val onBackup: MutableSet<String> =
+        java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    // ---- Backup routes ----------------------------------------------------
+    //
+    // A channel's wrapper routes do not all lead to the same video server.
+    // Surveyed 2026-10-15 (TNT Sports 1/2/3): /stream, /watch and /hub all
+    // name edge.cowedd4855ws.sbs, /player names ds169.bluetier.top, /plus
+    // sometimes a third. When edge.cowedd4855ws.sbs stopped accepting the
+    // TV's connections for a minute (12:15, TNT Sports 3) the proxy retried
+    // it nine times and the picture froze ~70 s, with a working server one
+    // route away. So, while a channel plays, its backups are looked up
+    // quietly, and when its server stops answering, playback moves to one.
+
+    /** A route that leads to a different server than the one playing, and
+     *  whose playlist answered when it was checked. */
+    data class Backup(
+        val path: String,
+        val host: String,
+        val foundAtMs: Long,
+        /** Download speed over what the stream needs, when it was found. */
+        val headroom: Double,
+    )
+
+    private val backups =
+        java.util.concurrent.ConcurrentHashMap<String, List<Backup>>()
+    private val backupsAskedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val surveying: MutableSet<String> =
+        java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /** "channelId|host" -> until when that server is treated as gone for
+     *  that channel. */
+    private val unreachable = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /** True when [channelId] has backups found within [BACKUP_TTL_MS]. */
+    fun hasBackups(channelId: String): Boolean {
+        val asked = backupsAskedAt[channelId] ?: return false
+        return System.currentTimeMillis() - asked < BACKUP_TTL_MS &&
+            backups[channelId].orEmpty().isNotEmpty()
+    }
+
+    /** Whether backups for [channelId] should be looked up (again) now. */
+    fun wantsBackupSurvey(channelId: String): Boolean {
+        val asked = backupsAskedAt[channelId] ?: return channelId !in surveying
+        return channelId !in surveying &&
+            System.currentTimeMillis() - asked >= BACKUP_TTL_MS
+    }
+
+    /** The server playing [channelId] has stopped accepting connections. */
+    fun reportUnreachable(channelId: String, host: String) {
+        if (host.isBlank()) return
+        unreachable["$channelId|$host"] = System.currentTimeMillis() + UNREACHABLE_AVOID_MS
+        android.util.Log.w(
+            "LiveDiag",
+            "RESOLVER ch=$channelId $host stopped answering — avoiding it for " +
+                "${UNREACHABLE_AVOID_MS / 60_000} min while a backup serves",
+        )
+    }
+
+    fun isUnreachable(channelId: String, host: String): Boolean {
+        val until = unreachable["$channelId|$host"] ?: return false
+        if (until > System.currentTimeMillis()) return true
+        unreachable.remove("$channelId|$host")
+        return false
+    }
+
+    /**
+     * Look up [channelId]'s other routes while it plays from [currentHost]:
+     * ONE AT A TIME with a pause, wrapper pages only (no WebView — this runs
+     * during playback, on a TV), keeping up to [MAX_BACKUPS] that lead to a
+     * different server and download fast enough to play: [measure] gives
+     * download speed over what the stream needs (null: it didn't answer).
+     * A route that answers but downloads too slowly is no rescue (seen on
+     * the first test: a backup that played, then bled its buffer dry).
+     */
+    suspend fun findBackups(
+        channelId: String,
+        currentHost: String,
+        measure: (String) -> Double?,
+    ) = withContext(Dispatchers.IO) {
+        if (!surveying.add(channelId)) return@withContext
+        try {
+            backupsAskedAt[channelId] = System.currentTimeMillis()
+            val found = mutableListOf<Backup>()
+            val current = lastRoute[channelId]
+            val dead = deadRoutesFor(channelId)
+            for (path in pathOrder()) {
+                if (path == current || path in dead) continue
+                if (path == "hub" && LiveEventFeeds.isEvent(channelId)) continue
+                kotlinx.coroutines.delay(BACKUP_PAUSE_MS)
+                val url = runCatching {
+                    tryPlayerPath(channelId, path, allowJs = false)
+                }.getOrNull() ?: continue
+                val host = hostFromUrl(url) ?: continue
+                if (host == currentHost || found.any { it.host == host }) continue
+                val headroom = runCatching { measure(url) }.getOrNull() ?: continue
+                if (headroom < MIN_BACKUP_HEADROOM) {
+                    android.util.Log.i(
+                        "LiveDiag",
+                        "RESOLVER ch=$channelId /$path -> $host not kept as a backup: " +
+                            "downloads at ${"%.1f".format(headroom)}x what it needs " +
+                            "(0 = couldn't tell)",
+                    )
+                    continue
+                }
+                found += Backup(path, host, System.currentTimeMillis(), headroom)
+                if (found.size >= MAX_BACKUPS) break
+            }
+            found.sortByDescending { it.headroom }
+            backups[channelId] = found
+            android.util.Log.i(
+                "LiveDiag",
+                "RESOLVER ch=$channelId backups: " +
+                    (if (found.isEmpty()) "none — every route leads to $currentHost or is down"
+                    else found.joinToString {
+                        "/${it.path} -> ${it.host} (${"%.1f".format(it.headroom)}x)"
+                    }),
+            )
+        } finally {
+            surveying.remove(channelId)
+        }
+    }
+
+    /** A fresh stream from one of [channelId]'s backups whose server is not
+     *  [unreachable], or null. Re-asks the backup's route for a fresh
+     *  signed URL; a couple of seconds. */
+    private suspend fun fromBackup(channelId: String): String? {
+        for (b in backups[channelId].orEmpty()) {
+            if (isUnreachable(channelId, b.host)) continue
+            val url = runCatching {
+                tryPlayerPath(channelId, b.path, allowJs = false)
+            }.getOrNull() ?: continue
+            val host = hostFromUrl(url) ?: continue
+            if (isUnreachable(channelId, host)) continue
+            lastRoute[channelId] = b.path
+            onBackup += channelId
+            android.util.Log.w(
+                "LiveDiag",
+                "RESOLVER ch=$channelId won=dlhd:${b.path} (backup) cdn=$host",
+            )
+            return url
+        }
+        return null
     }
 
     private fun deadRoutesFor(channelId: String): Set<String> {
@@ -314,6 +464,13 @@ class LiveResolver(
         channelId: String,
     ): String? = withContext(Dispatchers.IO) {
         val t0 = System.currentTimeMillis()
+        // The server this channel was playing from stopped answering and a
+        // backup is known: go straight to it, before the usual race (which
+        // would hand back the same dead server).
+        if (unreachable.keys.any { it.startsWith("$channelId|") }) {
+            LiveStatus.note("Switching to a backup server…")
+            fromBackup(channelId)?.let { return@withContext it }
+        }
         LiveStatus.note("Fetching streams…")
         // Race every known resolver strategy IN PARALLEL and take the FIRST
         // one that hands back a validated master manifest — the health check
@@ -453,6 +610,7 @@ class LiveResolver(
             }
         }
         if (winner != null) {
+            onBackup -= channelId
             com.moviebox.tv.debug.ProviderHealth.success(winner.second)
             // Log the winner so we can tell in logcat WHICH strategy won —
             // essential when debugging why a specific ISP still sees the
@@ -699,7 +857,13 @@ class LiveResolver(
      *  serve JS-heavy players we can't decode headlessly — those return
      *  null and get skipped. The primary win is the /plus/ path, which
      *  routes Kenya-reachable via vinix.inproviszon.st. */
-    private suspend fun tryPlayerPath(channelId: String, path: String): String? {
+    private suspend fun tryPlayerPath(
+        channelId: String,
+        path: String,
+        /** False skips the WebView step (JS-only players): for lookups that
+         *  run while something is playing. */
+        allowJs: Boolean = true,
+    ): String? {
         val t0 = System.currentTimeMillis()
         val base = wrapperBase()
         val wrapper = "$base/$path/stream-$channelId.php"
@@ -786,10 +950,43 @@ class LiveResolver(
         // 3 s callTimeout by much — the awaitFirstNonNull race just
         // means we might see a slower answer arrive from JS iframes
         // after a faster daddyN answer has already resolved.
+        if (!allowJs) return null
         return JsIframeResolver.resolve(iframeUrl, wrapper)
     }
 
     private val pageClient: OkHttpClient by lazy { playerClient() }
+
+    /**
+     * Where every route for [channelId] leads right now, for the route
+     * survey (/api/debug/routes): each wrapper path, then each known daddy
+     * host, ONE AT A TIME with a pause — the source blocks addresses that
+     * fetch too much. [check] tests the playlist a route hands back. Changes
+     * no resolver state.
+     */
+    suspend fun surveyRoutes(
+        channelId: String,
+        check: (String) -> String,
+    ): List<org.json.JSONObject> = withContext(Dispatchers.IO) {
+        val out = mutableListOf<org.json.JSONObject>()
+        fun row(route: String, t0: Long, url: String?) = org.json.JSONObject()
+            .put("route", route)
+            .put("ms", System.currentTimeMillis() - t0)
+            .put("host", url?.let { hostFromUrl(it) } ?: "")
+            .put("playlist", url?.let { runCatching { check(it) }.getOrDefault("check failed") } ?: "no stream")
+        for (path in PLAYER_PATHS) {
+            val t0 = System.currentTimeMillis()
+            val url = runCatching { tryPlayerPath(channelId, path) }.getOrNull()
+            out += row("dlhd:$path", t0, url)
+            kotlinx.coroutines.delay(SURVEY_PAUSE_MS)
+        }
+        for (host in KNOWN_HOSTS) {
+            val t0 = System.currentTimeMillis()
+            val url = runCatching { tryEndpoint(host, channelId, "") }.getOrNull()
+            out += row("donis@$host", t0, url)
+            kotlinx.coroutines.delay(SURVEY_PAUSE_MS)
+        }
+        out
+    }
 
     /** Try the wrapper paths the first pass did not, in learned order, ONE
      *  AT A TIME — sequential on purpose: these pages share the source's
@@ -970,6 +1167,19 @@ class LiveResolver(
     companion object {
         /** Daddy CDN endpoint suffixes, canonical first. Empty = `daddy.php`. */
         private val DADDY_ENDPOINTS = listOf("", "2", "3", "4", "5")
+
+        /** Pause between routes in [surveyRoutes]. */
+        private const val SURVEY_PAUSE_MS = 2_000L
+
+        /** Backup lookup: pause between routes, how many to keep, how long
+         *  they count as known, and how long a server that stopped
+         *  answering is passed over for that channel. */
+        private const val BACKUP_PAUSE_MS = 3_000L
+        private const val MAX_BACKUPS = 2
+        /** Same margin the feed ranker asks of a feed (see FeedRanker). */
+        private const val MIN_BACKUP_HEADROOM = 1.3
+        private const val BACKUP_TTL_MS = 30 * 60_000L
+        private const val UNREACHABLE_AVOID_MS = 10 * 60_000L
 
         /** After this many 4xx failures on a given (channel, cdn) pair,
          *  future [resolveStream] calls for that channel filter that CDN

@@ -66,6 +66,9 @@ class LiveStreamProxy(
      *     boundary instead of a confusing media-sequence time-warp.
      */
     private data class InnerState(
+        /** When this channel's playlist first came back fine (0 = not yet);
+         *  backups are looked up once it has played a while. */
+        var goodSinceMs: Long = 0L,
         var consecutive5xx: Int = 0,
         var rotationPending: Boolean = false,
         /** URL we successfully served from on the previous inner request.
@@ -304,6 +307,16 @@ class LiveStreamProxy(
             ?: return ProbeResult(
                 channelId, false, 0, 0, 0, "", "could not resolve",
             )
+        return probeUrl(channelId, master, t0)
+    }
+
+    /** Measure the stream at [master] (see [probe]): a playlist round trip
+     *  and part of its newest segment. Also used to rate backup routes. */
+    fun probeUrl(
+        channelId: String,
+        master: String,
+        t0: Long = System.currentTimeMillis(),
+    ): ProbeResult {
         val host = hostOf(master)
 
         val parsed = parseMaster(master)
@@ -514,6 +527,9 @@ class LiveStreamProxy(
         var lastUrl = originalUrl
         fun fetchOnce(url: String): okhttp3.Response? = runCatching {
             lastUrl = url
+            if (debugBlockedHost != null && hostOf(url) == debugBlockedHost) {
+                throw java.net.ConnectException("refused (blocked for a test)")
+            }
             clientFor(url).newCall(
                 buildCdnRequest(url).build()
             ).also { lastCall = it }.execute()
@@ -524,6 +540,12 @@ class LiveStreamProxy(
         // another upstream round trip for a known 403.
         val segName = originalUrl.substringAfterLast('/').substringBefore('?')
         if (isSkippedSegment(channelId, segName)) return emptySegment()
+        // Its server stopped answering and playback moved to a backup: the
+        // chunks the player still has queued from the old playlist can't
+        // come, so skip them at once instead of waiting 8 s on each.
+        if (resolver.isUnreachable(channelId, hostOf(originalUrl))) {
+            return emptySegment()
+        }
         // Test hook (/api/debug/skipchunk): skip the next chunk on purpose
         // to see the player carry on past it.
         if (debugSkipNext == channelId) {
@@ -869,6 +891,20 @@ class LiveStreamProxy(
         .protocols(listOf(okhttp3.Protocol.HTTP_1_1))
         .build()
 
+    /** For the route survey: does [url] answer with a playlist, using the
+     *  same headers playback would. "ok" plus what kind, or why not. */
+    fun checkPlaylist(url: String): String = runCatching {
+        clientFor(url).newCall(buildCdnRequest(url).build()).execute().use { r ->
+            if (!r.isSuccessful) return@use "HTTP ${r.code}"
+            val body = r.body?.string().orEmpty()
+            when {
+                !body.trimStart().startsWith("#EXTM3U") -> "not a playlist"
+                "#EXT-X-STREAM-INF" in body -> "ok (master)"
+                else -> "ok (" + body.lineSequence().count { it.startsWith("#EXTINF") } + " segments)"
+            }
+        }
+    }.getOrElse { "${it.javaClass.simpleName}: ${it.message?.take(80)}" }
+
     /** Channels already reported as serving disguised segments; one log line
      *  per channel per session, not one per segment. */
     private val unwrapLogged: MutableSet<String> = ConcurrentHashMap.newKeySet()
@@ -1126,6 +1162,8 @@ class LiveStreamProxy(
 
         var lastResponseCode: Int? = null
         var lastWasAuthDead = false
+        var noAnswer = 0
+        var lastWasUnreachable = false
         for (attempt in 1..MAX_INNER_RETRIES) {
             val tAttempt = System.currentTimeMillis()
             val r = runCatching { fetchUpstreamInner(entry.innerUrl) }
@@ -1216,6 +1254,20 @@ class LiveStreamProxy(
                 // 403'd but has now healed can race all CDNs equally
                 // again on the next re-resolve.
                 resolver.reportSuccess(channelId)
+                // Played fine for a while: look up this channel's backups in
+                // the background, so a dead server can be swapped out fast.
+                val nowGood = System.currentTimeMillis()
+                if (state.goodSinceMs == 0L) state.goodSinceMs = nowGood
+                if (nowGood - state.goodSinceMs > BACKUP_LOOKUP_AFTER_MS &&
+                    resolver.wantsBackupSurvey(channelId)
+                ) {
+                    val playingHost = hostOf(entry.innerUrl)
+                    scope.launch {
+                        resolver.findBackups(channelId, playingHost) { url ->
+                            probeUrl(channelId, url).takeIf { it.ok }?.headroom?.toDouble()
+                        }
+                    }
+                }
 
                 val dt = System.currentTimeMillis() - tStart
                 // Real playlist data reached the player — the source is
@@ -1267,6 +1319,16 @@ class LiveStreamProxy(
             } else {
                 Log.w(TAG, "inner attempt $attempt for $channelId: " +
                     "${r.exceptionOrNull()?.message}")
+                // No answer at all (refused, timed out). With a backup known,
+                // two in a row is enough: move to it instead of spending ~40 s
+                // more on a server that has gone away.
+                noAnswer += 1
+                if (noAnswer >= UNREACHABLE_AFTER && resolver.hasBackups(channelId)) {
+                    resolver.reportUnreachable(channelId, hostOf(entry.innerUrl))
+                    LiveStatus.note("Switching to a backup server…")
+                    lastWasUnreachable = true
+                    break
+                }
             }
             if (attempt < MAX_INNER_RETRIES) {
                 runCatching { Thread.sleep((200L shl (attempt - 1)).coerceAtMost(1_000)) }
@@ -1279,12 +1341,13 @@ class LiveStreamProxy(
         if (transientServerErr) {
             state.consecutive5xx += 1
         }
-        val shouldRotate = lastWasAuthDead ||
+        val shouldRotate = lastWasAuthDead || lastWasUnreachable ||
             (transientServerErr && state.consecutive5xx >= ROTATE_AFTER_5XX_RUN)
 
         if (shouldRotate) {
             Log.i(DIAG, "PROXY ch=$channelId ROTATE code=$lastResponseCode " +
-                "authDead=$lastWasAuthDead 5xxRun=${state.consecutive5xx} " +
+                "authDead=$lastWasAuthDead unreachable=$lastWasUnreachable " +
+                "5xxRun=${state.consecutive5xx} " +
                 "fromHost=${hostOf(entry.innerUrl)}")
             cache.remove(channelId)
             val refreshed = runBlocking { refreshCache(channelId) }
@@ -1706,6 +1769,10 @@ class LiveStreamProxy(
     }
 
     private fun fetchUpstreamInner(url: String): Pair<okhttp3.Response, String> {
+        // Test hook (/api/debug/blockhost): act as if this server refused us.
+        if (debugBlockedHost != null && hostOf(url) == debugBlockedHost) {
+            throw java.net.ConnectException("refused (blocked for a test)")
+        }
         val req = buildCdnRequest(url).build()
         return clientFor(url).newCall(req).execute().use { resp ->
             val body = resp.body?.string() ?: ""
@@ -2040,6 +2107,8 @@ class LiveStreamProxy(
     companion object {
         /** See handleSegment: the channel whose next chunk is skipped. */
         @Volatile var debugSkipNext: String? = null
+        /** Test hook: a server every fetch treats as refusing connections. */
+        @Volatile var debugBlockedHost: String? = null
 
         /**
          * Rendition ceiling for live, applied where the choice actually
@@ -2161,6 +2230,11 @@ class LiveStreamProxy(
         private const val ENSURE_CACHED_TIMEOUT_MS: Long = 14_000L
         /** A disguised chunk read is given up when less than this share of
          *  it has arrived after [SEG_SLOW_CHECK_MS]... */
+        /** Look up a channel's backup routes after it has played this
+         *  long; and how many unanswered playlist fetches in a row mean its
+         *  server is gone (each waits up to the 8 s connect timeout). */
+        private const val BACKUP_LOOKUP_AFTER_MS: Long = 60_000L
+        private const val UNREACHABLE_AFTER: Int = 2
         private const val SEG_SLOW_MIN_FRACTION: Double = 0.4
         private const val SEG_SLOW_CHECK_MS: Long = 5_000L
         /** ...or when it hasn't finished this long after the request. */

@@ -1016,6 +1016,42 @@ class RemoteServer(
                 }
             }
 
+            // Route survey for one channel: where each route leads and
+            // whether it plays. Slow (one route at a time) on purpose.
+            uri == "/api/debug/routes" -> {
+                if (!RemoteAccess.isSuperuser(dev)) {
+                    newFixedLengthResponse(
+                        Response.Status.FORBIDDEN, "application/json",
+                        "{\"error\":\"Superuser only\"}",
+                    )
+                } else {
+                    val id = p("id").orEmpty()
+                    val proxy = com.moviebox.tv.data.live.LiveStreamProxy(
+                        com.moviebox.tv.data.live.LiveResolver(),
+                    )
+                    val rows = runBlocking {
+                        com.moviebox.tv.data.live.LiveResolver()
+                            .surveyRoutes(id) { proxy.checkPlaylist(it) }
+                    }
+                    json(JSONArray(rows).toString())
+                }
+            }
+
+            // Act as if a video server refused all connections (empty host
+            // clears it), to test the switch to a backup server.
+            uri == "/api/debug/blockhost" && method == Method.POST -> {
+                if (!RemoteAccess.isSuperuser(dev)) {
+                    newFixedLengthResponse(
+                        Response.Status.FORBIDDEN, "application/json",
+                        "{\"error\":\"Superuser only\"}",
+                    )
+                } else {
+                    com.moviebox.tv.data.live.LiveStreamProxy.debugBlockedHost =
+                        p("host").orEmpty().ifBlank { null }
+                    ok()
+                }
+            }
+
             // Skip the next chunk of a live channel, to test that playback
             // carries on past a chunk the proxy gave up on.
             uri == "/api/debug/skipchunk" && method == Method.POST -> {
