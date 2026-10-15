@@ -902,6 +902,10 @@ class Repository(
         return runCatching { com.moviebox.tv.net.H5Api.detail(dp)?.hasResource }.getOrNull()
     }
 
+    /** One season's episodes from TMDB (name, still, runtime, synopsis). */
+    suspend fun tmdbEpisodes(tmdbId: Int, season: Int): List<EpisodeMeta> =
+        tmdb.episodes(tmdbId, season)
+
     /** TMDB's seasons of a series as (season, episode count); empty if none. */
     suspend fun tmdbSeasons(tmdbId: Int): List<Pair<Int, Int>> =
         runCatching { tmdb.seasonsOf(tmdbId) }.getOrDefault(emptyList())

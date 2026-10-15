@@ -1404,3 +1404,282 @@ button.icon-btn { flex: 0 0 auto; padding: 8px 10px; }
   font-weight: 700; font-size: .88rem; color: var(--accent); word-break: break-all;
 }
 .repo-row .repo-what { color: var(--muted); font-size: .82rem; line-height: 1.4; }
+
+/* ---------- Remote redesign (2026-10-15) ----------
+   Now playing, episodes, library and settings fields, rebuilt after a
+   review of the phone remote: a grey play-glyph placeholder for live TV,
+   a 20-second "timeline" on a live channel, the episode label printed
+   twice, a gradient blob for "nothing playing", bare number squares for
+   episodes, raw <svg> markup in the film meta line, unstyled inputs. */
+
+/* Now playing card */
+.np-card { padding: 0; overflow: hidden; border-color: rgba(255,255,255,.08); }
+.np-card > * { margin-left: 16px; margin-right: 16px; }
+.np-card > .np-art { margin: 0; }
+.np-art {
+  position: relative; aspect-ratio: 16 / 9; background: var(--surface-2);
+  display: flex; align-items: center; justify-content: center; overflow: hidden;
+}
+.np-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.np-art img[hidden] { display: none; }
+.np-art::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(to top, rgba(0,0,0,.45), transparent 45%);
+}
+.np-art.is-live { background: #f4f5f7; }
+.np-art.is-live img { object-fit: contain; padding: 14% 22%; box-sizing: border-box; }
+.np-art.is-live::after { display: none; }
+.np-art-mark {
+  font-size: 2.4rem; font-weight: 800; letter-spacing: .02em; color: var(--muted);
+}
+.np-art.is-live .np-art-mark { color: #5b6270; }
+.np-art-mark[hidden] { display: none; }
+.np-live-pill {
+  position: absolute; left: 12px; top: 12px; z-index: 1;
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px; border-radius: 999px;
+  background: var(--bad); color: #fff; font-size: .72rem; font-weight: 700;
+  letter-spacing: .06em; text-transform: uppercase;
+}
+.np-live-pill .dot { width: 6px; height: 6px; border-radius: 50%; background: #fff; }
+.np-live-pill[hidden] { display: none; }
+.np-head {
+  display: flex; align-items: center; gap: 12px; padding-top: 14px; cursor: pointer;
+}
+.np-head:active { opacity: .8; }
+.np-head-text { flex: 1 1 auto; min-width: 0; }
+.np-eyebrow {
+  font-size: .72rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--accent);
+}
+.np-card .np-title {
+  font-size: 1.3rem; font-weight: 800; line-height: 1.2; margin-top: 4px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.np-sub {
+  margin-top: 4px; font-size: .92rem; color: var(--text-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.np-sub[hidden] { display: none; }
+.np-head-chev { transform: rotate(180deg); color: var(--muted); flex: 0 0 auto; }
+.np-card .np-desc { margin-top: 10px; margin-bottom: 0; color: var(--muted); }
+#npProgress { margin-top: 16px; }
+#npProgress[hidden] { display: none; }
+.time .num { font-variant-numeric: tabular-nums; }
+.np-card .np-skip { margin-top: 12px; margin-bottom: 0; }
+.np-transport {
+  display: flex; align-items: center; justify-content: center; gap: 14px;
+  margin-top: 16px;
+}
+.np-tbtn {
+  flex: 0 0 48px; width: 48px; height: 48px; padding: 0; border-radius: 50%;
+  background: var(--surface-2); color: var(--text);
+}
+.np-tbtn[hidden] { display: none; }
+.np-pp {
+  flex: 0 0 64px; width: 64px; height: 64px; padding: 0; border-radius: 50%;
+  background: var(--accent); color: #fff;
+}
+.np-pp:active { background: var(--accent-2); }
+.np-actions {
+  display: flex; justify-content: center; gap: 8px;
+  margin-top: 14px; padding: 8px 0 10px;
+  border-top: 1px solid rgba(255,255,255,.06);
+}
+.np-link {
+  flex: 0 0 auto; background: transparent; color: var(--text-2);
+  font-weight: 600; font-size: .9rem; padding: 10px 14px; min-height: 44px;
+}
+.np-link:active { background: var(--surface-2); }
+.np-card .np-eps[data-show-eps="false"] { display: none; }
+
+/* Volume: one line */
+.np-vol {
+  display: flex; align-items: center; gap: 12px; padding: 10px 14px;
+  border-color: rgba(255,255,255,.08);
+}
+.np-vol[hidden] { display: none; }
+.np-vol .vol-slider { flex: 1 1 auto; margin: 0; }
+.np-vol .np-tbtn { flex-basis: 44px; width: 44px; height: 44px; }
+.np-vol #volPct { min-width: 4ch; text-align: right; font-size: .85rem; }
+#trackCard { border-color: rgba(255,255,255,.08); }
+
+/* Nothing playing */
+.np-empty { padding: 40px 16px 24px; }
+.np-empty .np-empty-icon {
+  width: 40px; height: 40px; margin: 0 auto 14px; display: block;
+  background: none; border-radius: 0; color: var(--muted);
+}
+.np-empty-title { font-size: 1.1rem; font-weight: 700; }
+.np-empty-sub { margin-top: 6px; }
+.np-empty-cw { margin: 24px auto 0; max-width: 520px; text-align: left; }
+.np-empty-cw:empty { display: none; }
+.np-empty-h {
+  font-size: .72rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--muted); margin: 0 0 8px 2px;
+}
+.np-cw {
+  width: 100%; justify-content: flex-start; text-align: left; gap: 12px;
+  padding: 8px 12px 8px 8px; margin-bottom: 8px; background: var(--surface);
+}
+.np-cw-art {
+  position: relative; flex: 0 0 auto; width: 96px; aspect-ratio: 16 / 9;
+  border-radius: 8px; overflow: hidden; background: var(--surface-2);
+}
+.np-cw-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.np-cw-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.np-cw-t { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.np-cw-s { font-size: .8rem; color: var(--muted); font-weight: 500; }
+.np-empty-actions {
+  display: flex; gap: 10px; justify-content: center; margin: 20px auto 0; max-width: 520px;
+}
+
+/* Episodes */
+.ep-seasons {
+  display: flex; gap: 8px; overflow-x: auto; padding: 0 16px 4px;
+  scroll-snap-type: x proximity; scrollbar-width: none;
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+          mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+}
+.ep-seasons::-webkit-scrollbar { display: none; }
+.ep-season {
+  flex: 0 0 auto; scroll-snap-align: center; min-height: 40px; padding: 8px 16px;
+  border-radius: 999px; background: var(--surface-2); color: var(--text-2);
+  font-size: .88rem;
+}
+.ep-season.on { background: var(--text); color: var(--bg); }
+.ep-list { display: flex; flex-direction: column; gap: 4px; padding: 12px 16px 28px; }
+.ep-item {
+  width: 100%; justify-content: flex-start; align-items: flex-start; text-align: left;
+  gap: 12px; padding: 8px; border-radius: 12px; background: transparent; font-weight: 500;
+}
+.ep-item:active { background: var(--surface-2); }
+.ep-item.current { background: var(--surface); box-shadow: inset 0 0 0 1px var(--accent); }
+.ep-thumb {
+  position: relative; flex: 0 0 auto; width: 132px; aspect-ratio: 16 / 9;
+  border-radius: 8px; overflow: hidden; background: var(--surface-2);
+  display: flex; align-items: center; justify-content: center;
+}
+.ep-thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.ep-thumb-n { font-size: 1.2rem; font-weight: 800; color: var(--muted); }
+.ep-body { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.ep-title {
+  font-weight: 700; font-size: .95rem; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ep-meta { display: flex; gap: 8px; align-items: center; font-size: .78rem; color: var(--muted); }
+.ep-meta:empty { display: none; }
+.ep-now {
+  color: var(--accent); font-weight: 700; text-transform: uppercase;
+  letter-spacing: .06em; font-size: .7rem;
+}
+.ep-ov {
+  font-size: .82rem; line-height: 1.4; color: var(--muted);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.ep-ov:empty { display: none; }
+
+/* Details meta line */
+#dSub .rating { display: inline-flex; align-items: center; gap: 3px; color: var(--text-2); }
+#dSub .rating .icon { color: var(--warn); }
+
+/* Library: recently watched channels */
+.chan-strip { display: flex; gap: 10px; overflow-x: auto; padding: 2px 0 8px; scrollbar-width: none; }
+.chan-strip::-webkit-scrollbar { display: none; }
+.chan-tile { position: relative; flex: 0 0 108px; }
+.chan-play {
+  width: 100%; flex-direction: column; gap: 6px; padding: 0; background: transparent;
+  font-weight: 600;
+}
+.chan-logo {
+  width: 108px; height: 72px; border-radius: 12px; background: #f4f5f7;
+  display: flex; align-items: center; justify-content: center; overflow: hidden;
+}
+.chan-logo img { max-width: 78%; max-height: 70%; object-fit: contain; }
+.chan-mark { font-size: 1.3rem; font-weight: 800; color: #5b6270; }
+.chan-name {
+  width: 100%; font-size: .78rem; color: var(--text-2); text-align: center;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.chan-x {
+  position: absolute; top: 4px; right: 4px; flex: 0 0 auto;
+  width: 28px; height: 28px; padding: 0; border-radius: 50%;
+  background: rgba(0,0,0,.55); color: #fff;
+}
+.lib-empty { margin: 4px 2px 0; }
+
+/* Settings: text fields (they had no styling at all) */
+.card input[type="text"], .card input[type="search"] {
+  height: 44px; padding: 0 12px; border-radius: 12px;
+  background: var(--surface-2); color: var(--text);
+  border: 1px solid rgba(255,255,255,.12); font: inherit; font-size: .95rem;
+  box-sizing: border-box;
+}
+.card input::placeholder { color: var(--hint); }
+.card input[type="text"]:focus { outline: none; border-color: var(--accent); }
+#leagueAdd { flex: 0 0 auto; height: 44px; padding: 0 20px; }
+#leaguePatterns { width: 100%; }
+
+:root[data-theme="light"] .np-card,
+:root[data-theme="light"] .np-vol,
+:root[data-theme="light"] #trackCard { border-color: var(--line); }
+:root[data-theme="light"] .card input[type="text"] { border-color: var(--line); }
+/* A picker with nothing to pick stays out of the way. */
+#trackCard [hidden] { display: none !important; }
+
+/* Remote redesign, second pass */
+.np-card > .np-skip { width: auto; display: flex; }
+.np-sub {
+  white-space: normal; display: -webkit-box; -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical; overflow: hidden;
+}
+.ep-seasons {
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 16px, #000 calc(100% - 28px), transparent);
+          mask-image: linear-gradient(to right, transparent, #000 16px, #000 calc(100% - 28px), transparent);
+}
+/* Details: Play is the one primary action, full width; the rest beneath. */
+.dActions { flex-wrap: wrap; }
+.dActions #dPlay { flex: 1 1 100%; }
+.dActions .ghost { flex: 1 1 0; min-width: 0; }
+.cast-row { scrollbar-width: none; }
+.cast-row::-webkit-scrollbar { display: none; }
+/* Channel logos: many are white-on-transparent (TNT's "SPORTS 1"), which
+   vanished on the light tile. A hairline dark edge keeps them readable. */
+.chan-logo img, .np-art.is-live img {
+  filter: drop-shadow(0 0 1px rgba(0,0,0,.55));
+}
+.chan-x { width: 24px; height: 24px; top: 6px; right: 6px; background: rgba(0,0,0,.45); }
+.chan-x .icon { width: 14px; height: 14px; }
+.chan-logo .art-mark { color: #5b6270; font-size: 1.3rem; }
+.art-mark { font-weight: 800; color: var(--muted); letter-spacing: .02em; }
+.np-cw-art { display: flex; align-items: center; justify-content: center; }
+/* Library rows */
+#history.list { gap: 8px; }
+.lib-row {
+  display: flex; align-items: center; gap: 4px;
+  background: var(--surface); border-radius: 12px;
+}
+.lib-main {
+  flex: 1 1 auto; min-width: 0; justify-content: flex-start; gap: 12px;
+  padding: 8px; background: transparent; text-align: left; font-weight: 500;
+}
+.lib-main:active { background: var(--surface-2); }
+.lib-art {
+  flex: 0 0 auto; width: 48px; aspect-ratio: 2 / 3; border-radius: 6px; overflow: hidden;
+  background: var(--surface-2); display: flex; align-items: center; justify-content: center;
+}
+.lib-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.lib-art .art-mark { font-size: .9rem; }
+.lib-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.lib-t { font-weight: 700; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lib-s { font-size: .8rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lib-bar {
+  display: block; height: 3px; max-width: 160px; margin-top: 4px;
+  background: var(--surface-3); border-radius: 2px; overflow: hidden;
+}
+.lib-bar > span { display: block; height: 100%; background: var(--accent); }
+.lib-x {
+  flex: 0 0 44px; width: 44px; height: 44px; padding: 0; margin-right: 4px;
+  background: transparent; color: var(--muted);
+}
+.np-card > .np-skip { width: calc(100% - 32px); justify-content: center; }

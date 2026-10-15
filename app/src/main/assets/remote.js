@@ -756,11 +756,7 @@ async function renderDetailsContent(it) {
   lastDetails = { item: it, seasons: [] };
   $("#dCover").src = it.cover || "";
   $("#dTitle").textContent = it.title;
-  const subParts = [];
-  subParts.push(it.isSeries ? "TV" : "Movie");
-  if (it.year)   subParts.push(it.year);
-  if (it.rating) subParts.push(ic("star","sm") + " " + it.rating.toFixed(1));
-  $("#dSub").textContent = subParts.join(" · ");
+  setDetailsMeta(it.isSeries, it.year, it.rating);
   $("#dEpisodes").classList.toggle("hidden", !it.isSeries);
 
   // Reset per-open UI state (trailer + cast re-appear below if present).
@@ -779,12 +775,7 @@ async function renderDetailsContent(it) {
     if (d.description) $("#dDesc").textContent = d.description;
     else if (!it.overview) $("#dDesc").textContent = "";
     if (d.poster || d.backdrop) $("#dCover").src = d.poster || d.backdrop;
-    const rating = d.rating || it.rating;
-    $("#dSub").textContent = [
-      it.isSeries ? "TV" : "Movie",
-      it.year || null,
-      rating ? ic("star","sm") + " " + Number(rating).toFixed(1) : null,
-    ].filter(Boolean).join(" · ");
+    setDetailsMeta(it.isSeries, it.year, d.rating || it.rating);
     if (d.trailer) showTrailerButton(d.trailer);
     renderCast(d.cast || []);
   } catch (e) { if (!it.overview) $("#dDesc").textContent = ""; }
@@ -811,6 +802,15 @@ async function renderDetailsContent(it) {
     sel.onchange = () => fillDetailEpisodes(Number(sel.value));
     $("#dEpStatus").textContent = "";
   }
+}
+/** "Series · 2024 · (star) 6.8" — the star is an icon, so this is markup; every
+ *  text part is escaped. (Written with textContent before, which printed
+ *  the icon's <svg> tag on the page.) */
+function setDetailsMeta(isSeries, year, rating) {
+  const parts = [isSeries ? "Series" : "Movie"];
+  if (year) parts.push(escapeHtml(String(year)));
+  if (rating) parts.push(`<span class="rating">${ic("star", "sm")} ${Number(rating).toFixed(1)}</span>`);
+  $("#dSub").innerHTML = parts.join(" · ");
 }
 // ---- Trailer ----
 // For TMDB picks (no aoneroom details fetch), still resolve a trailer via
@@ -913,7 +913,7 @@ $("#epBack").onclick = () => history.back();
 
 async function renderEpisodes(ctx) {
   epPick = Object.assign({}, ctx);
-  $("#epPickTitle").textContent = ctx.title || "Episodes";
+  $("#epPickTitle").textContent = cleanShow(ctx.title) || "Episodes";
   $("#epSeasonChips").innerHTML = "";
   $("#epGrid").innerHTML = "";
   $("#epPickStatus").textContent = "Loading episodes…";
@@ -933,33 +933,67 @@ function drawEpSeasons(activeSe) {
   const host = $("#epSeasonChips"); host.innerHTML = "";
   epPick.seasons.forEach(s => {
     const chip = document.createElement("button");
-    chip.className = "chip" + (Number(s.season) === Number(activeSe) ? " active" : "");
+    const on = Number(s.season) === Number(activeSe);
+    chip.className = "ep-season" + (on ? " on" : "");
+    chip.setAttribute("role", "tab");
+    chip.setAttribute("aria-selected", String(on));
     chip.textContent = "Season " + s.season;
     chip.onclick = () => { drawEpSeasons(s.season); drawEpGrid(s.season); };
     host.appendChild(chip);
+    if (on) requestAnimationFrame(() =>
+      chip.scrollIntoView({ block: "nearest", inline: "center" }));
   });
 }
 function drawEpGrid(se) {
   const host = $("#epGrid"); host.innerHTML = "";
   const season = epPick.seasons.find(s => Number(s.season) === Number(se));
   if (!season) return;
+  const play = async (n) => {
+    const pp = new URLSearchParams({
+      subjectId: epPick.subjectId, title: epPick.title || "",
+      cover: epPick.cover || "", type: epPick.type != null ? epPick.type : 2,
+      se: se, ep: n,
+    });
+    if (epPick.year) pp.set("year", epPick.year);
+    await post("/api/play?" + pp.toString());
+    toast(`Playing season ${se}, episode ${n}…`);
+    selectTab("np");
+  };
+  const rows = {};
   season.episodes.forEach(n => {
-    const cell = document.createElement("button");
     const isCur = Number(epPick.se) === Number(se) && Number(epPick.ep) === Number(n);
-    cell.className = "ep-cell" + (isCur ? " current" : "");
-    cell.textContent = n;
-    cell.onclick = async () => {
-      const pp = new URLSearchParams({
-        subjectId: epPick.subjectId, title: epPick.title || "",
-        cover: epPick.cover || "", type: epPick.type != null ? epPick.type : 2,
-        se: se, ep: n,
-      });
-      if (epPick.year) pp.set("year", epPick.year);
-      await post("/api/play?" + pp.toString());
-      toast(`Playing S${se} · E${n}…`);
-      selectTab("np");
-    };
-    host.appendChild(cell);
+    const row = document.createElement("button");
+    row.className = "ep-item" + (isCur ? " current" : "");
+    row.innerHTML = `
+      <span class="ep-thumb"><span class="ep-thumb-n">${n}</span></span>
+      <span class="ep-body">
+        <span class="ep-title">Episode ${n}</span>
+        <span class="ep-meta">${isCur ? '<span class="ep-now">Playing</span>' : ""}</span>
+        <span class="ep-ov"></span>
+      </span>`;
+    row.onclick = () => play(n);
+    host.appendChild(row);
+    rows[n] = row;
+    if (isCur) requestAnimationFrame(() => row.scrollIntoView({ block: "center" }));
+  });
+  // Names, stills and runtimes arrive a moment later.
+  fetchSeasonMeta(epPick.subjectId, epPick.title, epPick.year, se).then(eps => {
+    if (Number($("#epSeasonChips .ep-season.on")?.textContent.replace(/\D/g, "")) !== Number(se)) return;
+    (eps || []).forEach(e => {
+      const row = rows[e.number];
+      if (!row) return;
+      if (e.still) {
+        const th = row.querySelector(".ep-thumb");
+        const im = document.createElement("img");
+        im.loading = "lazy"; im.alt = ""; im.src = e.still;
+        im.onerror = () => im.remove();
+        th.prepend(im);
+      }
+      row.querySelector(".ep-title").textContent = e.name ? `${e.number}. ${e.name}` : `Episode ${e.number}`;
+      const meta = row.querySelector(".ep-meta");
+      if (e.runtime) meta.insertAdjacentHTML("beforeend", `<span>${e.runtime} min</span>`);
+      row.querySelector(".ep-ov").textContent = e.overview || "";
+    });
   });
 }
 
@@ -1015,65 +1049,22 @@ async function refresh() {
     $("#npEmpty").hidden = active;
     $("#npCard").hidden = !active;
     $("#volCard").hidden = !active;
-    // Cover art in the hero.
-    const cover = $("#npCover");
-    const coverPh = $("#npCoverPh");
-    if (cover) {
-      if (s.cover) {
-        if (cover.getAttribute("src") !== s.cover) cover.src = s.cover;
-        cover.hidden = false;
-        if (coverPh) coverPh.hidden = true;
-      } else {
-        // No artwork: show the placeholder rather than an invisible gap.
-        cover.removeAttribute("src");
-        cover.hidden = true;
-        if (coverPh) coverPh.hidden = false;
-      }
-    }
-    // Synopsis. Skipped when the TV has none (live channels, mostly).
-    const desc = $("#npDesc");
-    if (desc) {
-      const text = (s.description || "").trim();
-      if (desc.dataset.text !== text) {
-        desc.dataset.text = text;      // avoid re-writing on every 1 s poll
-        desc.textContent = text;
-        desc.classList.remove("expanded");
-      }
-      desc.hidden = !text;
-      if (!desc.dataset.bound) {
-        desc.dataset.bound = "1";
-        desc.onclick = () => desc.classList.toggle("expanded");
-      }
-    }
-    $("#npTitle").textContent = s.title || "Nothing playing";
+    // Artwork, titles and synopsis (see renderNpHero).
+    renderNpHero(s);
     const skipBtn = $("#npSkip");
     if (skipBtn) {
       skipBtn.hidden = !s.skip;
       if (s.skip) $("#npSkipLabel").textContent = s.skip;
     }
     // Remember what's playing so the hero can open its details on tap.
-    nowPlayingItem = s.subjectId ? {
+    nowPlayingItem = s.subjectId && !s.live ? {
       subjectId: s.subjectId,
-      // The state title carries "S1E2 · " for episodes; details wants the show.
-      title: (s.title || "").replace(/^S\d+E\d+\s*[·-]\s*/i, ""),
+      title: cleanShow(s.showTitle || s.title),
       cover: s.cover || "",
       type: s.type || 0,
       year: s.year || 0,
     } : null;
-    const hint = $("#npInfoHint");
-    if (hint) hint.hidden = !nowPlayingItem;
-    // Episode badge under the title — kept in sync with TV state so the
-    // remote shows the same episode the user is actually watching, even
-    // after an auto-advance to the next episode.
-    const epBadge = $("#npEp");
-    if (epBadge) {
-      if (s.season != null && s.episode != null) {
-        epBadge.textContent = `S${s.season} · E${s.episode}`;
-        epBadge.hidden = false;
-      } else {
-        epBadge.hidden = true;
-      }
-    }
+    if (!active) loadNpEmptyCw();
     // If the Details page selectors are open for the same series the TV
     // is auto-advancing through, mirror the live episode into the picker
     // so the user doesn't see a stale S1E1 while the TV plays S1E4.
@@ -1087,7 +1078,9 @@ async function refresh() {
     if (!posSliding) {
       $("#npPos").textContent = fmt(s.position || 0);
     }
-    $("#npDur").textContent = fmt(s.duration || 0);
+    // Time left, not the runtime: what the viewer actually wants to know.
+    const left = Math.max(0, (s.duration || 0) - (s.position || 0));
+    setText($("#npDur"), s.duration ? "-" + fmt(left) : "0:00");
     lastDurationMs = s.duration || 0;
     // Position scrubber: range is 0..1000 (thousandths of duration). Avoid
     // the snap-back fight by skipping the write while the user is dragging.
@@ -1152,6 +1145,179 @@ async function refresh() {
   } catch (e) { /* ignore */ }
 }
 
+/* ---------- Now playing: artwork, titles, synopsis ----------
+   The TV's state carries the player's label ("S12E12 · Family Guy") and
+   whatever cover the title was started with. The card wants the show's
+   name once, the episode's own name, still and synopsis, and for live TV
+   the channel and the match on now. Details and episode lists are fetched
+   once per title / season and cached here. */
+const npMeta = { details: {}, seasons: {} };
+
+/** "S12E12 · Family Guy S1-S23" -> "Family Guy". */
+function cleanShow(t) {
+  return (t || "").replace(/^S\d+E\d+\s*[·-]\s*/i, "")
+    .replace(/\s+S\d+\s*-\s*S?\d+\s*$/i, "").trim();
+}
+function setText(el, text) { if (el && el.textContent !== text) el.textContent = text; }
+/** An <img> for [url] that turns into the title's initials if it fails;
+ *  just the initials when there is no url. */
+function artHtml(url, name) {
+  const mark = initials(name);
+  if (!url) return `<span class="art-mark">${mark}</span>`;
+  return `<img loading="lazy" src="${escapeHtml(url)}" alt=""
+    onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'art-mark',textContent:'${mark}'}))"/>`;
+}
+/** Up to two initials, for a tile with no artwork. */
+function initials(name) {
+  return (name || "").split(/\s+/).filter(w => /^[A-Za-z0-9]/.test(w))
+    .slice(0, 2).map(w => w[0].toUpperCase()).join("") || "?";
+}
+/** "SPORTS (DADDY LIVE)" -> "Sports". */
+function groupLabel(g) {
+  const t = (g || "").replace(/\(.*?\)/g, "").trim().toLowerCase();
+  return t ? t.charAt(0).toUpperCase() + t.slice(1) : "";
+}
+function clockOf(unix) {
+  return new Date(unix * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+function npFetchDetails(s) {
+  const key = s.subjectId;
+  if (!key || key in npMeta.details) return;
+  npMeta.details[key] = null;   // in flight
+  get("/api/details?subjectId=" + encodeURIComponent(key) +
+      "&title=" + encodeURIComponent(cleanShow(s.showTitle || s.title)))
+    .then(d => { npMeta.details[key] = d || {}; if (lastState) renderNpHero(lastState); })
+    .catch(() => { npMeta.details[key] = {}; });
+}
+/** Episode names/stills for a season (cached by title + season). */
+function fetchSeasonMeta(subjectId, title, year, se) {
+  const key = subjectId + "|" + se;
+  if (key in npMeta.seasons) {
+    const v = npMeta.seasons[key];
+    return v instanceof Promise ? v : Promise.resolve(v);
+  }
+  const p = new URLSearchParams({ subjectId, title: cleanShow(title), se });
+  if (year) p.set("year", year);
+  const req = get("/api/episodes/meta?" + p.toString())
+    .then(d => (npMeta.seasons[key] = (d && d.episodes) || []))
+    .catch(() => (npMeta.seasons[key] = []));
+  npMeta.seasons[key] = req;
+  return req;
+}
+function npEpisodeMeta(s) {
+  const eps = npMeta.seasons[s.subjectId + "|" + s.season];
+  return Array.isArray(eps) ? eps.find(e => Number(e.number) === Number(s.episode)) : null;
+}
+
+function renderNpHero(s) {
+  const live = s.live || null;
+  const series = !live && !!s.subjectId &&
+    (s.isSeries === true || s.type === 2 || s.season != null);
+  if (!live && s.subjectId) {
+    npFetchDetails(s);
+    if (series && s.season != null) {
+      const key = s.subjectId + "|" + s.season;
+      if (!(key in npMeta.seasons)) {
+        fetchSeasonMeta(s.subjectId, s.showTitle || s.title, s.year, s.season)
+          .then(() => { if (lastState) renderNpHero(lastState); });
+      }
+    }
+  }
+  const det = (s.subjectId && npMeta.details[s.subjectId]) || {};
+  const ep = series ? npEpisodeMeta(s) : null;
+  const showName = live ? (live.name || s.title) : cleanShow(s.showTitle || s.title);
+
+  // Artwork: episode still > backdrop > the cover it was started with.
+  const art = $("#npArt"), img = $("#npArtImg"), mark = $("#npArtMark");
+  art.classList.toggle("is-live", !!live);
+  const src = live ? (live.logo || "")
+    : ((ep && ep.still) || det.backdrop || s.cover || det.poster || "");
+  if (!img.dataset.bound) {
+    img.dataset.bound = "1";
+    img.onerror = () => { img.hidden = true; mark.hidden = false; };
+  }
+  setText(mark, initials(showName));
+  if (src) {
+    if (img.getAttribute("src") !== src) { img.hidden = false; mark.hidden = true; img.src = src; }
+  } else {
+    img.removeAttribute("src"); img.hidden = true; mark.hidden = false;
+  }
+  $("#npLivePill").hidden = !live;
+
+  let eyebrow = "", sub = "";
+  if (live) {
+    eyebrow = groupLabel(live.group) || "Live TV";
+    if (live.event) {
+      sub = "On now: " + live.event + (live.eventStart ? " · " + clockOf(live.eventStart) : "");
+    }
+  } else if (series) {
+    eyebrow = s.season != null ? `Season ${s.season} · Episode ${s.episode}` : "Series";
+    sub = (ep && ep.name) || "";
+  } else {
+    eyebrow = ["Movie", s.year || null].filter(Boolean).join(" · ");
+  }
+  setText($("#npEyebrow"), eyebrow);
+  setText($("#npTitle"), showName);
+  const subEl = $("#npSub");
+  setText(subEl, sub); subEl.hidden = !sub;
+
+  // Synopsis: the episode's own, else the title's (TMDB), else the TV's.
+  const desc = $("#npDesc");
+  const text = live ? ""
+    : ((ep && ep.overview) || det.description || s.description || "").trim();
+  if (desc.dataset.text !== text) {
+    desc.dataset.text = text; desc.textContent = text; desc.classList.remove("expanded");
+  }
+  desc.hidden = !text;
+  if (!desc.dataset.bound) {
+    desc.dataset.bound = "1";
+    desc.onclick = () => desc.classList.toggle("expanded");
+  }
+
+  // Live TV: no timeline to scrub, nothing to skip 10 s through.
+  $("#npProgress").hidden = !!live;
+  document.querySelectorAll(".np-seek").forEach(b => { b.hidden = !!live; });
+  // An <svg>: no `hidden` property, so use display.
+  $("#npInfoHint").style.display = (live || !s.subjectId) ? "none" : "";
+}
+
+/** Nothing playing: the last few titles, one tap to resume. */
+let npEmptyCwAt = 0;
+async function loadNpEmptyCw() {
+  if (Date.now() - npEmptyCwAt < 60_000) return;
+  npEmptyCwAt = Date.now();
+  let items = []; try { items = await get("/api/history"); } catch (e) { return; }
+  const box = $("#npEmptyCw");
+  if (!box) return;
+  const recent = items.filter(it => it.kind !== "channel").slice(0, 3);
+  box.innerHTML = recent.length ? '<div class="np-empty-h">Continue watching</div>' : "";
+  recent.forEach(it => {
+    const pct = Math.round((it.progress || 0) * 100);
+    const b = document.createElement("button");
+    b.className = "np-cw";
+    b.innerHTML = `
+      <span class="np-cw-art">${artHtml(it.cover, cleanShow(it.title))}${pct > 0
+        ? `<span class="cw-bar"><span style="width:${pct}%"></span></span>` : ""}</span>
+      <span class="np-cw-text">
+        <span class="np-cw-t">${escapeHtml(cleanShow(it.title))}</span>
+        <span class="np-cw-s">${it.season > 0 ? `Season ${it.season} · Episode ${it.episode}` : "Movie"}</span>
+      </span>
+      ${ic("play", "sm")}`;
+    b.onclick = async () => {
+      await post("/api/play?" + new URLSearchParams({
+        subjectId: it.subjectId, title: it.title, cover: it.cover, type: it.type,
+        se: it.season || "", ep: it.episode || "",
+      }));
+      toast("Playing on TV…");
+      npEmptyCwAt = 0;
+    };
+    box.appendChild(b);
+  });
+}
+document.querySelectorAll("#npEmpty [data-go]").forEach(b => {
+  b.onclick = () => selectTab(b.dataset.go);
+});
+
 /** Poster failed to load (dead URL): fall back to the placeholder tile. */
 function npCoverFallback() {
   const img = document.getElementById("npCover");
@@ -1177,6 +1343,13 @@ function syncTracks(s) {
   // Quality/Audio row only when those exist.
   $("#qaLabels").hidden = !hasQa;
   $("#qaRow").hidden = !hasQa;
+  // Each picker only when it has something to pick: an empty Audio box
+  // next to Quality was the usual sight (most sources have one audio track).
+  const qaLabels = $("#qaLabels").children;
+  if (qaLabels[0]) qaLabels[0].hidden = qs.length === 0;
+  if (qaLabels[1]) qaLabels[1].hidden = ds.length === 0;
+  $("#qualitySel").hidden = qs.length === 0;
+  $("#dubSel").hidden = ds.length === 0;
   if (hasQa) {
     fillSelect($("#qualitySel"), qs, s.quality, async (v) => {
       await post("/api/quality?label=" + encodeURIComponent(v));
@@ -1448,7 +1621,15 @@ async function loadHistory() {
     h.className = "hist-head";
     h.innerHTML = `${escapeHtml(heading)} <span class="hist-count">${rows.length}</span>`;
     el.appendChild(h);
-    rows.forEach(it => el.appendChild(historyRow(it)));
+    if (kind === "channel") {
+      // Channels are not "continue watching": a compact row of tiles.
+      const strip = document.createElement("div");
+      strip.className = "chan-strip";
+      rows.forEach(it => strip.appendChild(channelTile(it)));
+      el.appendChild(strip);
+    } else {
+      rows.forEach(it => el.appendChild(historyRow(it)));
+    }
   });
 }
 
@@ -1484,30 +1665,52 @@ function renderHomeCw(items) {
   });
 }
 
+/** A recently watched channel: logo (or its initials), name, remove. */
+function channelTile(it) {
+  const tile = document.createElement("div");
+  tile.className = "chan-tile";
+  const logo = artHtml(it.cover, it.title);
+  tile.innerHTML = `
+    <button class="chan-play" aria-label="Play ${escapeHtml(it.title)}">
+      <span class="chan-logo">${logo}</span>
+      <span class="chan-name">${escapeHtml(it.title)}</span>
+    </button>
+    <button class="chan-x" aria-label="Remove ${escapeHtml(it.title)}">${ic("close", "sm")}</button>`;
+  tile.querySelector(".chan-play").onclick = async () => {
+    await post("/api/live/play?id=" + encodeURIComponent(it.channelId));
+    toast("Playing " + it.title);
+    selectTab("np");
+  };
+  tile.querySelector(".chan-x").onclick = async () => {
+    await post("/api/history/delete?key=" + encodeURIComponent(it.key));
+    loadHistory();
+  };
+  return tile;
+}
+
 function historyRow(it) {
   const isChannel = it.kind === "channel";
   const pct = Math.round((it.progress || 0) * 100);
-  const label = isChannel
-    ? (it.group ? escapeHtml(it.group) : "Live channel")
-    : (it.season > 0 ? `Season ${it.season}, Episode ${it.episode}` : "Movie");
-  // Source badge, so it is obvious which provider a row came from.
-  const prov = !isChannel && it.provider && it.provider !== "MovieBox"
-    ? `<span class="badge src">${escapeHtml(it.provider)}</span>` : "";
+  const sub = isChannel
+    ? (groupLabel(it.group) || "Live TV")
+    : (it.season > 0 ? `Season ${it.season} · Episode ${it.episode}` : "Movie") +
+      // The label comes from the title's catalogue id, so "MovieBox" just
+      // means "found in the catalogue" — not where it actually played.
+      (it.provider && it.provider !== "MovieBox" ? ` · ${escapeHtml(it.provider)}` : "");
   const row = document.createElement("div");
-  row.className = "row-item cw-item";
+  row.className = "lib-row";
   row.innerHTML = `
-    <div class="cw-poster">
-      <img loading="lazy" src="${it.cover}" onerror="this.style.opacity=.25" />
-      <span class="cw-play">${ic("play","sm")}</span>
-      ${isChannel ? "" : `<span class="cw-bar"><span style="width:${pct}%"></span></span>`}
-    </div>
-    <div class="body">
-      <div class="t">${escapeHtml(it.title)} ${prov}</div>
-      <div class="s">${label}</div>
-      <div class="s cw-pct">${isChannel ? "Live TV" : pct + "% watched"}</div>
-    </div>
-    <div class="x" title="Remove">${ic("close","sm")}</div>`;
-  row.querySelector(".body").onclick = async () => {
+    <button class="lib-main">
+      <span class="lib-art">${artHtml(it.cover, cleanShow(it.title))}</span>
+      <span class="lib-text">
+        <span class="lib-t">${escapeHtml(cleanShow(it.title))}</span>
+        <span class="lib-s">${sub}</span>
+        ${!isChannel && pct > 0
+          ? `<span class="lib-bar" aria-label="${pct}% watched"><span style="width:${pct}%"></span></span>` : ""}
+      </span>
+    </button>
+    <button class="lib-x" aria-label="Remove ${escapeHtml(cleanShow(it.title))}">${ic("close", "sm")}</button>`;
+  row.querySelector(".lib-main").onclick = async () => {
     if (isChannel) {
       await post("/api/live/play?id=" + encodeURIComponent(it.channelId));
       toast("Playing " + it.title);
@@ -1520,7 +1723,7 @@ function historyRow(it) {
     }
     selectTab("np");
   };
-  row.querySelector(".x").onclick = async (e) => {
+  row.querySelector(".lib-x").onclick = async (e) => {
     e.stopPropagation();
     await post("/api/history/delete?key=" + encodeURIComponent(it.key));
     loadHistory();

@@ -275,6 +275,31 @@ class RemoteServer(
                 json(JSONObject().put("seasons", seasons).toString())
             }
 
+            // Episode names, stills, runtimes and synopses for one season.
+            uri == "/api/episodes/meta" -> {
+                val se = p("se")?.toIntOrNull() ?: 1
+                val eps = runBlocking {
+                    RemoteController.episodeMeta(
+                        subjectId = p("subjectId").orEmpty(),
+                        title = p("title").orEmpty(),
+                        year = p("year")?.toIntOrNull(),
+                        season = se,
+                    )
+                }
+                val arr = JSONArray()
+                eps.forEach {
+                    arr.put(
+                        JSONObject()
+                            .put("number", it.number)
+                            .put("name", it.name.orEmpty())
+                            .put("overview", it.overview.orEmpty())
+                            .put("still", it.stillUrl.orEmpty())
+                            .put("runtime", it.runtimeMin ?: 0),
+                    )
+                }
+                json(JSONObject().put("season", se).put("episodes", arr).toString())
+            }
+
             uri == "/api/play" && method == Method.POST -> {
                 RemoteController.playOnTv(
                     subjectId = p("subjectId").orEmpty(),
@@ -1425,6 +1450,8 @@ class RemoteServer(
         // unknown.
         .put("creditsStartMs", RemoteController.creditsStartMs ?: -1L)
         .put("skip", RemoteController.skipLabel ?: "")
+        // Live TV: channel name/logo and the match on now (null otherwise).
+        .put("live", RemoteController.liveNowJson() ?: JSONObject.NULL)
         .toString()
 
     /** Cap on feeds probed in one request — each costs a short read. */

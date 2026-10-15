@@ -320,104 +320,91 @@
       <svg class="icon"><use href="#i-chevron-left"/></svg> Back
     </button>
     <h2 id="epPickTitle" class="ph">Episodes</h2>
-    <div id="epSeasonChips" class="chipbar"></div>
+    <div id="epSeasonChips" class="ep-seasons" role="tablist" aria-label="Seasons"></div>
     <div id="epPickStatus" class="livestatus muted small"></div>
-    <div id="epGrid" class="ep-grid"></div>
+    <div id="epGrid" class="ep-list"></div>
   </section>
 
   <!-- REMOTE (now playing) -->
   <section id="pane-np" class="pane">
     <h2 class="ph">Remote</h2>
-    <!-- Empty state — shown when the TV isn't playing anything. Keeps the
-         controls hidden so the page doesn't look like a pile of dead
-         buttons. -->
+    <!-- Nothing on the TV: say so plainly, and offer the quickest ways to
+         start something (resume, browse, live). -->
     <div id="npEmpty" class="np-empty">
-      <div class="np-empty-icon"><svg class="icon lg"><use href="#i-play"/></svg></div>
-      <div class="np-empty-title">Nothing playing</div>
-      <div class="np-empty-sub muted">Pick a movie, show, or channel to start</div>
+      <svg class="icon np-empty-icon" aria-hidden="true"><use href="#i-now"/></svg>
+      <div class="np-empty-title">Nothing is playing</div>
+      <div class="np-empty-sub muted">Pick something here and it plays on the TV.</div>
+      <div id="npEmptyCw" class="np-empty-cw"></div>
+      <div class="np-empty-actions">
+        <button class="ghost" data-go="browse">Browse</button>
+        <button class="ghost" data-go="live">Live TV</button>
+      </div>
     </div>
     <div class="card np-card" id="npCard" hidden>
-      <!-- Hero: poster + title/episode side by side. -->
-      <!-- Tapping the hero opens the playing title's details (cast, overview,
-           trailer, other episodes) without interrupting playback. -->
-      <div class="np-hero np-hero-tap" id="npHero" role="button" tabindex="0">
-        <img id="npCover" class="np-cover" alt="" onerror="npCoverFallback()"/>
-        <!-- Shown instead of the poster when the title has no artwork, so the
-             hero never collapses into a bare line of text. -->
-        <div id="npCoverPh" class="np-cover np-cover-ph" hidden aria-hidden="true">
-          <svg class="icon lg"><use href="#i-play"/></svg>
-        </div>
-        <div class="np-hero-meta">
-          <div class="np-title" id="npTitle">Nothing playing</div>
-          <div class="np-ep" id="npEp" hidden></div>
-          <div class="np-info-hint" id="npInfoHint" hidden>Tap for info</div>
-        </div>
+      <!-- Artwork: the episode still, the title's backdrop, or for live TV
+           the channel's logo. -->
+      <div class="np-art" id="npArt">
+        <img id="npArtImg" alt="" />
+        <span id="npArtMark" class="np-art-mark" hidden></span>
+        <span id="npLivePill" class="np-live-pill" hidden><span class="dot"></span>Live</span>
       </div>
-      <!-- Synopsis of what is playing. Tap to expand past three lines. -->
+      <!-- Tapping the title opens its details without stopping playback. -->
+      <div class="np-head" id="npHero" role="button" tabindex="0">
+        <div class="np-head-text">
+          <div class="np-eyebrow" id="npEyebrow"></div>
+          <div class="np-title" id="npTitle"></div>
+          <div class="np-sub" id="npSub" hidden></div>
+        </div>
+        <svg class="icon np-head-chev" id="npInfoHint" aria-hidden="true"><use href="#i-chevron-left"/></svg>
+      </div>
       <div id="npDesc" class="np-desc" hidden></div>
-      <!-- Scrubber: drag to seek the TV's playback. Pattern mirrors the
-           volume slider below — input drives a live preview, the actual
-           seek fires on `change` (mouse/touch up) so we don't spam the
-           player while the user drags. -->
-      <input id="npScrub" type="range" min="0" max="1000" value="0"
-             class="pos-slider" aria-label="Position" />
-      <div class="time"><span id="npPos">0:00</span><span id="npDur">0:00</span></div>
+      <!-- Position. Hidden for live TV, where the "position" is only a
+           20-second window and seeking it means nothing. -->
+      <div id="npProgress">
+        <input id="npScrub" type="range" min="0" max="1000" value="0"
+               class="pos-slider" aria-label="Position" />
+        <div class="time"><span id="npPos" class="num">0:00</span><span id="npDur" class="num">0:00</span></div>
+      </div>
       <!-- Shown while the TV is in an intro or recap The Intro DB knows. -->
       <button id="npSkip" class="primary np-skip" hidden>
         <svg class="icon"><use href="#i-skip-next"/></svg> <span id="npSkipLabel">Skip intro</span>
       </button>
-      <div class="row">
-        <button id="back10">
-          <svg class="icon"><use href="#i-back10"/></svg>
-          <span>10s</span>
+      <div class="np-transport">
+        <button id="epPrev" class="np-tbtn np-eps" data-show-eps="false" aria-label="Previous episode">
+          <svg class="icon"><use href="#i-skip-prev"/></svg>
         </button>
-        <button id="pp" class="primary big" aria-label="Play / pause">
+        <button id="back10" class="np-tbtn np-seek" aria-label="Back 10 seconds">
+          <svg class="icon"><use href="#i-back10"/></svg>
+        </button>
+        <button id="pp" class="np-pp" aria-label="Play or pause">
           <svg class="icon lg"><use href="#i-play"/></svg>
         </button>
-        <button id="fwd10">
-          <span>10s</span>
+        <button id="fwd10" class="np-tbtn np-seek" aria-label="Forward 10 seconds">
           <svg class="icon"><use href="#i-fwd10"/></svg>
         </button>
+        <button id="epNext" class="np-tbtn np-eps" data-show-eps="false" aria-label="Next episode">
+          <svg class="icon"><use href="#i-skip-next"/></svg>
+        </button>
       </div>
-      <!-- Episode + close controls. Only useful for series — hidden by
-           default; JS toggles the row's `data-show-eps` attribute based
-           on whether the TV is on an episode (state.playerEp != null). -->
-      <button id="epList" class="ghost np-eps np-eps-btn" data-show-eps="false">
-        <svg class="icon"><use href="#i-tune"/></svg> All episodes
-      </button>
-      <!-- Prev/Next belong to a series only. -->
-      <div class="row np-eps" data-show-eps="false">
-        <button id="epPrev" class="ghost"><svg class="icon sm"><use href="#i-skip-prev"/></svg> Prev ep</button>
-        <button id="epNext" class="ghost">Next ep <svg class="icon sm"><use href="#i-skip-next"/></svg></button>
-      </div>
-      <!-- Stop applies to anything on screen, so it lives OUTSIDE the
-           episode row. It used to sit inside it and inherited that row's
-           visibility: hidden for whatever the remote considered "not a
-           series". Stopping a film is not a series-only action. -->
-      <div class="row">
-        <button id="npClose" class="ghost"><svg class="icon"><use href="#i-close"/></svg> Stop</button>
+      <div class="np-actions">
+        <button id="epList" class="np-link np-eps" data-show-eps="false">
+          <svg class="icon sm"><use href="#i-tune"/></svg> Episodes
+        </button>
+        <button id="npClose" class="np-link">
+          <svg class="icon sm"><use href="#i-close"/></svg> Stop
+        </button>
       </div>
     </div>
-    <div class="card" id="volCard" hidden>
-      <div class="row label-row">
-        <span class="muted">Volume</span>
-        <span id="volPct" class="muted num-fixed">—</span>
-      </div>
-      <!-- Slider lives at the top; the +/- buttons below stay as tap targets
-           for one-step nudges. Slider lets the user set volume in one move
-           instead of tapping +/- repeatedly. -->
-      <div class="row" style="margin-top: 14px">
-        <input id="volSlider" type="range" min="0" max="100" value="0"
-               class="vol-slider" aria-label="Volume" />
-      </div>
-      <div class="row">
-        <button id="volDown" aria-label="Volume down">
-          <svg class="icon"><use href="#i-vol-down"/></svg>
-        </button>
-        <button id="volUp" aria-label="Volume up">
-          <svg class="icon"><use href="#i-vol-up"/></svg>
-        </button>
-      </div>
+    <div class="card np-vol" id="volCard" hidden>
+      <button id="volDown" class="np-tbtn" aria-label="Volume down">
+        <svg class="icon"><use href="#i-vol-down"/></svg>
+      </button>
+      <input id="volSlider" type="range" min="0" max="100" value="0"
+             class="vol-slider" aria-label="Volume" />
+      <button id="volUp" class="np-tbtn" aria-label="Volume up">
+        <svg class="icon"><use href="#i-vol-up"/></svg>
+      </button>
+      <span id="volPct" class="muted num-fixed">—</span>
     </div>
     <div class="card" id="trackCard" hidden>
       <h3 class="card-h">Picture &amp; sound</h3>
@@ -671,10 +658,9 @@
     <div class="lib-section">
       <div class="lib-head"><h3>Downloads</h3></div>
       <div id="downloads" class="list"></div>
-      <div id="dlEmpty" class="empty hidden">
-        <svg class="icon"><use href="#i-download"/></svg>
-        <p>No downloads yet.<br/>Open a title from Search and tap Download.</p>
-      </div>
+      <p id="dlEmpty" class="muted small lib-empty hidden">
+        Nothing downloaded. Open a film or episode and tap Download.
+      </p>
     </div>
   </section>
 

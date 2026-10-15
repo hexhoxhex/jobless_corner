@@ -422,6 +422,61 @@ object RemoteController {
     /** Channel id currently on screen, for defaulting /api/live/feeds. */
     fun currentLiveChannelId(): String? = vm?.state?.value?.currentLiveChannel?.id
 
+    /**
+     * The live channel on screen, for the phone's Now playing card: its name
+     * and logo, and what the schedule has on it now. Null when what is
+     * playing is not live TV.
+     */
+    fun liveNowJson(): org.json.JSONObject? {
+        if (selectedQuality != "LIVE") return null
+        val st = vm?.state?.value ?: return null
+        val ch = st.currentLiveChannel ?: return null
+        val now = System.currentTimeMillis() / 1000
+        val ev = st.liveSchedule
+            .filter { e ->
+                val start = e.startUnix ?: return@filter false
+                e.channels.any { it.id == ch.id } &&
+                    now >= start - LIVE_EVENT_EARLY_S && now <= start + LIVE_EVENT_LATE_S
+            }
+            .maxByOrNull { it.startUnix ?: 0L }
+        return org.json.JSONObject()
+            .put("id", ch.id)
+            .put("name", ch.displayName)
+            .put("logo", ch.logo.orEmpty())
+            .put("group", ch.group.orEmpty())
+            .put("event", ev?.let { com.moviebox.tv.ui.Glyphs.plain(it.title) }.orEmpty())
+            .put("eventStart", ev?.startUnix ?: 0L)
+    }
+
+    /** Episodes of one season with names, stills and runtimes (TMDB), for
+     *  the phone's episode list and Now playing card. Cached: the phone asks
+     *  again whenever the season changes. Empty when TMDB has no match. */
+    suspend fun episodeMeta(
+        subjectId: String, title: String, year: Int?, season: Int,
+    ): List<com.moviebox.tv.data.EpisodeMeta> = runCatching {
+        val play = vm?.state?.value?.play
+        // The playing title's own source id is the surest TMDB key
+        // ("7m:tv:1434"); otherwise match the show by name.
+        val keyId = play?.providerSubjectId
+            ?.takeIf { it.isNotBlank() && subjectId == nowPlayingSubjectId } ?: subjectId
+        val show = com.moviebox.tv.data.TitleClean.showTitle(title)
+            .replace(Regex("""\s+S\d+\s*-\s*S?\d+\s*$""", RegexOption.IGNORE_CASE), "")
+        val (id, isTv) = repo.tmdbFor(keyId, show, year, true) ?: return@runCatching emptyList()
+        if (!isTv) return@runCatching emptyList()
+        val key = "$id:$season"
+        episodeMetaCache[key] ?: repo.tmdbEpisodes(id, season).also {
+            if (it.isNotEmpty()) episodeMetaCache[key] = it
+        }
+    }.getOrDefault(emptyList())
+
+    private val episodeMetaCache =
+        java.util.concurrent.ConcurrentHashMap<String, List<com.moviebox.tv.data.EpisodeMeta>>()
+
+    /** A scheduled match counts as "on now" from this long before its
+     *  listed start to this long after (extra time, a late start). */
+    private const val LIVE_EVENT_EARLY_S = 15 * 60L
+    private const val LIVE_EVENT_LATE_S = 3 * 60 * 60L
+
     /** Switch the current live channel to the WebView player (diagnostics). */
     fun forceWebPlayer() = main.post { vm?.forceFallbackToWebPlayer() }
 
