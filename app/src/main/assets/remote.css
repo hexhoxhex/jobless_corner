@@ -1367,3 +1367,40 @@ button.icon-btn { flex: 0 0 auto; padding: 8px 10px; }
 #trackCard .label-row { margin-top: 14px; }
 #trackCard .card-h + .label-row { margin-top: 2px; }
 #trackCard .label-row + .row { margin-top: 6px; }
+
+/* ---------- App logs + About (2026-10-15) ---------- */
+#pane-logs .ph, #pane-about .ph { padding: 0; }
+.log-hint { margin-top: 12px; }
+.log-tools {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; margin: 16px 0 8px;
+}
+.log-tools .chips { flex-wrap: nowrap; }
+.log-tools .chip { min-height: 44px; }
+.log-out {
+  margin: 0 0 28px; min-height: 200px; max-height: 60vh; overflow: auto;
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 10px 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .68rem; line-height: 1.45; white-space: pre-wrap;
+  word-break: break-word; color: var(--text-2);
+}
+.about-sec ul, .about-sec ol { margin: 0; padding-left: 20px; }
+.about-sec li { margin: 0 0 8px; line-height: 1.55; font-size: .9rem; color: var(--text-2); }
+.about-sec p { line-height: 1.5; margin: 6px 2px 0; }
+.about-sec code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .8rem; background: var(--surface-2); border-radius: 6px;
+  padding: 1px 5px; word-break: break-word;
+}
+.repo-row {
+  display: flex; flex-direction: column; gap: 3px; min-height: 52px;
+  background: var(--surface); border-radius: var(--radius);
+  padding: 11px 14px; color: var(--text); text-decoration: none;
+}
+.repo-row:active { background: var(--surface-3); }
+.repo-row .repo-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-weight: 700; font-size: .88rem; color: var(--accent); word-break: break-all;
+}
+.repo-row .repo-what { color: var(--muted); font-size: .82rem; line-height: 1.4; }

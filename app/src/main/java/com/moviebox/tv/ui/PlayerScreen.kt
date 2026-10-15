@@ -1548,6 +1548,15 @@ private const val STALL_MS: Long = 8_000L
  *  ride out an ordinary rebuffer on a slow CDN. */
 private const val VOD_STALL_MS: Long = 20_000L
 
+/** A film that hasn't started: give up on its source when nothing has
+ *  loaded for this long... */
+private const val VOD_START_IDLE_MS: Long = 25_000L
+
+/** ...or when it still isn't playing after this long in all. A healthy
+ *  start takes 1-3 s once the link is in hand (7Movies on the emulator,
+ *  2026-10-15). */
+private const val VOD_START_MAX_MS: Long = 60_000L
+
 /** A VOD stream that "ends" more than this far from its runtime did not
  *  finish — its URL expired. Wide enough to tolerate the short durations
  *  aoneroom under-reports. */
@@ -2091,6 +2100,7 @@ private fun VideoPlayer(
     val feedBrokenState = rememberUpdatedState(onFeedBroken)
     // Live audio re-alignments (see onAudioSinkError below), per channel.
     val audioJumps = remember { mutableListOf<Long>() }
+    val lastUnderrunLogAt = remember { mutableStateOf(0L) }
     val feedBrokenReported = remember { mutableStateOf(false) }
     // The polling loop below is keyed on Unit, so it must read the title
     // through this or the phone keeps showing the episode the player
@@ -2122,6 +2132,12 @@ private fun VideoPlayer(
     // Set once real playback begins; gates the stall watchdog so startup
     // buffering can never be mistaken for a stall.
     var vodEverPlayed by remember(mediaUrl) { mutableStateOf(false) }
+    // Start watchdog: when this stream began trying to start, when it last
+    // loaded anything, and how far it had got. See the VOD tick.
+    var vodStartAt by remember(mediaUrl) { mutableStateOf(0L) }
+    var vodStartProgressAt by remember(mediaUrl) { mutableStateOf(0L) }
+    var vodStartBuffered by remember(mediaUrl) { mutableStateOf(Long.MIN_VALUE) }
+    var vodStartGaveUp by remember(mediaUrl) { mutableStateOf(false) }
     // One-shot per channel: have we made the tunneling decision once the
     // real video frame rate is known? See the frame-rate check in the
     // per-second tick. Resets per channel so each stream is evaluated on
@@ -2262,10 +2278,14 @@ private fun VideoPlayer(
         // which goes through Android's java.net.HttpURLConnection and pays a
         // fresh handshake more often than the browser does).
         val httpFactory = if (isLive) {
+            // 30 s read: the proxy sends nothing until a disguised chunk is
+            // whole, and it may spend up to ~16 s on one (a stalled
+            // connection, then a fresh one). Giving up sooner only made the
+            // player ask again and fetch the same chunk twice.
             val ok = okhttp3.OkHttpClient.Builder()
                 .protocols(listOf(okhttp3.Protocol.HTTP_1_1))
                 .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
-                .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
                 .retryOnConnectionFailure(true)
                 .build()
             androidx.media3.datasource.okhttp.OkHttpDataSource.Factory(ok)
@@ -3157,6 +3177,39 @@ private fun VideoPlayer(
                 // over — killing a stream that was merely slow to open and
                 // dumping the viewer back on the detail page.
                 if (exo.isPlaying) vodEverPlayed = true
+                // A stream that NEVER starts had no way out: the stall
+                // watchdog below arms only once playback has begun (so a
+                // slow open isn't mistaken for a stall), errors were the only
+                // other trigger, and a source that answers but sends nothing
+                // raises none. The screen said "Loading from 7Movies…" for
+                // as long as anyone would wait (viewers' reports,
+                // 2026-10-15). Give up on it when nothing has loaded for
+                // [VOD_START_IDLE_MS], or it is still not playing after
+                // [VOD_START_MAX_MS] however slowly it loads, and move on to
+                // the next source.
+                if (!vodEverPlayed && !vodStartGaveUp && exo.playWhenReady &&
+                    exo.playbackState == Player.STATE_BUFFERING
+                ) {
+                    val now = SystemClock.elapsedRealtime()
+                    if (vodStartAt == 0L) { vodStartAt = now; vodStartProgressAt = now }
+                    val b = exo.bufferedPosition
+                    if (b > vodStartBuffered + 500) {
+                        vodStartBuffered = b; vodStartProgressAt = now
+                    }
+                    val idle = now - vodStartProgressAt > VOD_START_IDLE_MS
+                    val tooLong = now - vodStartAt > VOD_START_MAX_MS
+                    if (idle || tooLong) {
+                        vodStartGaveUp = true
+                        android.util.Log.w(
+                            "VodDiag",
+                            "VOD START never began after ${(now - vodStartAt) / 1000}s " +
+                                "(${if (idle) "nothing loaded for ${(now - vodStartProgressAt) / 1000}s" else "loading too slowly"}, " +
+                                "buffered to ${exo.bufferedPosition}ms) — trying the next source",
+                        )
+                        com.moviebox.tv.debug.Telemetry.onFreeze()
+                        failoverState.value()
+                    }
+                }
                 val wantPlay = vodEverPlayed && exo.playWhenReady &&
                     exo.playbackState == Player.STATE_BUFFERING
                 if (wantPlay && pos == vodStallLastPos) {
@@ -3848,15 +3901,47 @@ private fun VideoPlayer(
                 eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
                 audioSinkError: Exception,
             ) {
-                if (!liveState.value) return
                 if (audioSinkError !is
                     androidx.media3.exoplayer.audio.AudioSink.UnexpectedDiscontinuityException
-                ) return
+                ) {
+                    android.util.Log.w(
+                        if (liveState.value) "LiveDiag" else "VodDiag",
+                        "PLAYER audio sink error: ${audioSinkError.javaClass.simpleName}: " +
+                            "${audioSinkError.message}",
+                    )
+                    return
+                }
                 val now = SystemClock.elapsedRealtime()
                 val n = synchronized(audioJumps) {
                     audioJumps.add(now)
                     audioJumps.removeAll { now - it > AUDIO_JUMP_WINDOW_MS }
                     audioJumps.size
+                }
+                // Films too: "the sound is messing up" (viewers, 2026-10-15)
+                // needs numbers, so every re-alignment goes in the log —
+                // the first few in a burst, then a count.
+                if (n <= 3 || n == AUDIO_JUMPS_TO_BREAK) {
+                    android.util.Log.w(
+                        if (liveState.value) "LiveDiag" else "VodDiag",
+                        "PLAYER audio re-aligned (#$n in ${AUDIO_JUMP_WINDOW_MS / 1000}s): " +
+                            "sound expected at ${audioSinkError.expectedPresentationTimeUs / 1000}ms, " +
+                            "came at ${audioSinkError.actualPresentationTimeUs / 1000}ms",
+                    )
+                }
+                if (!liveState.value) {
+                    // A copy whose sound jumps this often is unwatchable;
+                    // the next source is a better bet than staying.
+                    if (n >= AUDIO_JUMPS_TO_BREAK && !feedBrokenReported.value) {
+                        feedBrokenReported.value = true
+                        android.util.Log.w(
+                            "VodDiag",
+                            "PLAYER audio re-aligned $n times in " +
+                                "${AUDIO_JUMP_WINDOW_MS / 1000}s — this copy's sound is broken, " +
+                                "trying the next source",
+                        )
+                        failoverState.value()
+                    }
+                    return
                 }
                 if (n >= AUDIO_JUMPS_TO_BREAK && !feedBrokenReported.value) {
                     feedBrokenReported.value = true
@@ -3867,6 +3952,23 @@ private fun VideoPlayer(
                     )
                     feedBrokenState.value("its sound is out of step with the picture")
                 }
+            }
+            // The audio output ran dry: the sound breaks up. Logged (at most
+            // a few a minute) so a shared log shows it.
+            override fun onAudioUnderrun(
+                eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+                bufferSize: Int,
+                bufferSizeMs: Long,
+                elapsedSinceLastFeedMs: Long,
+            ) {
+                val now = SystemClock.elapsedRealtime()
+                if (now - lastUnderrunLogAt.value < 15_000L) return
+                lastUnderrunLogAt.value = now
+                android.util.Log.w(
+                    if (liveState.value) "LiveDiag" else "VodDiag",
+                    "PLAYER audio underrun (buffer ${bufferSizeMs}ms, " +
+                        "last fed ${elapsedSinceLastFeedMs}ms ago)",
+                )
             }
             // Live-only: hardware-decoder flap detection. Each codec
             // init event is fed into [flapDetector]; when it crosses

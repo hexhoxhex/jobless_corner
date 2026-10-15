@@ -1016,6 +1016,21 @@ class RemoteServer(
                 }
             }
 
+            // Skip the next chunk of a live channel, to test that playback
+            // carries on past a chunk the proxy gave up on.
+            uri == "/api/debug/skipchunk" && method == Method.POST -> {
+                if (!RemoteAccess.isSuperuser(dev)) {
+                    newFixedLengthResponse(
+                        Response.Status.FORBIDDEN, "application/json",
+                        "{\"error\":\"Superuser only\"}",
+                    )
+                } else {
+                    com.moviebox.tv.data.live.LiveStreamProxy.debugSkipNext = p("id").orEmpty()
+                        .ifBlank { RemoteController.currentLiveChannelId().orEmpty() }
+                    ok()
+                }
+            }
+
             uri == "/api/live/feeds" -> {
                 val id = p("id").orEmpty().ifBlank {
                     RemoteController.currentLiveChannelId().orEmpty()
@@ -1103,6 +1118,42 @@ class RemoteServer(
                 } else {
                     RemoteController.playLiveChannel(id)
                     ok()
+                }
+            }
+
+            // The app's own log, for a viewer to send when something goes
+            // wrong. Cleaned before it was stored (see AppLog): no links,
+            // tokens, cookies, keys or IP addresses. ?problems=1 keeps only
+            // warnings, errors and failures.
+            uri == "/api/logs" -> {
+                val n = p("lines")?.toIntOrNull() ?: 400
+                val lines = com.moviebox.tv.debug.AppLog.recent(n, p("problems") == "1")
+                json(
+                    JSONObject()
+                        .put("lines", JSONArray(lines))
+                        .put("file", com.moviebox.tv.debug.AppLog.fileName(context))
+                        .toString(),
+                )
+            }
+
+            // The same log as a text file to save and attach (WhatsApp,
+            // e-mail). Reaches back across restarts and ends with the last
+            // crash, if any.
+            uri == "/api/logs/file" -> {
+                val now = listOf(
+                    RemoteController.nowPlayingTitle,
+                    RemoteController.currentProvider,
+                    com.moviebox.tv.data.live.LiveStatus.message.value ?: "",
+                ).filter { it.isNotBlank() }.joinToString(" | ")
+                newFixedLengthResponse(
+                    Response.Status.OK, "text/plain; charset=utf-8",
+                    com.moviebox.tv.debug.AppLog.exportText(context, now),
+                ).apply {
+                    addHeader(
+                        "Content-Disposition",
+                        "attachment; filename=\"" +
+                            com.moviebox.tv.debug.AppLog.fileName(context) + "\"",
+                    )
                 }
             }
 

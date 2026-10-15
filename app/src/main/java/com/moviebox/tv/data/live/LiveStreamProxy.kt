@@ -508,16 +508,30 @@ class LiveStreamProxy(
         }.getOrNull() ?: return NanoHTTPD.newFixedLengthResponse(
             NanoHTTPD.Response.Status.BAD_REQUEST, "text/plain", "bad url")
 
+        // The call in flight, so a body read that has stalled can be cut off
+        // from the watchdog (see readDisguisedBody).
+        var lastCall: okhttp3.Call? = null
+        var lastUrl = originalUrl
         fun fetchOnce(url: String): okhttp3.Response? = runCatching {
+            lastUrl = url
             clientFor(url).newCall(
                 buildCdnRequest(url).build()
-            ).execute()
+            ).also { lastCall = it }.execute()
         }.getOrNull()
 
         // A segment we already proved is gone never comes back — the live
         // window only moves forward. Fail it instantly instead of paying
         // another upstream round trip for a known 403.
         val segName = originalUrl.substringAfterLast('/').substringBefore('?')
+        if (isSkippedSegment(channelId, segName)) return emptySegment()
+        // Test hook (/api/debug/skipchunk): skip the next chunk on purpose
+        // to see the player carry on past it.
+        if (debugSkipNext == channelId) {
+            debugSkipNext = null
+            markSkippedSegment(channelId, segName)
+            Log.w(DIAG, "PROXY ch=$channelId SEG ${shortSeg(originalUrl)} SKIPPED for a test")
+            return emptySegment()
+        }
         if (isDeadSegment(channelId, segName)) {
             return NanoHTTPD.newFixedLengthResponse(
                 NanoHTTPD.Response.Status.NOT_FOUND,
@@ -656,16 +670,36 @@ class LiveStreamProxy(
             got += n
         }
         if (DisguisedSegment.isPng(head, got)) {
-            val file = runCatching {
-                java.io.ByteArrayOutputStream(
-                    if (len in 1..Int.MAX_VALUE.toLong()) len.toInt() else 2_000_000,
-                ).apply {
-                    write(head, 0, got)
-                    stream.copyTo(this)
-                }.toByteArray()
-            }.getOrNull()
+            var file = readDisguisedBody(
+                channelId, originalUrl, lastCall, stream, head, got, len, segT0,
+            )
             resp.close()
+            // A connection that stalls holds the whole channel: the player
+            // loads chunks in order, so nothing after this one plays either.
+            // TNT Sports 3, 2026-10-15: one 7 MB chunk took 64 s on a stuck
+            // connection while playlist fetches on others answered in
+            // 0.23 s; the picture froze for 31 s and recovery skipped 35 s
+            // of the match. A fresh connection fetches it in 1-2 s.
+            var retried = false
+            if (file == null) {
+                retried = true
+                file = fetchFresh(channelId, lastUrl)
+            }
             val dlMs = System.currentTimeMillis() - segT0
+            // Slow on a fresh connection too: this one file is slow at the
+            // CDN (TNT Sports 3, 11:14 the same day: 100 KB/s on three
+            // connections in a row while the chunks around it came in 1-2 s;
+            // the picture froze 45 s). Waiting for it costs a freeze and
+            // then a jump of 30+ s; skipping it costs one chunk. Only when
+            // the channel's other chunks are arriving fine — on a line
+            // that is slow for everything, skipping would just play nothing.
+            if (file == null && recentlyHealthy(channelId)) {
+                markSkippedSegment(channelId, segName)
+                Log.w(DIAG, "PROXY ch=$channelId SEG ${shortSeg(originalUrl)} SKIPPED after " +
+                    "${dlMs}ms: slow on every connection while the chunks around it " +
+                    "arrive quickly — the player moves on to the next one")
+                return emptySegment()
+            }
             if (file == null) {
                 Log.w(DIAG, "PROXY ch=$channelId SEG ${shortSeg(originalUrl)} read failed " +
                     "after ${dlMs}ms (len=$len)")
@@ -685,9 +719,11 @@ class LiveStreamProxy(
                 // up, is visible instead of guessed at.
                 val pts = DisguisedSegment.ptsRange(buf, tsLen)
                 Log.i(DIAG, "PROXY ch=$channelId SEGSTAT ${shortSeg(originalUrl)} " +
-                    "bytes=$size/$len dl=${dlMs}ms unwrap=${System.currentTimeMillis() - tU}ms " +
+                    "bytes=$size/$len dl=${dlMs}ms${if (retried) " retried" else ""} " +
+                    "unwrap=${System.currentTimeMillis() - tU}ms " +
                     "ts=$tsLen pts=" + (pts?.let { "%.3f..%.3f".format(it.first / 90000.0, it.second / 90000.0) } ?: "none"))
                 pts?.let { notePts(channelId, originalUrl, it) }
+                if (!retried && dlMs < HEALTHY_SEG_MS) noteHealthy(channelId)
                 if (unwrapLogged.add(channelId)) {
                     Log.i(
                         DIAG,
@@ -720,6 +756,118 @@ class LiveStreamProxy(
             )
         }
     }
+
+    /**
+     * Read the rest of a disguised chunk, giving up when its connection has
+     * plainly stalled: under [SEG_SLOW_MIN_FRACTION] of it after
+     * [SEG_SLOW_CHECK_MS], or not finished [SEG_BODY_BUDGET_MS] after the
+     * request went out. Normal chunks take 1-3 s (7 MB at 25-50 Mbps).
+     * Null when it gave up or the read failed; the caller tries a fresh
+     * connection.
+     */
+    private fun readDisguisedBody(
+        channelId: String,
+        url: String,
+        call: okhttp3.Call?,
+        stream: java.io.InputStream,
+        head: ByteArray,
+        got: Int,
+        len: Long,
+        startedAt: Long,
+    ): ByteArray? {
+        val out = java.io.ByteArrayOutputStream(
+            if (len in 1..Int.MAX_VALUE.toLong()) len.toInt() else 2_000_000,
+        )
+        out.write(head, 0, got)
+        // A read that gets nothing at all blocks; only cancelling the call
+        // from outside ends it before the socket's own 15 s timeout.
+        val left = (SEG_BODY_BUDGET_MS - (System.currentTimeMillis() - startedAt))
+            .coerceAtLeast(1_000L)
+        val watchdog = segWatchdog.schedule(
+            { runCatching { call?.cancel() } }, left, TimeUnit.MILLISECONDS,
+        )
+        try {
+            val buf = ByteArray(64 * 1024)
+            var total = got.toLong()
+            while (true) {
+                val n = stream.read(buf)
+                if (n < 0) break
+                out.write(buf, 0, n)
+                total += n
+                val el = System.currentTimeMillis() - startedAt
+                if (len > 0 && el > SEG_SLOW_CHECK_MS && total < len * SEG_SLOW_MIN_FRACTION) {
+                    Log.w(DIAG, "PROXY ch=$channelId SEG ${shortSeg(url)} stalling: " +
+                        "${total / 1024} of ${len / 1024} KB after ${el}ms — trying a fresh connection")
+                    runCatching { call?.cancel() }
+                    return null
+                }
+            }
+            return out.toByteArray()
+        } catch (e: java.io.IOException) {
+            Log.w(DIAG, "PROXY ch=$channelId SEG ${shortSeg(url)} read stopped after " +
+                "${System.currentTimeMillis() - startedAt}ms (${out.size() / 1024} of " +
+                "${len / 1024} KB): ${e.javaClass.simpleName} — trying a fresh connection")
+            return null
+        } finally {
+            watchdog.cancel(false)
+        }
+    }
+
+    /** One more try at a chunk, on a new connection that is used for
+     *  nothing else and bounded as a whole. Null if it fails too. */
+    private fun fetchFresh(channelId: String, url: String): ByteArray? {
+        val t0 = System.currentTimeMillis()
+        val call = retryClient.newCall(buildCdnRequest(url).build())
+        val bytes = runCatching {
+            call.execute().use { r ->
+                val body = r.body
+                if (!r.isSuccessful || body == null) return@use null
+                val len = body.contentLength()
+                val out = java.io.ByteArrayOutputStream(
+                    if (len in 1..Int.MAX_VALUE.toLong()) len.toInt() else 2_000_000,
+                )
+                val input = body.byteStream()
+                val buf = ByteArray(64 * 1024)
+                var total = 0L
+                while (true) {
+                    val n = input.read(buf)
+                    if (n < 0) break
+                    out.write(buf, 0, n)
+                    total += n
+                    // As slow as the first try: it's the file, not the
+                    // connection. Don't spend the rest of the budget on it.
+                    if (len > 0 && System.currentTimeMillis() - t0 > FRESH_SLOW_CHECK_MS &&
+                        total < len * FRESH_SLOW_MIN_FRACTION
+                    ) {
+                        call.cancel()
+                        return@use null
+                    }
+                }
+                out.toByteArray()
+            }
+        }.getOrNull()
+        Log.i(DIAG, "PROXY ch=$channelId SEG ${shortSeg(url)} fresh connection " +
+            (if (bytes != null) "got ${bytes.size / 1024} KB" else "failed too") +
+            " in ${System.currentTimeMillis() - t0}ms")
+        return bytes
+    }
+
+    /** Cuts off chunk reads that run past their budget. */
+    private val segWatchdog: java.util.concurrent.ScheduledExecutorService =
+        java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r ->
+            Thread(r, "seg-watchdog").apply { isDaemon = true }
+        }
+
+    /** For [fetchFresh]: its own pool with nothing kept, so the retry can't
+     *  land back on the connection that stalled, and a cap on the whole
+     *  call so it can't stall the same way. */
+    private val retryClient: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(6, TimeUnit.SECONDS)
+        .callTimeout(SEG_RETRY_BUDGET_MS, TimeUnit.MILLISECONDS)
+        .connectionPool(okhttp3.ConnectionPool(0, 1, TimeUnit.SECONDS))
+        .protocols(listOf(okhttp3.Protocol.HTTP_1_1))
+        .build()
 
     /** Channels already reported as serving disguised segments; one log line
      *  per channel per session, not one per segment. */
@@ -784,6 +932,56 @@ class LiveStreamProxy(
      * the retry loop without growing across a long session.
      */
     private val deadSegments = ConcurrentHashMap<String, LinkedHashSet<String>>()
+
+    /** Chunks given up on as stuck (see handleSegment); asked for again,
+     *  they are answered empty at once. */
+    private val skippedSegments = ConcurrentHashMap<String, LinkedHashSet<String>>()
+
+    private fun isSkippedSegment(channelId: String, seg: String): Boolean {
+        val set = skippedSegments[channelId] ?: return false
+        return synchronized(set) { seg in set }
+    }
+
+    private fun markSkippedSegment(channelId: String, seg: String) {
+        if (seg.isBlank()) return
+        val set = skippedSegments.getOrPut(channelId) { LinkedHashSet() }
+        synchronized(set) {
+            set.add(seg)
+            while (set.size > DEAD_SEGMENT_MEMORY) {
+                val oldest = set.iterator()
+                if (!oldest.hasNext()) break
+                oldest.next()
+                oldest.remove()
+            }
+        }
+    }
+
+    /** An empty chunk: the player finds no frames in it and goes on to the
+     *  next, skipping that stretch instead of waiting on it. */
+    private fun emptySegment(): NanoHTTPD.Response = NanoHTTPD.newFixedLengthResponse(
+        NanoHTTPD.Response.Status.OK, "video/mp2t",
+        java.io.ByteArrayInputStream(ByteArray(0)), 0L,
+    )
+
+    /** Per channel: when recent chunks arrived quickly on the first try. */
+    private val healthySegs = ConcurrentHashMap<String, ArrayDeque<Long>>()
+
+    private fun noteHealthy(channelId: String) {
+        val q = healthySegs.getOrPut(channelId) { ArrayDeque() }
+        val now = android.os.SystemClock.elapsedRealtime()
+        synchronized(q) {
+            q.addLast(now)
+            while (q.size > 8) q.removeFirst()
+        }
+    }
+
+    /** At least [HEALTHY_MIN] quick chunks in the last [HEALTHY_WINDOW_MS]:
+     *  the line and the feed are fine, so one slow chunk is that chunk. */
+    private fun recentlyHealthy(channelId: String): Boolean {
+        val q = healthySegs[channelId] ?: return false
+        val now = android.os.SystemClock.elapsedRealtime()
+        return synchronized(q) { q.count { now - it < HEALTHY_WINDOW_MS } >= HEALTHY_MIN }
+    }
 
     private fun markDeadSegment(channelId: String, seg: String) {
         if (seg.isBlank()) return
@@ -1840,6 +2038,9 @@ class LiveStreamProxy(
     )
 
     companion object {
+        /** See handleSegment: the channel whose next chunk is skipped. */
+        @Volatile var debugSkipNext: String? = null
+
         /**
          * Rendition ceiling for live, applied where the choice actually
          * exists (see parseMaster). ~4.5 Mbps is what this box sustains:
@@ -1958,6 +2159,23 @@ class LiveStreamProxy(
         // from the feed that had been working. ExoPlayer waits 20 s on this
         // proxy (PlayerScreen setReadTimeoutMs), so 14 s is still inside it.
         private const val ENSURE_CACHED_TIMEOUT_MS: Long = 14_000L
+        /** A disguised chunk read is given up when less than this share of
+         *  it has arrived after [SEG_SLOW_CHECK_MS]... */
+        private const val SEG_SLOW_MIN_FRACTION: Double = 0.4
+        private const val SEG_SLOW_CHECK_MS: Long = 5_000L
+        /** ...or when it hasn't finished this long after the request. */
+        private const val SEG_BODY_BUDGET_MS: Long = 9_000L
+        /** The fresh-connection retry, start to finish. With the first try
+         *  this stays inside the player's 30 s wait on the proxy. */
+        private const val SEG_RETRY_BUDGET_MS: Long = 7_000L
+        /** The retry gives up early when it is as slow as the first try. */
+        private const val FRESH_SLOW_CHECK_MS: Long = 3_500L
+        private const val FRESH_SLOW_MIN_FRACTION: Double = 0.35
+        /** A chunk that arrives on the first try within this counts toward
+         *  "the channel is fine" ([recentlyHealthy]). */
+        private const val HEALTHY_SEG_MS: Long = 5_000L
+        private const val HEALTHY_WINDOW_MS: Long = 90_000L
+        private const val HEALTHY_MIN: Int = 2
         /** Keep this many recent segment URIs per channel so we can detect
          *  overlap when the proxy crosses a sibling boundary. ExoPlayer's
          *  live buffer is ~60 s at 4 s segments → ~15 segments, so 20 is

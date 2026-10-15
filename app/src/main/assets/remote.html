@@ -148,6 +148,24 @@
       <rect x="3" y="5" width="18" height="13" rx="2"/>
       <path d="M8 21h8"/><path d="M12 18v3"/>
     </symbol>
+    <symbol id="i-file" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/>
+      <path d="M14 3v5h5"/><path d="M9 13h6"/><path d="M9 17h6"/>
+    </symbol>
+    <symbol id="i-info" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/>
+    </symbol>
+    <symbol id="i-share" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
+      <path d="M8.6 13.5l6.8 4"/><path d="M15.4 6.5l-6.8 4"/>
+    </symbol>
+    <symbol id="i-code" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M8 6l-6 6 6 6"/><path d="M16 6l6 6-6 6"/>
+    </symbol>
   </defs>
 </svg>
 
@@ -558,6 +576,16 @@
           <span class="set-item-t">Debug</span>
           <svg class="icon sm set-chev"><use href="#i-chevron-left"/></svg>
         </button>
+        <button id="logsBtn" class="set-item">
+          <svg class="icon"><use href="#i-file"/></svg>
+          <span class="set-item-t">App logs</span>
+          <svg class="icon sm set-chev"><use href="#i-chevron-left"/></svg>
+        </button>
+        <button id="aboutBtn" class="set-item">
+          <svg class="icon"><use href="#i-info"/></svg>
+          <span class="set-item-t">About, and how to fix things</span>
+          <svg class="icon sm set-chev"><use href="#i-chevron-left"/></svg>
+        </button>
       </div>
     </div>
 
@@ -701,6 +729,144 @@
     <div class="card">
       <h3 class="card-h">Recent events</h3>
       <div id="debugEvents" class="debug-events"></div>
+    </div>
+  </section>
+
+  <!-- APP LOGS: any paired phone can read and send the TV's log -->
+  <section id="pane-logs" class="pane" style="padding:0 16px">
+    <button class="back sub-back" data-back="settings">
+      <svg class="icon"><use href="#i-chevron-left"/></svg> Settings
+    </button>
+    <h2 class="ph">App logs</h2>
+    <p class="muted small set-note">
+      What the TV app has been doing. When something goes wrong (a film stuck
+      on "Loading from", sound that breaks up, a channel that keeps freezing)
+      send this to us, and say what you were watching and when.
+      Links, tokens, passwords and IP addresses are removed before it leaves
+      the TV. It does include the names of what was played.
+    </p>
+    <div class="set-actions">
+      <button id="logShare" class="primary">
+        <svg class="icon sm"><use href="#i-share"/></svg> Send on WhatsApp
+      </button>
+      <button id="logDownload" class="ghost">
+        <svg class="icon sm"><use href="#i-download"/></svg> Save file
+      </button>
+      <button id="logCopy" class="ghost">
+        <svg class="icon sm"><use href="#i-copy"/></svg> Copy
+      </button>
+    </div>
+    <p id="logHint" class="muted small set-note log-hint hidden" role="status"></p>
+    <div class="log-tools">
+      <div class="chips" role="group" aria-label="Show">
+        <button id="logFilterProblems" class="chip on" aria-pressed="true">Problems</button>
+        <button id="logFilterAll" class="chip" aria-pressed="false">Everything</button>
+      </div>
+      <span id="logCount" class="muted small"></span>
+    </div>
+    <pre id="logOut" class="log-out" tabindex="0">Loading…</pre>
+  </section>
+
+  <!-- ABOUT: where the code lives, how it is built and how to fix it -->
+  <section id="pane-about" class="pane" style="padding:0 16px">
+    <button class="back sub-back" data-back="settings">
+      <svg class="icon"><use href="#i-chevron-left"/></svg> Settings
+    </button>
+    <h2 class="ph">About Vijana BaruBaru</h2>
+    <p class="muted small set-note" id="aboutVersion"></p>
+
+    <div class="set-group about-sec">
+      <div class="set-head">Where the code lives</div>
+      <div class="set-list">
+        <a class="repo-row" href="https://github.com/hexhoxhex/jobless_corner"
+           target="_blank" rel="noopener">
+          <span class="repo-name">hexhoxhex/jobless_corner</span>
+          <span class="repo-what">The TV app, this phone remote and the Windows app</span>
+        </a>
+        <a class="repo-row" href="https://github.com/hexhoxhex/mkurugenzi_viewer"
+           target="_blank" rel="noopener">
+          <span class="repo-name">hexhoxhex/mkurugenzi_viewer</span>
+          <span class="repo-what">Live channels, the sports schedule and the source list
+            the app downloads</span>
+        </a>
+      </div>
+    </div>
+
+    <div class="set-group about-sec">
+      <div class="set-head">How it is built</div>
+      <ul>
+        <li>The TV app is Kotlin with Jetpack Compose for Android TV. Video plays
+          through Media3 (ExoPlayer).</li>
+        <li>Each release is a version tag (for example <code>v0.1.297</code>) on
+          jobless_corner. GitHub Actions then builds the Android APK and the
+          Windows installer and attaches both to the release. The TV checks for
+          new releases and offers the update.</li>
+        <li>mkurugenzi_viewer runs on GitHub Actions on a timer: channels every 3
+          hours, the sports schedule every 30 minutes, a channel health check
+          every hour. It publishes JSON files (<code>channels.json</code>,
+          <code>schedule.json</code>, <code>providers.json</code>) that the app
+          downloads.</li>
+      </ul>
+    </div>
+
+    <div class="set-group about-sec">
+      <div class="set-head">How it works</div>
+      <ul>
+        <li><strong>Films and series.</strong> The app looks the title up on
+          TMDB, then asks the sources in order: 7Movies, MovieBox, VidNest,
+          Icefy, VixSrc, 4KHDHub. The order comes from <code>providers.json</code>,
+          so it can change without an app update. A source that fails, or never
+          starts, is skipped for the next one.</li>
+        <li><strong>Live TV.</strong> Each channel is found on its streaming site.
+          A small proxy inside the app fetches the video pieces, unwraps ones that
+          are disguised as images, and keeps a cushion of a few tens of seconds
+          so a slow source doesn't freeze the picture. The schedule says which
+          channel carries which match.</li>
+        <li><strong>This remote.</strong> The TV runs a small web server on port
+          8080, and this page talks to it over your Wi-Fi.</li>
+      </ul>
+    </div>
+
+    <div class="set-group about-sec">
+      <div class="set-head">How to fix something</div>
+      <ol>
+        <li>Write down what happened and when, and send the log (App logs, then
+          Send on WhatsApp).</li>
+        <li>Find the part that broke. Film sources: <code>net/</code> (one file
+          per source) and <code>data/Repository.kt</code>. Live TV:
+          <code>data/live/</code>. The player: <code>ui/PlayerScreen.kt</code>.
+          This remote: <code>assets/remote.*</code>. Channels and schedule:
+          <code>scraper.py</code> in mkurugenzi_viewer.</li>
+        <li>Build it: Android Studio, or JDK 17 with the Android SDK, then
+          <code>./gradlew assembleDebug</code>. Install with
+          <code>adb install -r</code>.</li>
+        <li>Test on a TV or an emulator. <code>adb forward tcp:8080 tcp:8080</code>
+          lets you drive it with the same requests this remote sends
+          (<code>/api/state</code>, <code>/api/play</code>), and
+          <code>adb logcat</code> shows what it is doing.</li>
+        <li>Send the fix as a pull request.</li>
+      </ol>
+      <p class="muted small">When a source stops working it is nearly always the
+        site that changed: a new address, a renamed field, a new step to get a
+        link. Compare what the site sends now with what the code expects.</p>
+    </div>
+
+    <div class="set-group about-sec">
+      <div class="set-head">Fixing it with an AI agent</div>
+      <ul>
+        <li>Coding agents such as Claude Code can read the code, build it, drive a
+          TV or emulator over adb and read the logs, so they can follow a problem
+          from the symptom to the line that causes it.</li>
+        <li>Clone the repo, open a terminal in it, start the agent and describe
+          the problem in plain words with the log file, for example:
+          "Family Guy S12E5 plays in Spanish. Log attached. Find out why."</li>
+        <li>Ask it to reproduce the problem and show the cause in the log before
+          it changes anything, and to change as little as it can.</li>
+        <li>Give it a way to test: an emulator, or a TV with adb over Wi-Fi, and
+          the remote's requests above.</li>
+        <li>Read its changes before you build and share them. Never give it
+          passwords or tokens, and keep them out of commits.</li>
+      </ul>
     </div>
   </section>
 

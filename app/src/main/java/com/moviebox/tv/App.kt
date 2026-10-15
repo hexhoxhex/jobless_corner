@@ -21,6 +21,9 @@ class App : Application(), ImageLoaderFactory {
         super.onCreate()
         instance = this
         installCrashHandler()
+        // Keep this app's own log (cleaned of tokens and addresses) so a
+        // viewer can share it from the phone remote. See AppLog.
+        com.moviebox.tv.debug.AppLog.start(this)
         // Debug / telemetry plumbing — resets in-memory session log, leaves
         // persisted daily rollups intact. NetworkMonitor starts listening
         // for connectivity changes immediately.

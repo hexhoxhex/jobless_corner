@@ -70,6 +70,9 @@ function toast(msg) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => t.classList.add("hidden"), 1800);
 }
+// Several handlers call showToast(), which was never defined: their
+// messages ("Report copied", "Logs cleared") threw instead of showing.
+const showToast = toast;
 
 /* ---------- banner (offline / re-auth) ---------- */
 function showBanner(text, kind) {
@@ -254,7 +257,7 @@ async function boot() {
    the browser hands back, so Back/Forward Just Work. */
 // Five tabs, each one job: Home, Live, Search, Library, Remote. Settings
 // (with Devices and Debug under it) opens from the header.
-const ROOT_TABS = ["browse", "live", "search", "library", "np", "debug", "devices", "settings"];
+const ROOT_TABS = ["browse", "live", "search", "library", "np", "debug", "devices", "settings", "logs", "about"];
 let originTab = "browse";   // last root tab — pushed frames highlight it + Back falls back to it
 
 function showPane(name) {
@@ -274,6 +277,9 @@ function showPane(name) {
   if (name === "devices") loadDevices();
   if (name === "debug") openDebug();
   else closeDebug();
+  if (name === "logs") openLogs();
+  else closeLogs();
+  if (name === "about") loadAbout();
   if (name === "browse") { if (!browseLoaded) loadBrowse(); loadHistory(); }
   if (name === "live" && !liveLoaded) loadLive();
 }
@@ -327,6 +333,8 @@ const devicesBtn = $("#devicesBtn");
 if (devicesBtn) devicesBtn.onclick = () => selectTab("devices");
 const debugBtn = $("#debugBtn");
 if (debugBtn) debugBtn.onclick = () => selectTab("debug");
+$("#logsBtn") && ($("#logsBtn").onclick = () => selectTab("logs"));
+$("#aboutBtn") && ($("#aboutBtn").onclick = () => selectTab("about"));
 $$(".sub-back").forEach(b => b.onclick = () => selectTab(b.dataset.back));
 $("#homeCwAll") && ($("#homeCwAll").onclick = () => selectTab("library"));
 
@@ -1912,6 +1920,156 @@ if (diagViewEl) diagViewEl.onclick = async () => {
   try { out.textContent = await fetchDiagText(); }
   catch (e) { out.textContent = "Could not build the report."; }
 };
+
+/* ---------- App logs ----------
+   The TV's own log, cleaned on the TV before it is stored (see AppLog.kt).
+   Viewers send it when something breaks. The remote is plain http on the
+   LAN, where browsers won't hand a file to another app, so "Send on
+   WhatsApp" saves the file and opens WhatsApp with a short summary; the
+   viewer attaches the saved file there. */
+let logProblemsOnly = true;
+let logTimer = null;
+
+async function loadLogs() {
+  const out = $("#logOut");
+  if (!out) return;
+  try {
+    const d = await get("/api/logs?lines=600" + (logProblemsOnly ? "&problems=1" : ""));
+    const lines = d.lines || [];
+    const atBottom = out.scrollTop + out.clientHeight >= out.scrollHeight - 24;
+    out.textContent = lines.length ? lines.join("\n")
+      : (logProblemsOnly ? "No problems logged recently." : "Nothing logged yet.");
+    $("#logCount").textContent = lines.length
+      ? `${lines.length} line${lines.length === 1 ? "" : "s"}` : "";
+    if (atBottom || !out.dataset.seen) {
+      out.scrollTop = out.scrollHeight;
+      out.dataset.seen = "1";
+    }
+  } catch (e) {
+    out.textContent = "Could not reach the TV.";
+  }
+}
+function openLogs() {
+  const out = $("#logOut");
+  if (out) delete out.dataset.seen;
+  loadLogs();
+  clearInterval(logTimer);
+  logTimer = setInterval(loadLogs, 5000);
+}
+function closeLogs() {
+  clearInterval(logTimer);
+  logTimer = null;
+}
+
+function setLogFilter(problems) {
+  logProblemsOnly = problems;
+  const p = $("#logFilterProblems"), a = $("#logFilterAll");
+  p.classList.toggle("on", problems); p.setAttribute("aria-pressed", String(problems));
+  a.classList.toggle("on", !problems); a.setAttribute("aria-pressed", String(!problems));
+  const out = $("#logOut");
+  if (out) delete out.dataset.seen;
+  loadLogs();
+}
+$("#logFilterProblems") && ($("#logFilterProblems").onclick = () => setLogFilter(true));
+$("#logFilterAll") && ($("#logFilterAll").onclick = () => setLogFilter(false));
+
+async function fetchLogFile() {
+  const r = await api("/api/logs/file");
+  const text = await r.text();
+  const m = (r.headers.get("Content-Disposition") || "").match(/filename="([^"]+)"/);
+  return { text, name: m ? m[1] : "vijanabarubaru-log.txt" };
+}
+
+function saveTextFile(text, name) {
+  const blob = new Blob([text], { type: "text/plain" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
+
+function logHint(text) {
+  const h = $("#logHint");
+  if (!h) return;
+  h.textContent = text;
+  h.classList.toggle("hidden", !text);
+}
+
+const logShareEl = $("#logShare");
+if (logShareEl) logShareEl.onclick = async () => {
+  logShareEl.disabled = true;
+  try {
+    const { text, name } = await fetchLogFile();
+    // Where the browser allows it (a secure page), share the file itself.
+    try {
+      const file = new File([text], name, { type: "text/plain" });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: "Vijana BaruBaru log" });
+        logHint("");
+        return;
+      }
+    } catch (e) {
+      if (e && e.name === "AbortError") return;
+    }
+    saveTextFile(text, name);
+    let problems = [];
+    try { problems = (await get("/api/logs?lines=6&problems=1")).lines || []; } catch (e) {}
+    const head = text.split("\n").slice(2, 4).join("\n");   // App, TV
+    let msg = "Vijana BaruBaru log from my TV\n" + head +
+      "\n\nThe full log is attached: " + name;
+    if (problems.length) msg += "\n\nLast problems:\n" + problems.join("\n");
+    if (msg.length > 1800) msg = msg.slice(0, 1800) + "…";
+    logHint("Saved " + name + " to your Downloads. In WhatsApp, tap the " +
+      "paperclip, then Document, and pick that file.");
+    const url = "https://wa.me/?text=" + encodeURIComponent(msg);
+    if (!window.open(url, "_blank")) location.href = url;
+  } catch (e) {
+    showToast("Couldn't get the log from the TV");
+  } finally {
+    logShareEl.disabled = false;
+  }
+};
+
+const logDlEl = $("#logDownload");
+if (logDlEl) logDlEl.onclick = async () => {
+  try {
+    const { text, name } = await fetchLogFile();
+    saveTextFile(text, name);
+    logHint("Saved " + name + " to your Downloads.");
+  } catch (e) { showToast("Couldn't get the log from the TV"); }
+};
+
+const logCopyEl = $("#logCopy");
+if (logCopyEl) logCopyEl.onclick = async () => {
+  // What is on screen, not the whole file: a chat message has a size limit.
+  const text = ($("#logOut") || {}).textContent || "";
+  let done = false;
+  if (navigator.clipboard && window.isSecureContext) {
+    try { await navigator.clipboard.writeText(text); done = true; } catch (e) {}
+  }
+  if (!done) {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select();
+    try { done = document.execCommand("copy"); } catch (e) {}
+    ta.remove();
+  }
+  showToast(done ? "Log copied" : "Couldn't copy; use Save file");
+};
+
+/* ---------- About ---------- */
+async function loadAbout() {
+  const v = $("#aboutVersion");
+  if (!v || v.dataset.done) return;
+  try {
+    const d = await get("/api/diagnostics");
+    v.textContent = "Version " + (d.app?.version || "?") + " on " +
+      `${d.device?.manufacturer || ""} ${d.device?.model || ""}`.trim() + ".";
+    v.dataset.done = "1";
+  } catch (e) { /* the page reads fine without it */ }
+}
 
 /** How many channel pills to show before collapsing the rest behind a
  *  "+N more" control. Fixtures routinely carry 40-60 mirrors; rendering
