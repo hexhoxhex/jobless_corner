@@ -40,8 +40,8 @@ data class LivePlayer(
 @JsonClass(generateAdapter = true)
 data class ScheduleEvent(
     val category: String,
-    /** "HH:MM" 24-hour string as published by dlhd.pk. This is in **UK time**
-     *  — dlhd.pk publishes its schedule from a UK perspective. We keep the
+    /** "HH:MM" 24-hour string as published by dlhd.pk. This is **GMT (UTC)**
+     *  all year — its day headings say "Schedule Time UK GMT". We keep the
      *  raw string for fallback display, but always prefer [startUnix] when
      *  it is set. Without TZ conversion a Kenyan viewer (UTC+3) would see
      *  "17:00" for a show that's actually airing at 19:00 their time, which

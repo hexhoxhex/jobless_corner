@@ -892,6 +892,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         /** Probes to run when a stall forces a decision with no fresh
          *  measurements. Bounded so recovery stays quick. */
         const val AUTO_SWITCH_PROBE_LIMIT = 6
+
+        /** A match-only feed is treated as on from this long before its
+         *  listed kick-off... */
+        const val MATCH_FEED_EARLY_S = 45 * 60L
+
+        /** ...to this long after (extra time, penalties, a late start). */
+        const val MATCH_FEED_LATE_S = 3 * 60 * 60L + 30 * 60L
     }
 
     fun disableTunnelingFor(channelId: String): Boolean =
@@ -1411,6 +1418,50 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         )
     }
 
+    /**
+     * Opening a match-only feed while its match isn't on: say so, and when it
+     * is next on, instead of a minute of retries ending in "This channel's
+     * source is down". Returns true when it refused.
+     *
+     * "Paramount+" is not a channel: the schedule hands out ~40 numbered
+     * Paramount+ feeds, each switched on for one match (2026-10-15: ch 171
+     * carried Roma vs Real Madrid one night and answered "unknown channel"
+     * the next morning). A feed is on from [MATCH_FEED_EARLY_S] before a
+     * listed kick-off to [MATCH_FEED_LATE_S] after.
+     */
+    private fun refuseOffAirMatchFeed(
+        channelId: String,
+        schedule: List<com.moviebox.tv.data.live.ScheduleEvent>,
+    ): Boolean {
+        val events = com.moviebox.tv.reminders.ReminderWarm.scheduleOrCached(schedule)
+            .filter { ev -> ev.startUnix != null && ev.channels.any { it.id == channelId } }
+        if (events.isEmpty()) return false
+        val now = System.currentTimeMillis() / 1000
+        val onAir = events.any {
+            val start = it.startUnix ?: return@any false
+            now >= start - MATCH_FEED_EARLY_S && now <= start + MATCH_FEED_LATE_S
+        }
+        if (onAir) return false
+        val name = events.asSequence().flatMap { it.channels.asSequence() }
+            .firstOrNull { it.id == channelId }?.name ?: "This feed"
+        val next = events.filter { (it.startUnix ?: 0L) > now }.minByOrNull { it.startUnix ?: 0L }
+        val msg = if (next != null) {
+            val at = java.util.Date((next.startUnix ?: 0L) * 1000)
+            val sameDay = android.text.format.DateUtils.isToday(at.time)
+            val time = java.text.SimpleDateFormat(
+                if (sameDay) "HH:mm" else "EEE HH:mm", java.util.Locale.getDefault(),
+            ).format(at)
+            "$name is only on during matches. Next on it: " +
+                "${com.moviebox.tv.ui.Glyphs.plain(next.title)} at $time"
+        } else {
+            "$name is only on during matches, and no match is on it right now."
+        }
+        android.util.Log.i("LiveDiag", "VM ch=$channelId match-only feed off air — $msg")
+        com.moviebox.tv.data.live.LiveStatus.note(msg)
+        _state.update { it.copy(error = msg) }
+        return true
+    }
+
     /** Measure a feed without touching playback. See LiveStreamProxy.probe. */
     suspend fun probeChannel(channelId: String) = liveProxy.probe(channelId)
 
@@ -1631,9 +1682,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun playScheduleChannel(channelId: String) {
         liveReturnHome = false
-        val cached = _state.value.liveChannels.firstOrNull { it.id == channelId }
+        val fromCatalog = _state.value.liveChannels.firstOrNull { it.id == channelId }
+        val cached = fromCatalog
             ?: channelFromSchedule(channelId, _state.value.liveSchedule)
         if (cached != null) {
+            // Only judge a feed as match-only once the catalogue is known:
+            // with it unloaded, a 24/7 channel also looks "not in catalogue".
+            if (fromCatalog == null && _state.value.liveChannels.isNotEmpty() &&
+                refuseOffAirMatchFeed(channelId, _state.value.liveSchedule)
+            ) return
             playChannel(cached); return
         }
         viewModelScope.launch {
@@ -1667,8 +1724,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     "schedule=${schedule.size}" +
                     if (fetched.isNullOrEmpty()) " (schedule fetch failed — kept previous)" else "",
             )
-            val ch = channels.firstOrNull { it.id == channelId }
-                ?: channelFromSchedule(channelId, schedule)
+            val inCatalog = channels.firstOrNull { it.id == channelId }
+            val ch = inCatalog ?: channelFromSchedule(channelId, schedule)
+            if (ch != null && inCatalog == null && channels.isNotEmpty() &&
+                refuseOffAirMatchFeed(channelId, schedule)
+            ) return@launch
             if (ch == null) {
                 android.util.Log.w(
                     "LiveDiag",
