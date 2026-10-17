@@ -1154,6 +1154,7 @@ class RemoteServer(
                             .put("headroom", String.format("%.2f", r.headroom).toDouble())
                             .put("host", r.host)
                             .put("note", r.note)
+                            .put("lag_s", r.sourceLagSec)
                     }
                     arr.put(o)
                 }

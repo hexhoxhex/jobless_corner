@@ -50,6 +50,11 @@ object FeedRanker {
      */
     const val RELAXED_HEADROOM = 1.05f
 
+    /** A feed whose newest chunk ends further behind real time than this
+     *  is not offered as a replacement. Healthy feeds measure 0-15 s; the
+     *  margin allows for a source clock that runs a little slow. */
+    const val MAX_SOURCE_LAG_S = 60
+
     fun cached(channelId: String): Ranked? =
         results[channelId]?.takeIf { System.currentTimeMillis() - it.atMs < FRESH_MS }
 
@@ -183,6 +188,9 @@ object FeedRanker {
             .filter { brokenReason(it) == null }
             .mapNotNull { cached(it)?.result }
             .filter { it.ok && it.headroom >= minHeadroom }
+            // Downloads fast but the source has stalled or fallen far behind
+            // (a minute-plus behind live by its own clock): not a rescue.
+            .filter { it.sourceLagSec < 0 || it.sourceLagSec <= MAX_SOURCE_LAG_S }
             .toList()
         if (usable.isEmpty()) return null
         // Every feed here already clears the headroom bar, so they are all

@@ -272,6 +272,11 @@ class LiveStreamProxy(
         val declaredKbps: Int,
         val host: String,
         val note: String,
+        /** How far the newest chunk ends behind real time, by the playlist's
+         *  own clock (PROGRAM-DATE-TIME); -1 when the playlist has none. A
+         *  source that has stalled or fallen behind shows it here
+         *  (beIN Sports MENA English 1: 209 s on 2026-10-17). */
+        val sourceLagSec: Int = -1,
     ) {
         /** Achieved throughput over required bitrate. Below ~1.3 the feed
          *  has no margin and will bleed its buffer under any hiccup. */
@@ -408,9 +413,26 @@ class LiveStreamProxy(
                 ((segLength * 8.0) / 1000.0 / segDurationSec).toInt()
             } else 0
         val how = if (declaredKbps > 0) "declared" else if (requiredKbps > 0) "from segment" else "unknown"
+        // The newest chunk's end by the playlist's own clock.
+        var pdtSec: Double? = null
+        var lastEnd: Double? = null
+        for (raw in plBody.lineSequence()) {
+            val line = raw.trim()
+            when {
+                line.startsWith("#EXT-X-PROGRAM-DATE-TIME:") ->
+                    pdtSec = SourceRate.parsePdt(line.substringAfter(':'))
+                line.startsWith("#EXTINF:") -> {
+                    val d = line.substringAfter(':').substringBefore(',').toDoubleOrNull() ?: 0.0
+                    pdtSec?.let { lastEnd = it + d; pdtSec = it + d }
+                }
+            }
+        }
+        val lagSec = lastEnd?.let { (System.currentTimeMillis() / 1000.0 - it).toInt() } ?: -1
         return ProbeResult(
             channelId, true, playlistMs, kbps, requiredKbps, host,
-            "measured ${bytes / 1024}KB in ${segMs}ms, needs ${requiredKbps}kbps ($how)",
+            "measured ${bytes / 1024}KB in ${segMs}ms, needs ${requiredKbps}kbps ($how)" +
+                (if (lagSec >= 0) ", ${lagSec}s behind live" else ""),
+            sourceLagSec = lagSec,
         )
     }
 
@@ -715,7 +737,13 @@ class LiveStreamProxy(
             // then a jump of 30+ s; skipping it costs one chunk. Only when
             // the channel's other chunks are arriving fine — on a line
             // that is slow for everything, skipping would just play nothing.
-            if (file == null && recentlyHealthy(channelId)) {
+            // At most one a minute: skipping is for the odd bad file. When
+            // slow chunks are the norm (seen on the emulator 2026-10-17:
+            // most USA Network chunks at ~75 KB/s), skipping each one turned
+            // playback into a run of 11-second jumps; waiting lets the stall
+            // check move the viewer to a feed that downloads properly.
+            if (file == null && recentlyHealthy(channelId) && !skippedRecently(channelId)) {
+                lastSkipAt[channelId] = android.os.SystemClock.elapsedRealtime()
                 markSkippedSegment(channelId, segName)
                 Log.w(DIAG, "PROXY ch=$channelId SEG ${shortSeg(originalUrl)} SKIPPED after " +
                     "${dlMs}ms: slow on every connection while the chunks around it " +
@@ -1013,6 +1041,14 @@ class LiveStreamProxy(
 
     /** At least [HEALTHY_MIN] quick chunks in the last [HEALTHY_WINDOW_MS]:
      *  the line and the feed are fine, so one slow chunk is that chunk. */
+    /** When a chunk was last skipped as stuck, per channel. */
+    private val lastSkipAt = ConcurrentHashMap<String, Long>()
+
+    private fun skippedRecently(channelId: String): Boolean {
+        val at = lastSkipAt[channelId] ?: return false
+        return android.os.SystemClock.elapsedRealtime() - at < SKIP_MIN_GAP_MS
+    }
+
     private fun recentlyHealthy(channelId: String): Boolean {
         val q = healthySegs[channelId] ?: return false
         val now = android.os.SystemClock.elapsedRealtime()
@@ -1254,6 +1290,12 @@ class LiveStreamProxy(
                 // 403'd but has now healed can race all CDNs equally
                 // again on the next re-resolve.
                 resolver.reportSuccess(channelId)
+                // How fast the source is really feeding this channel: a feed
+                // can download fast and still be fed at 68% of real time
+                // (see SourceRate). Give up on it like a broken feed.
+                SourceRate.note(channelId, hostOf(entry.innerUrl), resp.second)?.let { why ->
+                    FeedRanker.markBroken(channelId, why)
+                }
                 // Played fine for a while: look up this channel's backups in
                 // the background, so a dead server can be swapped out fast.
                 val nowGood = System.currentTimeMillis()
@@ -2250,6 +2292,8 @@ class LiveStreamProxy(
         private const val HEALTHY_SEG_MS: Long = 5_000L
         private const val HEALTHY_WINDOW_MS: Long = 90_000L
         private const val HEALTHY_MIN: Int = 2
+        /** Skip at most one stuck chunk in this long (see handleSegment). */
+        private const val SKIP_MIN_GAP_MS: Long = 60_000L
         /** Keep this many recent segment URIs per channel so we can detect
          *  overlap when the proxy crosses a sibling boundary. ExoPlayer's
          *  live buffer is ~60 s at 4 s segments → ~15 segments, so 20 is

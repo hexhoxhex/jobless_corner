@@ -69,6 +69,11 @@ object ChannelLanguage {
     private val NON_ENGLISH_BRANDS = listOf(
         "movistar", "telemundo", "univision", "tudn", "deportes",
         "sportv", "globo", "tyc", "esporte", "eleven sports",
+        // US Spanish-language networks. "NBC Universo" matched the English
+        // "nbc" brand and was offered as an English Premier League feed
+        // (2026-10-17).
+        "universo", "unimas", "unimás", "galavision", "galavisión",
+        "azteca", "televisa",
     )
 
     enum class Guess { ENGLISH, OTHER, UNKNOWN }
