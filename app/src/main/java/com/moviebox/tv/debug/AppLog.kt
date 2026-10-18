@@ -109,16 +109,44 @@ object AppLog {
     private val PROBLEM_RE = Regex(
         """fail|error|exception|stall|freez|broken|timeout|timed out|""" +
             """not available|no source|giving up|dead|refus|rebuffer|""" +
-            """re-prepare|recovery|discontinu|(?<![\d.:])\b[45]\d\d\b(?![\d.])""",
+            """re-prepare|recovery|discontinu|(?<![\d.:-])\b[45]\d\d\b(?![\d.])""",
         RegexOption.IGNORE_CASE,
+    )
+
+    /** Tags whose problems are worth reading: the app's own, the player's
+     *  errors, and crashes. Everything else in this process is the TV's own
+     *  components, which log warnings all day without anything being wrong
+     *  ("FMQ grantorIdx", codec set-up, GPU, "A resource failed to call
+     *  end", the remote's dropped connections): a user's log from 2026-10-18
+     *  summed up as six of those and nothing else, and they differ from TV
+     *  to TV, so they can't be listed. A new tag in the app belongs here. */
+    private val OWN_TAGS = setOf(
+        "App", "AppLog", "EpisodeEnum", "Failover", "FourKHdHub", "H5", "H5Api",
+        "H5Resolver", "HomeSweep", "Icefy", "IntroDb", "JsIframeResolver", "LiveDiag",
+        "LiveStreamProxy", "OpenSubs", "PersonSearch", "ProviderConfig", "Reminders",
+        "RemoteAccess", "Scrub", "Search", "SeasonProbe", "SevenMovies", "SubSync",
+        "UpdateChecker", "UpdateInstaller", "VidNest", "VijanaBaruBaru", "VixSrc",
+        "VodDiag", "WatchNext",
+    )
+    private val PLAYER_TAGS = setOf(
+        "ExoPlayerImplInternal", "ExoPlayerImpl", "DecoderAudioRenderer",
+        "MediaCodecRenderer", "MediaCodecVideoRenderer", "MediaCodecAudioRenderer",
+        "DefaultAudioSink", "AndroidRuntime",
     )
 
     private fun isProblem(line: String): Boolean {
         // "10-15 10:36:44.665 W/AudioTrack( 5993): ..." — level after the time.
         val lvl = line.getOrNull(19)
+        if (lvl == 'V' || lvl == 'D') return false
+        val tag = line.substring(minOf(21, line.length)).substringBefore('(').trim()
+        if (tag !in OWN_TAGS && tag !in PLAYER_TAGS) return false
         // Only the message: the time's milliseconds (".489") read as an
         // HTTP status otherwise.
         val msg = line.substringAfter("): ", line)
+        // Stack frames: the exception's own line already says what happened.
+        if (msg.startsWith("\tat ") || msg.trimStart().startsWith("at ") ||
+            msg.trimStart().startsWith("... ")
+        ) return false
         return lvl == 'W' || lvl == 'E' || lvl == 'F' || PROBLEM_RE.containsMatchIn(msg)
     }
 

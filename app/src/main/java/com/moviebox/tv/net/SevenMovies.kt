@@ -350,11 +350,17 @@ object SevenMovies {
         return null
     }
 
-    /** A named language other than the original/English one. */
+    /** A named language other than the original/English one — or several
+     *  languages in one stream ("Multi-audio"), held back the same way: it is
+     *  one MPEG-TS with an audio track per language and the player hears only
+     *  the first, which is often a dub. Tulsa King S1E1 came from Titan's
+     *  "Multi-audio" in Hindi (2026-10-17) when Vela was a few seconds slow.
+     *  A held stream still plays when nothing else does. */
     private fun isDub(name: String): Boolean {
         val n = name.lowercase()
         if (n.isBlank()) return false
-        return !(n.contains("original") || n.contains("english") || n.contains("multi"))
+        if (n.contains("multi")) return true
+        return !(n.contains("original") || n.contains("english"))
     }
 
     private fun playInfo(

@@ -1202,14 +1202,9 @@ class RemoteServer(
             // e-mail). Reaches back across restarts and ends with the last
             // crash, if any.
             uri == "/api/logs/file" -> {
-                val now = listOf(
-                    RemoteController.nowPlayingTitle,
-                    RemoteController.currentProvider,
-                    com.moviebox.tv.data.live.LiveStatus.message.value ?: "",
-                ).filter { it.isNotBlank() }.joinToString(" | ")
                 newFixedLengthResponse(
                     Response.Status.OK, "text/plain; charset=utf-8",
-                    com.moviebox.tv.debug.AppLog.exportText(context, now),
+                    com.moviebox.tv.debug.AppLog.exportText(context, nowPlayingForLog()),
                 ).apply {
                     addHeader(
                         "Content-Disposition",
@@ -1217,6 +1212,40 @@ class RemoteServer(
                             com.moviebox.tv.debug.AppLog.fileName(context) + "\"",
                     )
                 }
+            }
+
+            // The same file as a link, for the remote's WhatsApp button: a
+            // plain-http page can't hand WhatsApp a file. Uploaded only when
+            // the viewer presses Send, to a host that deletes it after 72 h
+            // (see LogUpload).
+            uri == "/api/logs/upload" && method == Method.POST -> {
+                val name = com.moviebox.tv.debug.AppLog.fileName(context)
+                val text = com.moviebox.tv.debug.AppLog.exportText(context, nowPlayingForLog())
+                val header = text.lineSequence().drop(2).take(2).toList()   // App, TV
+                runCatching { com.moviebox.tv.debug.LogUpload.upload(name, text) }.fold(
+                    onSuccess = { url ->
+                        android.util.Log.i(
+                            "AppLog",
+                            "log uploaded for sharing (${text.length / 1024} KB, " +
+                                "kept ${com.moviebox.tv.debug.LogUpload.KEEP})",
+                        )
+                        json(
+                            JSONObject()
+                                .put("url", url)
+                                .put("name", name)
+                                .put("keep", com.moviebox.tv.debug.LogUpload.KEEP)
+                                .put("header", JSONArray(header))
+                                .toString(),
+                        )
+                    },
+                    onFailure = { e ->
+                        android.util.Log.w("AppLog", "log upload failed: ${e.message}")
+                        newFixedLengthResponse(
+                            Response.Status.SERVICE_UNAVAILABLE, "application/json",
+                            JSONObject().put("error", "upload failed").toString(),
+                        )
+                    },
+                )
             }
 
             // Shareable diagnostics bundle. Anonymous by construction --
@@ -1457,6 +1486,13 @@ class RemoteServer(
 
     /** Cap on feeds probed in one request — each costs a short read. */
     private val MAX_PROBE_FEEDS = 8
+
+    /** What is playing, for the top of a shared log. */
+    private fun nowPlayingForLog(): String = listOf(
+        RemoteController.nowPlayingTitle,
+        RemoteController.currentProvider,
+        com.moviebox.tv.data.live.LiveStatus.message.value ?: "",
+    ).filter { it.isNotBlank() }.joinToString(" | ")
 
     private fun ok() = json("{\"ok\":true}")
 

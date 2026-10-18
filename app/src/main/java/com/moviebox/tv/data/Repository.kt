@@ -733,6 +733,17 @@ class Repository(
             else -> (listOfNotNull(first) + available.filter { it != first })
                 .filter { it == first || available.contains(it) }
                 .filter { it !in exclude }
+                // A source whose stream broke on this title lately goes last
+                // (see SourceTrouble). A stable sort: the rest keep their order.
+                .sortedBy { if (SourceTrouble.troubled(subjectId, it.label)) 1 else 0 }
+                .also { o ->
+                    o.filter { SourceTrouble.troubled(subjectId, it.label) }.forEach {
+                        android.util.Log.i(
+                            "Failover",
+                            "${it.label} goes last for '$title': its stream broke on this title lately",
+                        )
+                    }
+                }
         }
         var lastError: Throwable? = null
         var tried = 0

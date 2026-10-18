@@ -2199,32 +2199,61 @@ function logHint(text) {
   h.classList.toggle("hidden", !text);
 }
 
+// The last few lines the TV counts as problems (its own system noise left
+// out), shortened so a chat message stays readable.
+async function lastProblems(n) {
+  try {
+    const lines = (await get("/api/logs?lines=" + n + "&problems=1")).lines || [];
+    return lines.map(l => l.replace(/\(\s*\d+\): /, ": ").slice(0, 160));
+  } catch (e) { return []; }
+}
+
 const logShareEl = $("#logShare");
 if (logShareEl) logShareEl.onclick = async () => {
   logShareEl.disabled = true;
   try {
-    const { text, name } = await fetchLogFile();
-    // Where the browser allows it (a secure page), share the file itself.
-    try {
-      const file = new File([text], name, { type: "text/plain" });
-      if (navigator.canShare && navigator.canShare({ files: [file] })) {
-        await navigator.share({ files: [file], title: "Vijana BaruBaru log" });
-        logHint("");
-        return;
+    // A secure (https) page can hand WhatsApp the file itself. The remote is
+    // normally plain http on the home network, where browsers don't allow it.
+    if (navigator.canShare && window.isSecureContext) {
+      const { text, name } = await fetchLogFile();
+      try {
+        const file = new File([text], name, { type: "text/plain" });
+        if (navigator.canShare({ files: [file] })) {
+          await navigator.share({ files: [file], title: "Vijana BaruBaru log" });
+          logHint("");
+          return;
+        }
+      } catch (e) {
+        if (e && e.name === "AbortError") return;
       }
-    } catch (e) {
-      if (e && e.name === "AbortError") return;
     }
-    saveTextFile(text, name);
-    let problems = [];
-    try { problems = (await get("/api/logs?lines=6&problems=1")).lines || []; } catch (e) {}
-    const head = text.split("\n").slice(2, 4).join("\n");   // App, TV
-    let msg = "Vijana BaruBaru log from my TV\n" + head +
-      "\n\nThe full log is attached: " + name;
+    // Otherwise the TV puts the log online for 3 days and the message
+    // carries the link: a file can't be attached from here, and people
+    // ended up sending the summary alone.
+    logHint("Getting the log ready…");
+    let up = null;
+    try {
+      const r = await api("/api/logs/upload", { method: "POST" });
+      if (r.ok) up = await r.json();
+    } catch (e) {}
+    const problems = await lastProblems(8);
+    let msg = "Vijana BaruBaru log from my TV";
+    if (up && up.url) {
+      msg += "\n" + (up.header || []).join("\n") +
+        "\n\nFull log (deleted after 3 days): " + up.url;
+      logHint("");
+    } else {
+      // The upload didn't work: save the file to attach by hand.
+      const { text, name } = await fetchLogFile();
+      saveTextFile(text, name);
+      msg += "\n" + text.split("\n").slice(2, 4).join("\n") +
+        "\n\nThe full log is attached: " + name;
+      logHint("Couldn't put the log online, so it was saved to your Downloads " +
+        "as " + name + ". In WhatsApp, tap the paperclip, then Document, " +
+        "and pick that file.");
+    }
     if (problems.length) msg += "\n\nLast problems:\n" + problems.join("\n");
-    if (msg.length > 1800) msg = msg.slice(0, 1800) + "…";
-    logHint("Saved " + name + " to your Downloads. In WhatsApp, tap the " +
-      "paperclip, then Document, and pick that file.");
+    if (msg.length > 2400) msg = msg.slice(0, 2400) + "…";
     const url = "https://wa.me/?text=" + encodeURIComponent(msg);
     if (!window.open(url, "_blank")) location.href = url;
   } catch (e) {

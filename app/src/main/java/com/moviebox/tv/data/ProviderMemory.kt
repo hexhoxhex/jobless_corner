@@ -61,3 +61,30 @@ object ProviderMemory {
     private fun prefs(ctx: Context) =
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 }
+
+/**
+ * Sources whose stream broke on a title lately, so the title's next episodes
+ * ask them last instead of breaking again a few minutes in. "Prisoner"
+ * (2026-10-17): each episode started on 7Movies, broke one to three minutes
+ * in (a 502 from its server) and moved to VixSrc, which then played it
+ * through — the same interruption every episode, all evening.
+ *
+ * Only reordered, never excluded: a title no other source has still plays
+ * from it. Kept for [FOR_MS] in memory; a restart starts fresh.
+ */
+object SourceTrouble {
+    private const val FOR_MS = 3 * 60 * 60 * 1000L
+    private val until = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    private fun key(subjectId: String, provider: String) =
+        subjectId.substringAfterLast(':').ifBlank { subjectId } + "|" + provider
+
+    /** [provider]'s stream for [subjectId] failed. */
+    fun note(subjectId: String, provider: String) {
+        if (subjectId.isBlank() || provider.isBlank()) return
+        until[key(subjectId, provider)] = android.os.SystemClock.elapsedRealtime() + FOR_MS
+    }
+
+    fun troubled(subjectId: String, provider: String): Boolean =
+        (until[key(subjectId, provider)] ?: 0L) > android.os.SystemClock.elapsedRealtime()
+}

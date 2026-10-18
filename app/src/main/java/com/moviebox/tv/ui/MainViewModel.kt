@@ -2739,6 +2739,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             failedFor = key
         }
         current?.let { failedProviders += it }
+        // And for the title's next episodes, for a while: ask it last.
+        current?.let { com.moviebox.tv.data.SourceTrouble.note(subjectId, it.label) }
         // It was remembered as this title's source because it answered with
         // a link; that link doesn't play, so stop sending retries there first.
         val ctx = getApplication<android.app.Application>()
