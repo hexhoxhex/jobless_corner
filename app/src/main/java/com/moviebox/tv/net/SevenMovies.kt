@@ -76,6 +76,9 @@ object SevenMovies {
 
     /** How long Vela, the better stream, gets before Titan starts playback. */
     private const val VELA_HEAD_START_MS = 3_500L
+    /** How long, after Vela's head start, to wait for Orion's language
+     *  list (it usually answers with the others). */
+    private const val ORION_LIST_WAIT_MS = 2_500L
 
     /** Stop trying more servers once this much time has gone, so the next
      *  source in the chain still gets its turn. */
@@ -208,25 +211,57 @@ object SevenMovies {
             return info
         }
 
-        // Warmed while the previous episode played: no lookups at all.
+        // Vela names no language. For most titles it is the original, but
+        // a new release can come from a dubbed copy: VisionQuest S1E1
+        // (2026-10-18) played in another language from Vela, while Orion
+        // listed Original, Hindi, Tamil, Telugu and more. Orion's list is the
+        // tell — when a title has dubs going round, Vela can't be trusted and
+        // Orion's "Original" copy (one audio track) goes first.
+        //
+        // Not Titan, though it calls its stream "English": it is one MPEG-TS
+        // with four audio tracks — Tamil, Telugu, Hindi, English, in that
+        // order (ffprobe) — and in HLS the player reads only the FIRST audio
+        // track of a TS, so the English preference can't reach the English
+        // one. It played Tamil.
+        val titleKey = path.split('/').take(2).joinToString("/")
+        // Warmed while the previous episode played: no lookups at all —
+        // unless this show is known to have dubs.
         warmVela.remove(path)?.takeIf { it.fresh(VELA_KEEP_MS) }?.let { kept ->
-            consider("vela", kept.value)?.let { return@coroutineScope it }
+            if (titleKey !in dubbedTitles) {
+                consider("vela", kept.value)?.let { return@coroutineScope it }
+            }
         }
-        // Vela and Titan are asked together; Vela gets a head start.
+        // Vela and Titan are asked together; Vela gets a head start. Orion's
+        // list comes along to tell whether dubs exist.
         val vela: Deferred<JSONObject?> = async { fetchJson(sourceUrl(path, token, "vela")) }
         val titan: Deferred<JSONObject?> = async { fetchJson(sourceUrl(path, token, "titan")) }
+        val orion: Deferred<JSONObject?> = async { fetchJson(sourceUrl(path, token, "orion")) }
         val velaEarly = withTimeoutOrNull(VELA_HEAD_START_MS) { vela.await() }
+        val orionList = withTimeoutOrNull(ORION_LIST_WAIT_MS) { orion.await() }
+        val dubs = dubNames(orionList)
+        if (dubs.isNotEmpty()) {
+            dubbedTitles.add(titleKey)
+            android.util.Log.i(
+                TAG, "$path: dubs exist (${dubs.joinToString()}) — " +
+                    "preferring a copy labelled English or original over Vela",
+            )
+            if (hevc) consider("orion", orionList)?.let { vela.cancel(); return@coroutineScope it }
+            android.util.Log.i(TAG, "$path: Orion's original doesn't play here — falling back to Vela")
+        }
         if (velaEarly != null) {
             consider("vela", velaEarly)?.let { titan.cancel(); return@coroutineScope it }
         }
-        consider("titan", titan.await())?.let { vela.cancel(); return@coroutineScope it }
+        if (dubs.isEmpty()) {
+            consider("titan", titan.await())?.let { vela.cancel(); return@coroutineScope it }
+        }
         if (velaEarly == null) {
             consider("vela", vela.await())?.let { return@coroutineScope it }
         }
         for (server in listOfNotNull("orion".takeIf { hevc }, "lyra")) {
             if (spent() > BUDGET_MS) break
-            consider(server, fetchJson(sourceUrl(path, token, server)))
-                ?.let { return@coroutineScope it }
+            val data = if (server == "orion" && orionList != null) orionList
+                else fetchJson(sourceUrl(path, token, server))
+            consider(server, data)?.let { return@coroutineScope it }
         }
         // The partner library, when boot named one.
         meta.optString("evionUrl").takeIf { it.isNotBlank() }?.let { url ->
@@ -244,6 +279,22 @@ object SevenMovies {
     }
 
     private data class Entry(val url: String, val name: String)
+
+    /** Dubbed languages a server's answer lists ("Orion · Hindi" -> Hindi). */
+    private fun dubNames(data: JSONObject?): List<String> {
+        val streams = data?.optJSONArray("streams") ?: return emptyList()
+        return (0 until streams.length()).mapNotNull { i ->
+            streams.optJSONObject(i)?.optString("name")
+                ?.takeIf { isDub(it) }
+                ?.substringAfter('·')?.trim()
+                ?.ifBlank { null }
+        }.distinct()
+    }
+
+    /** Titles ("tv/213375") seen with dubs, so a warmed Vela stream for
+     *  their next episode isn't used without the check. */
+    private val dubbedTitles: MutableSet<String> =
+        java.util.concurrent.ConcurrentHashMap.newKeySet()
 
     /** Vela's renditions come highest first (verified from the init
      *  segments on 2026-10-11: 1920x1080, 1280x720, 852x480). There is no

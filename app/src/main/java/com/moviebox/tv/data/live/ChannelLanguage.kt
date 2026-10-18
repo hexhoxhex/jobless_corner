@@ -65,6 +65,13 @@ object ChannelLanguage {
         // UNKNOWN, so it lost to foreign feeds when picking a mirror.
         "paramount", "cbs", "nbc", "peacock", "espn", "fox sports",
         "premier sports", "bt sport", "tsn", "optus",
+        // Feeds with English commentary whose names say nothing of it.
+        // On 2026-10-17 the only healthy mirror of Man City v Ipswich was
+        // "Hub Premier 2" (unlabelled), so the switch away from a frozen
+        // feed found "no better English feed" and stayed. Hub Premier also
+        // carried Everton v Chelsea that afternoon in English; Astro is
+        // Malaysia's English-language Premier League broadcaster.
+        "hub premier", "astro",
     )
     private val NON_ENGLISH_BRANDS = listOf(
         "movistar", "telemundo", "univision", "tudn", "deportes",
@@ -74,6 +81,8 @@ object ChannelLanguage {
         // (2026-10-17).
         "universo", "unimas", "unimás", "galavision", "galavisión",
         "azteca", "televisa",
+        // Viaplay's Nordic channels.
+        "viaplay",
     )
 
     enum class Guess { ENGLISH, OTHER, UNKNOWN }
@@ -89,6 +98,9 @@ object ChannelLanguage {
         // Brand beats absence-of-market: "Telemundo" names no country but
         // is not an English feed.
         if (NON_ENGLISH_BRANDS.any { n.contains(it) }) return Guess.OTHER
+        // Viaplay's "V Sport Football" etc. (Nordic). A prefix, so "TV Sport"
+        // can't match.
+        if (n.startsWith("v sport ")) return Guess.OTHER
         val nonEnglish = NON_ENGLISH_MARKERS.any { marker(n, it) }
         val english = ENGLISH_MARKERS.any { marker(n, it) }
         // A non-English market beats an English brand: "TNT Sports Chile",
