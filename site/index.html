@@ -4,10 +4,10 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>Vijana BaruBaru — Download</title>
-<meta name="description" content="Vijana BaruBaru — hundreds of live TV channels plus a full movie & series library on Android TV, Android phone, and Windows. Download the app." />
+<meta name="description" content="Vijana BaruBaru — hundreds of live TV channels plus a full movie & series library on Android TV, Android phone, iPhone, iPad and Windows. Download the app." />
 <meta name="theme-color" content="#0b0f14" />
 <meta property="og:title" content="Vijana BaruBaru" />
-<meta property="og:description" content="Live TV & movies for Android TV, phone, and Windows." />
+<meta property="og:description" content="Live TV & movies for Android TV, phone, iPhone, iPad and Windows." />
 <style>
   :root{--bg:#0b0f14;--bg2:#121821;--card:#161e29;--text:#eef2f7;--muted:#93a1b3;
     --accent:#2bd4a4;--accent2:#20b88c;--border:#243042}
@@ -59,7 +59,7 @@
     <div class="hero">
       <span class="pill" id="osPill">● Android TV &amp; phone</span>
       <h1>Live TV &amp; movies,<br/>on every screen.</h1>
-      <p>Hundreds of live channels and a full movie &amp; series library. Android TV, Android phone, and now Windows desktop.</p>
+      <p>Hundreds of live channels and a full movie &amp; series library. Android TV, Android phone, iPhone, iPad and Windows desktop.</p>
     </div>
 
     <!-- Primary download card. The button's text/href is swapped to
@@ -83,6 +83,10 @@
       <div class="tip" id="msiTip" style="display:none">
         <span class="i">!</span>
         <span>Windows SmartScreen will warn on first launch (build isn't code-signed yet) — click <b>More info</b> → <b>Run anyway</b>. You'll also need <b>VLC</b> installed from <a href="https://videolan.org" target="_blank" rel="noopener">videolan.org</a> for playback; future builds will bundle it.</span>
+      </div>
+      <div class="tip" id="ipaTip" style="display:none">
+        <span class="i">!</span>
+        <span>An iPhone can't install this file from the browser: Apple only allows App Store apps, or apps you sign with your own <b>Apple ID</b>. <a href="https://sideloadly.io" target="_blank" rel="noopener" style="color:var(--accent)">Sideloadly</a> does that from a computer; <a href="https://altstore.io" target="_blank" rel="noopener" style="color:var(--accent)">AltStore</a> can do it from the phone.</span>
       </div>
     </div>
 
@@ -109,6 +113,16 @@
       </ul>
     </div>
 
+    <div class="card" id="ipaSteps" style="display:none">
+      <h3>Install on iPhone or iPad in 4 steps</h3>
+      <ul class="steps">
+        <li><span>On a Windows PC or Mac, download the iPhone file and install <a href="https://sideloadly.io" target="_blank" rel="noopener" style="color:var(--accent)">Sideloadly</a>. On Windows, also install <b>iTunes</b> and <b>iCloud</b> from Apple's website, not the Microsoft Store.</span></li>
+        <li><span>Connect the iPhone or iPad with a cable, open Sideloadly, drop the file in, sign in with your Apple ID and press <b>Start</b>.</span></li>
+        <li><span>On the device, open <b>Settings → General → VPN &amp; Device Management</b>, tap your Apple ID and choose <b>Trust</b>. Turn on <b>Developer Mode</b> if asked.</span></li>
+        <li><span>With a free Apple ID the app stops opening after 7 days: install it again the same way. Your library stays.</span></li>
+      </ul>
+    </div>
+
     <!-- Cross-platform jump table. Always visible so any user can grab
          the other format. Updated dynamically by JS — empty links
          render as disabled placeholders until the release JSON loads. -->
@@ -125,6 +139,11 @@
           <span><b>Windows</b> · MSI</span>
           <span class="ch" id="altMsiSize">—</span>
         </a>
+        <a id="altIpa" class="alt" style="display:flex;justify-content:space-between;align-items:center;padding:11px 14px;border:1px solid var(--border);border-radius:11px;text-decoration:none;color:var(--text);font-size:14px"
+           href="https://github.com/hexhoxhex/jobless_corner/releases/latest" rel="noopener">
+          <span><b>iPhone &amp; iPad</b> · IPA</span>
+          <span class="ch" id="altIpaSize">—</span>
+        </a>
         <div style="padding:11px 14px;border:1px solid var(--border);border-radius:11px;color:var(--muted);font-size:14px;display:flex;justify-content:space-between;align-items:center">
           <span><b>Mac</b> · DMG</span>
           <span class="ch">Coming soon</span>
@@ -140,6 +159,7 @@
 
     <div class="foot">
       On a TV? Open this page in the TV browser, or sideload with <b>adb install</b>.<br/>
+      <a id="iosHelp" href="?os=ios">iPhone or iPad? How to install</a><br/>
       <a id="allReleases" href="https://github.com/hexhoxhex/jobless_corner/releases">All versions &amp; changelog</a>
     </div>
   </div>
@@ -152,6 +172,14 @@
   // (Android phones, Android TV browsers, fallback). userAgentData
   // is the modern API; userAgent is the fallback for older browsers.
   function detectOs() {
+    // ?os=ios (or windows, android) shows that platform's download and
+    // steps, e.g. from the "iPhone or iPad?" link on a PC.
+    const asked = new URLSearchParams(location.search).get("os");
+    if (/^(ios|windows|android)$/.test(asked || "")) return asked;
+    // iPhone/iPad first: iPadOS asks for desktop sites and says
+    // "Macintosh", but a Mac has no touch screen.
+    const ua0 = navigator.userAgent || "";
+    if (/iPhone|iPad|iPod/i.test(ua0) || (/Macintosh/i.test(ua0) && navigator.maxTouchPoints > 1)) return "ios";
     const uad = navigator.userAgentData;
     if (uad && uad.platform) {
       if (/windows/i.test(uad.platform)) return "windows";
@@ -167,8 +195,21 @@
 
   function fmt(bytes) { return (bytes / 1e6).toFixed(1) + " MB"; }
 
+  function show(id, on) { document.getElementById(id).style.display = on ? "" : "none"; }
+
   (async () => {
     const os = detectOs();
+    // iPhone/iPad: swap to the iPhone file and steps at once, before the
+    // release info loads. The APK steps are wrong for them, and the
+    // GitHub API can be rate-limited on a shared mobile address.
+    if (os === "ios") {
+      document.getElementById("dlLabel").textContent = "Download for iPhone & iPad";
+      document.getElementById("osReq").innerHTML     = "iOS <b>16+</b>";
+      document.getElementById("osPill").textContent  = "● iPhone & iPad";
+      show("apkTip", false); show("ipaTip", true);
+      show("apkSteps", false); show("ipaSteps", true);
+      show("iosHelp", false);
+    }
     try {
       const r = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`,
         { headers: { "Accept": "application/vnd.github+json" } });
@@ -178,6 +219,7 @@
 
       const apk = (rel.assets || []).find(a => /\.apk$/i.test(a.name));
       const msi = (rel.assets || []).find(a => /\.msi$/i.test(a.name));
+      const ipa = (rel.assets || []).find(a => /\.ipa$/i.test(a.name));
 
       // "Other downloads" card — always populated when assets exist.
       if (apk) {
@@ -187,6 +229,10 @@
       if (msi) {
         document.getElementById("altMsi").href = msi.browser_download_url;
         document.getElementById("altMsiSize").textContent = fmt(msi.size);
+      }
+      if (ipa) {
+        document.getElementById("altIpa").href = ipa.browser_download_url;
+        document.getElementById("altIpaSize").textContent = fmt(ipa.size);
       }
 
       // Primary button + install steps card swap based on detected OS.
@@ -202,6 +248,11 @@
         document.getElementById("msiTip").style.display   = "";
         document.getElementById("apkSteps").style.display = "none";
         document.getElementById("msiSteps").style.display = "";
+      } else if (os === "ios") {
+        if (ipa) {
+          document.getElementById("dl").href          = ipa.browser_download_url;
+          document.getElementById("size").textContent = fmt(ipa.size);
+        }
       } else if (apk) {
         document.getElementById("dl").href      = apk.browser_download_url;
         document.getElementById("size").textContent = fmt(apk.size);
