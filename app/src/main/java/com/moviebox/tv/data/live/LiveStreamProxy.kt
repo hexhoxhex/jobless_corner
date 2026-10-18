@@ -335,7 +335,7 @@ class LiveStreamProxy(
         // Playlist timing.
         val tPl = System.currentTimeMillis()
         val plBody = runCatching {
-            clientFor(innerUrl).newCall(buildCdnRequest(innerUrl).build())
+            clientFor(innerUrl).newCall(buildCdnRequest(tokenized(innerUrl)).build())
                 .execute().use { r ->
                     if (!r.isSuccessful) null else r.body?.string()
                 }
@@ -922,7 +922,7 @@ class LiveStreamProxy(
     /** For the route survey: does [url] answer with a playlist, using the
      *  same headers playback would. "ok" plus what kind, or why not. */
     fun checkPlaylist(url: String): String = runCatching {
-        clientFor(url).newCall(buildCdnRequest(url).build()).execute().use { r ->
+        clientFor(url).newCall(buildCdnRequest(tokenized(url)).build()).execute().use { r ->
             if (!r.isSuccessful) return@use "HTTP ${r.code}"
             val body = r.body?.string().orEmpty()
             when {
@@ -1815,7 +1815,14 @@ class LiveStreamProxy(
         if (debugBlockedHost != null && hostOf(url) == debugBlockedHost) {
             throw java.net.ConnectException("refused (blocked for a test)")
         }
-        val req = buildCdnRequest(url).build()
+        val first = fetchInnerOnce(url)
+        // Refused for want of a token: remember the host and ask again with one.
+        if (noteTokenRequired(url, first.first.code, first.second)) return fetchInnerOnce(url)
+        return first
+    }
+
+    private fun fetchInnerOnce(url: String): Pair<okhttp3.Response, String> {
+        val req = buildCdnRequest(tokenized(url)).build()
         return clientFor(url).newCall(req).execute().use { resp ->
             val body = resp.body?.string() ?: ""
             // Diagnostic: when the CDN blocks us, dump a snapshot of the
@@ -2018,10 +2025,12 @@ class LiveStreamProxy(
     private fun parseMaster(
         masterUrl: String,
         failCode: IntArray? = null,
+        tokenRetry: Boolean = true,
     ): Pair<String, String?>? {
-        val req = buildCdnRequest(masterUrl).build()
+        val req = buildCdnRequest(tokenized(masterUrl)).build()
         val t0 = System.currentTimeMillis()
-        return runCatching {
+        var retryWithToken = false
+        val parsed = runCatching {
             clientFor(masterUrl).newCall(req).execute().use { resp ->
                 val dt = System.currentTimeMillis() - t0
                 if (!resp.isSuccessful) {
@@ -2029,6 +2038,10 @@ class LiveStreamProxy(
                     val cfRay = resp.header("cf-ray").orEmpty()
                     val cfMit = resp.header("cf-mitigated").orEmpty()
                     val body = resp.body?.string().orEmpty()
+                    if (tokenRetry && noteTokenRequired(masterUrl, resp.code, body)) {
+                        retryWithToken = true
+                        return@use null
+                    }
                     Log.w(
                         DIAG,
                         "PROXY master HTTP ${resp.code} dt=${dt}ms " +
@@ -2131,6 +2144,79 @@ class LiveStreamProxy(
                 absolute to streamInf
             }
         }.getOrNull()
+        if (retryWithToken) return parseMaster(masterUrl, failCode, tokenRetry = false)
+        return parsed
+    }
+
+    // ---- Playlist tokens ---------------------------------------------------
+    //
+    // 2026-10-18: edge.cowedd4855ws.sbs — the server behind nearly every
+    // channel — began answering playlist requests with `403 token required`,
+    // and live TV stopped everywhere. The site's own player now first asks
+    // `<edge>/api/playlist-token?slug=<channel>` for a short token bound to
+    // the viewer's address ({"token": "...", "ttl": 120}), renews it in the
+    // background past half its life, and adds `t=<token>` to every playlist
+    // request. Segments need no token. Done the same way here: a host that
+    // says "token required" once is remembered, and its playlist fetches
+    // carry a token from then on.
+
+    private data class PlaylistToken(val value: String, val renewAt: Long, val validUntil: Long)
+
+    /** True (and the host remembered) when [code]/[body] is the edge's
+     *  "token required" refusal. */
+    private fun noteTokenRequired(url: String, code: Int, body: String): Boolean {
+        if (code != 403 || !body.contains("token required", ignoreCase = true)) return false
+        val host = hostOf(url)
+        if (tokenHosts.add(host)) {
+            Log.w(DIAG, "PROXY $host wants a playlist token — asking for one per channel")
+        }
+        return true
+    }
+
+    /** [url] with a playlist token when its host wants one; [url] itself
+     *  otherwise, or when no token could be had. */
+    private fun tokenized(url: String): String {
+        val host = hostOf(url)
+        if (host !in tokenHosts) return url
+        // "https://edge.../premium343/index.m3u8" -> "premium343"
+        val slug = url.substringAfter("//").substringAfter('/', "")
+            .substringBefore('/').substringBefore('?')
+        if (slug.isBlank()) return url
+        val token = playlistToken(host, slug, url) ?: return url
+        val base = url.substringBefore('?')
+        val kept = url.substringAfter('?', "").split('&')
+            .filter { it.isNotBlank() && !it.startsWith("t=") && !it.startsWith("_=") }
+        return base + "?" + (kept + ("t=" + java.net.URLEncoder.encode(token, "UTF-8")))
+            .joinToString("&")
+    }
+
+    /** The token for [slug] on [host]: cached until half its life, then
+     *  fetched again; an older one is used while still valid if the fetch
+     *  fails. */
+    private fun playlistToken(host: String, slug: String, refUrl: String): String? {
+        val key = "$host|$slug"
+        playlistTokens[key]?.let { if (System.currentTimeMillis() < it.renewAt) return it.value }
+        synchronized(playlistTokenLock) {
+            val now = System.currentTimeMillis()
+            playlistTokens[key]?.let { if (now < it.renewAt) return it.value }
+            val tokenUrl = "https://$host/api/playlist-token?slug=" +
+                java.net.URLEncoder.encode(slug, "UTF-8")
+            val json = runCatching {
+                clientFor(refUrl).newCall(buildCdnRequest(tokenUrl).build()).execute().use { r ->
+                    if (!r.isSuccessful) {
+                        Log.w(DIAG, "PROXY token for $slug: HTTP ${r.code}")
+                        null
+                    } else org.json.JSONObject(r.body?.string().orEmpty())
+                }
+            }.getOrNull()
+            val value = json?.optString("token")?.takeIf { it.isNotBlank() }
+            if (value != null) {
+                val ttl = json.optInt("ttl", 120).coerceAtLeast(20)
+                playlistTokens[key] = PlaylistToken(value, now + ttl * 500L, now + ttl * 900L)
+                return value
+            }
+            return playlistTokens[key]?.takeIf { now < it.validUntil }?.value
+        }
     }
 
     /** BANDWIDTH=... off a #EXT-X-STREAM-INF line; 0 when absent. */
@@ -2147,6 +2233,12 @@ class LiveStreamProxy(
     )
 
     companion object {
+        /** Hosts that answered "token required", and the tokens in hand —
+         *  shared by every proxy (playback, the health sweep, the probes). */
+        private val tokenHosts: MutableSet<String> = ConcurrentHashMap.newKeySet()
+        private val playlistTokens = ConcurrentHashMap<String, PlaylistToken>()
+        private val playlistTokenLock = Any()
+
         /** See handleSegment: the channel whose next chunk is skipped. */
         @Volatile var debugSkipNext: String? = null
         /** Test hook: a server every fetch treats as refusing connections. */
@@ -2269,7 +2361,13 @@ class LiveStreamProxy(
         // it, and set auto-switch off — which then walked the viewer AWAY
         // from the feed that had been working. ExoPlayer waits 20 s on this
         // proxy (PlayerScreen setReadTimeoutMs), so 14 s is still inside it.
-        private const val ENSURE_CACHED_TIMEOUT_MS: Long = 14_000L
+        // 26 s (was 14 s). Since 2026-10-18 a channel nobody is watching
+        // makes the edge start publishing it on the first playlist request,
+        // which answered after 12.4 s (warm: 0.3-3.8 s); the site's own
+        // player allows 30 s. With the resolve in front of it, 14 s turned
+        // every cold start into a failure and a retry. Still inside the 30 s
+        // the player waits on the proxy.
+        private const val ENSURE_CACHED_TIMEOUT_MS: Long = 26_000L
         /** A disguised chunk read is given up when less than this share of
          *  it has arrived after [SEG_SLOW_CHECK_MS]... */
         /** Look up a channel's backup routes after it has played this
