@@ -27,7 +27,7 @@ enum SevenMovies {
 
     private static func playbackToken(_ path: String) async -> String? {
         lock.lock()
-        if let (t, at) = tokens[path], Date().timeIntervalSince(at) < 3600 { lock.unlock(); return t }
+        if let cached = tokens[path], Date().timeIntervalSince(cached.1) < 3600 { lock.unlock(); return cached.0 }
         lock.unlock()
         guard let url = URL(string: "\(base)/api/boot/\(path)"),
               let obj = try? await Net.json(url, headers: apiHeaders, timeout: 12) as? [String: Any],

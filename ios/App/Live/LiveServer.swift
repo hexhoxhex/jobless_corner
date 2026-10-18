@@ -204,6 +204,7 @@ final class LiveServer {
             AppLog.w(tag, "ch=\(id) playlist: \(error)")
             // Forget the address: the next request finds the stream again.
             lock.lock(); playlists[id] = nil; lock.unlock()
+            LiveSource.forget(id)
             send(c, status: 502, type: "text/plain", body: Data("playlist failed".utf8))
         }
     }

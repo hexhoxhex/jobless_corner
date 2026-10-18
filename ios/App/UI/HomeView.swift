@@ -11,8 +11,8 @@ struct HomeView: View {
                 if !library.entries.isEmpty {
                     ContinueRow(entries: Array(library.entries.prefix(12)))
                 }
-                ForEach(rows, id: \.0) { title, items in
-                    PosterRow(title: title, items: items)
+                ForEach(rows, id: \.0) { row in
+                    PosterRow(title: row.0, items: row.1)
                 }
                 if rows.isEmpty && error == nil {
                     ProgressView().frame(maxWidth: .infinity).padding(.top, 60)

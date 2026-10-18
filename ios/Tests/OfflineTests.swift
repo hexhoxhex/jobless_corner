@@ -41,11 +41,17 @@ final class OfflineTests: XCTestCase {
 
     /// gzip member (the CRC isn't checked by the decoder, as in the site's player).
     private func gzip(_ raw: [UInt8]) -> [UInt8] {
-        [0x1f, 0x8b, 0x08, 0, 0, 0, 0, 0, 0, 0xff] + deflate(raw) + [0, 0, 0, 0] + le32(raw.count)
+        let header: [UInt8] = [0x1f, 0x8b, 0x08, 0, 0, 0, 0, 0, 0, 0xff]
+        let crc: [UInt8] = [0, 0, 0, 0]
+        return header + deflate(raw) + crc + le32(raw.count)
     }
 
     private func chunk(_ type: String, _ data: [UInt8]) -> [UInt8] {
-        be32(data.count) + Array(type.utf8) + data + [0, 0, 0, 0]
+        var out = be32(data.count)
+        out += Array(type.utf8)
+        out += data
+        out += [0, 0, 0, 0] as [UInt8]                   // CRC, not checked
+        return out
     }
 
     private func paeth(_ a: Int, _ b: Int, _ c: Int) -> Int {
@@ -83,16 +89,24 @@ final class OfflineTests: XCTestCase {
             }
             prev = cur
         }
-        let idat = [0x78, 0x9C] + deflate(filtered) + be32(adler32(filtered))
-        let ihdr = be32(width) + be32(height) + [8, 2, 0, 0, 0]
-        return [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
-            + chunk("IHDR", ihdr) + chunk("IDAT", idat) + chunk("IEND", [])
+        let zlibHeader: [UInt8] = [0x78, 0x9C]
+        let idat = zlibHeader + deflate(filtered) + be32(adler32(filtered))
+        let ihdrTail: [UInt8] = [8, 2, 0, 0, 0]          // 8-bit RGB
+        let ihdr = be32(width) + be32(height) + ihdrTail
+        let signature: [UInt8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+        var out = signature
+        out += chunk("IHDR", ihdr)
+        out += chunk("IDAT", idat)
+        out += chunk("IEND", [])
+        return out
     }
 
     func testDisguisedChunkUnwrapsToTheStream() throws {
         let ts = transportStream()
         let gz = gzip(ts)
-        let payload = [UInt8](repeating: 0xAB, count: 8) + be32(gz.count) + gz
+        var payload = [UInt8](repeating: 0xAB, count: 8)
+        payload += be32(gz.count)
+        payload += gz
         let image = png(payload, width: 64)
         XCTAssertTrue(Unwrap.isPNG(Data(image)))
         let out = try XCTUnwrap(Unwrap.transportStream(Data(image)))
@@ -166,6 +180,18 @@ final class OfflineTests: XCTestCase {
 
     func testScheduleTitlesLoseFlagsAndEmoji() {
         XCTAssertEqual(LiveCatalog.cleanTitle("\u{1F1EC}\u{1F1E7} Arsenal vs Chelsea \u{26BD}"), "Arsenal vs Chelsea")
+        XCTAssertEqual(LiveCatalog.cleanTitle("2nd Test : South Africa  vs Australia"), "2nd Test : South Africa vs Australia")
+    }
+
+    /// As published on 2026-10-18: UTF-8 emoji read as Windows-1252.
+    func testScheduleTextWithMangledEmoji() {
+        let tennis = "Tennis \u{00F0}\u{0178}\u{017D}\u{00BE} ATP - Singles: Lyon (France) - Qualification"
+        XCTAssertTrue(LiveCatalog.repairMojibake(tennis).contains("\u{1F3BE}"))
+        XCTAssertEqual(LiveCatalog.sport(tennis), "Tennis")
+        let ride = "\u{00F0}\u{0178}\u{0161}\u{00B4}\u{00F0}\u{0178}\u{2021}\u{00AE}\u{00F0}\u{0178}\u{2021}\u{00B9} Giro di Lombardia | Italy"
+        XCTAssertEqual(LiveCatalog.cleanTitle(ride), "Giro di Lombardia | Italy")
+        XCTAssertEqual(LiveCatalog.sport("Am. Football (NFL"), "Am. Football (NFL)")
+        XCTAssertEqual(LiveCatalog.sport("All Soccer Events"), "All Soccer Events")
     }
 
     func testChannelNamesReadWell() {
