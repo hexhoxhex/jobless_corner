@@ -1,13 +1,16 @@
 name: Release APK + Windows MSI
 
-# Cuts a GitHub release whenever a `v*.*.*` tag is pushed.
-# Two jobs in parallel:
+# Cuts a GitHub release whenever a `v*.*.*` tag is pushed. Three jobs:
 #   - apk:    Ubuntu runner, signs with the hexhoxhex keystore.
 #   - msi:    Windows runner, packages the :desktop module via
 #             Compose's nativeDistributions packager. Unsigned for now
 #             (Windows will SmartScreen-warn on first launch; user
 #             clicks "More info" → "Run anyway" once).
-# Both attach their artifact to the same GitHub release for the tag.
+#   - ipa:    macOS runner, the iPhone/iPad app (ios/), unsigned for
+#             Sideloadly. Runs after the other two so the release notes
+#             are edited one job at a time; skipped for tags from before
+#             the iOS app existed.
+# All three attach their artifact to the same GitHub release for the tag.
 # Mac .dmg is a planned future job once we add a macOS runner step.
 
 on:
@@ -201,3 +204,69 @@ jobs:
             **Requirement**: VLC media player (videolan.org). libvlc
             isn't bundled in the v1 MSI; tomorrow's build will include
             it so this step goes away.
+
+  ipa:
+    # iPhone/iPad app. After msi as well as apk: each job edits the release
+    # notes, and two editing at once would lose one's section. Still runs
+    # when only the msi job failed.
+    needs: [apk, msi]
+    if: always() && needs.apk.result == 'success'
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+
+      - name: Build the .ipa (unsigned)
+        id: ipa
+        env:
+          TMDB_TOKEN: ${{ secrets.TMDB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          if [ ! -f ios/project.yml ]; then
+            echo "this tag has no iOS app"
+            echo "path=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          brew install xcodegen
+          cd ios
+          xcodegen generate
+          status=0
+          xcodebuild build \
+            -project VijanaBaruBaru.xcodeproj -scheme VijanaBaruBaru \
+            -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            MARKETING_VERSION="${TAG#v}" CURRENT_PROJECT_VERSION=${{ github.run_number }} \
+            TMDB_TOKEN="$TMDB_TOKEN" > ipa.log 2>&1 || status=$?
+          grep -E "error:|\*\* " ipa.log || true
+          [ $status -eq 0 ] || exit $status
+          mkdir Payload
+          cp -R build/Build/Products/Release-iphoneos/VijanaBaruBaru.app Payload/
+          name="vijanabarubaru-$TAG.ipa"
+          zip -qry "../$name" Payload
+          echo "path=$name" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(shasum -a 256 "../$name" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Attach the .ipa to the release
+        if: steps.ipa.outputs.path != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          NAME: ${{ steps.ipa.outputs.path }}
+          SHA: ${{ steps.ipa.outputs.sha256 }}
+        run: |
+          gh release upload "$TAG" "$NAME" --clobber -R "$GITHUB_REPOSITORY"
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json body -q .body > body.md
+          BUILT="for $TAG" python3 .github/scripts/ios_release_notes.py body.md
+          gh release edit "$TAG" -R "$GITHUB_REPOSITORY" --notes-file body.md

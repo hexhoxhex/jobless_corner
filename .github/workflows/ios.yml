@@ -6,7 +6,10 @@ name: iOS app
 #   3. screenshots of each tab are taken in the simulator
 #   4. an unsigned .ipa is built for real devices
 # The .ipa, the screenshots and the test log are left as downloads on the
-# run (Actions > this run > Artifacts). Install the .ipa with Sideloadly or
+# run (Actions > this run > Artifacts). On main, a green build also puts the
+# .ipa on the latest release (vijanabarubaru-<tag>.ipa, replacing an older
+# one), so the release page always carries the newest iPhone build; new
+# releases get theirs from release.yml. Install it with Sideloadly or
 # AltStore, which sign it with your own Apple ID (ios/README.md).
 
 on:
@@ -18,7 +21,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  # write: the main-branch build attaches the .ipa to the latest release
+  contents: write
 
 concurrency:
   group: ios-${{ github.ref }}
@@ -92,6 +96,23 @@ jobs:
           data=$(xcrun simctl get_app_container "$udid" com.vijanabarubaru.app data 2>/dev/null || true)
           [ -n "$data" ] && find "$data" -name "app*.log" -exec cp {} screenshots/ \; || true
 
+      - name: Latest release
+        id: rel
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(gh release view -R "$GITHUB_REPOSITORY" --json tagName -q .tagName 2>/dev/null || true)
+          made=$(gh release view -R "$GITHUB_REPOSITORY" --json createdAt -q .createdAt 2>/dev/null || true)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          # a release made in the last 30 minutes is still being built by
+          # release.yml, which attaches its own .ipa: leave it alone
+          age=999999
+          [ -n "$made" ] && age=$(( $(date -u +%s) - $(date -j -u -f "%Y-%m-%dT%H:%M:%SZ" "$made" +%s) ))
+          echo "settled=$([ $age -gt 1800 ] && echo yes || echo no)" >> "$GITHUB_OUTPUT"
+          echo "latest release: ${tag:-none}, made ${made:-?} (${age}s ago)"
+
       - name: Build the .ipa (unsigned)
         # even when a test failed: an online test can trip on a source having a bad day
         if: always()
@@ -104,6 +125,7 @@ jobs:
             -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            MARKETING_VERSION="${{ steps.rel.outputs.version || '0.1.0' }}" \
             CURRENT_PROJECT_VERSION=${{ github.run_number }} \
             TMDB_TOKEN="$TMDB_TOKEN" > ipa.log 2>&1 || status=$?
           grep -E "error:|\*\* " ipa.log || true
@@ -113,6 +135,24 @@ jobs:
           zip -qry VijanaBaruBaru.ipa Payload
           ls -la VijanaBaruBaru.ipa
           shasum -a 256 VijanaBaruBaru.ipa
+
+      - name: Put the .ipa on the latest release
+        # main only, a green build only (tests passed), and not while
+        # release.yml is still making the release
+        if: success() && github.ref == 'refs/heads/main' && steps.rel.outputs.tag != '' && steps.rel.outputs.settled == 'yes'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.rel.outputs.tag }}
+        run: |
+          name="vijanabarubaru-$TAG.ipa"
+          cp VijanaBaruBaru.ipa "$name"
+          gh release upload "$TAG" "$name" --clobber -R "$GITHUB_REPOSITORY"
+          sha=$(shasum -a 256 "$name" | cut -d' ' -f1)
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json body -q .body > body.md
+          SHA="$sha" NAME="$name" BUILT="from main at ${GITHUB_SHA::7}" \
+            python3 ../.github/scripts/ios_release_notes.py body.md
+          gh release edit "$TAG" -R "$GITHUB_REPOSITORY" --notes-file body.md
+          echo "attached $name ($sha) to $TAG"
 
       - uses: actions/upload-artifact@v4
         if: always()

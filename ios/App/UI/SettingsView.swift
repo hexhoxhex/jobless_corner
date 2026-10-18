@@ -80,7 +80,7 @@ struct AboutView: View {
                 }
                 section("How the iPhone app is built") {
                     para("It is a SwiftUI app with Apple's own player (AVPlayer). There is no Xcode project in the repo: ios/project.yml describes it and XcodeGen generates it.")
-                    para("GitHub's Mac machines build it (.github/workflows/ios.yml): generate the project, run the tests in the iPhone simulator, and produce an unsigned .ipa. Install it with Sideloadly (Windows or Mac) or AltStore using your Apple ID; a free Apple ID needs a re-install every 7 days.")
+                    para("GitHub's Mac machines build it (.github/workflows/ios.yml): generate the project, run the tests in the iPhone simulator, and produce an unsigned .ipa, which goes on the latest release next to the Android APK. Install it with Sideloadly (Windows or Mac) or AltStore using your Apple ID; a free Apple ID needs a re-install every 7 days.")
                 }
                 section("How it works") {
                     para("Films and series: titles come from TMDB, then the sources are asked in order (7Movies, then VixSrc). When 7Movies has dubbed copies of a title, its original-language copy is chosen.")
@@ -90,7 +90,7 @@ struct AboutView: View {
                 section("How to fix something") {
                     para("1. Share the log (App logs > Share) and say what happened and when.")
                     para("2. Sources: ios/App/Sources. Live TV: ios/App/Live. The player: ios/App/Player. Screens: ios/App/UI.")
-                    para("3. Push a change; the iOS workflow builds and tests it and leaves the .ipa as a download on the run.")
+                    para("3. Push a change to a branch; the iOS workflow builds and tests it and leaves the .ipa as a download on the run. Once it is on main, a green build replaces the .ipa on the latest release.")
                     para("When a source stops working it is nearly always the site that changed: a new address, a renamed field, a new token step. Compare what the site sends now with what the code expects. The Android app usually meets the same change first; its fix (app/src/main/java) shows what to port.")
                 }
                 section("Fixing it with an AI agent") {

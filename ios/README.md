@@ -14,9 +14,10 @@ It plays like Apple's TV app:
 
 ## Install it (no Mac needed)
 
-1. On GitHub, open **Actions > iOS app**, pick the latest green run, and
-   download the **VijanaBaruBaru-ipa** artifact. Unzip it to get
-   `VijanaBaruBaru.ipa`.
+1. Download `vijanabarubaru-<version>.ipa` from the
+   [latest release](https://github.com/hexhoxhex/jobless_corner/releases/latest),
+   next to the Android APK and the Windows MSI. Test builds from other
+   branches are under **Actions > iOS app > (a green run) > Artifacts**.
 2. Install [Sideloadly](https://sideloadly.io) on Windows or a Mac. On
    Windows it also needs the iTunes and iCloud apps from Apple's website,
    not the Microsoft Store versions.
@@ -49,6 +50,15 @@ every push that touches `ios/`. It:
 4. builds an unsigned `.ipa`
 
 The `.ipa`, the screenshots and the logs are the run's artifacts.
+
+Releases carry the `.ipa` too:
+
+- A `v*` tag builds it from the tag in `release.yml`, next to the APK and
+  MSI.
+- A green build on main replaces the `.ipa` on the latest release, so iPhone
+  fixes reach people without a new release.
+- The release notes' iPhone section is written by
+  `.github/scripts/ios_release_notes.py`.
 
 On a Mac:
 
