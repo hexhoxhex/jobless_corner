@@ -1,0 +1,77 @@
+# Vijana BaruBaru for iPhone and iPad.
+#
+# There is no .xcodeproj in the repo: XcodeGen makes one from this file
+# (`brew install xcodegen && xcodegen generate` in this folder), which keeps
+# the project readable and free of merge noise. The GitHub workflow
+# .github/workflows/ios.yml does exactly that on a Mac runner, runs the tests
+# in the simulator and builds an unsigned .ipa to install with Sideloadly.
+name: VijanaBaruBaru
+options:
+  bundleIdPrefix: com.vijanabarubaru
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    # TMDB read token. Empty in the repo; the workflow passes the
+    # repository secret TMDB_TOKEN on the xcodebuild command line.
+    TMDB_TOKEN: ""
+targets:
+  VijanaBaruBaru:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: Vijana BaruBaru
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        # Keep playing with the screen locked, and over AirPlay.
+        UIBackgroundModes: [audio]
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSAppTransportSecurity:
+          # Streams come from many hosts, some plain http; live TV is
+          # served to the player by the app's own local server.
+          NSAllowsArbitraryLoads: true
+          NSAllowsLocalNetworking: true
+        NSLocalNetworkUsageDescription: >-
+          Live TV is served from this device to your Apple TV when you use AirPlay.
+        TMDBToken: $(TMDB_TOKEN)
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.vijanabarubaru.app
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+  VijanaBaruBaruTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests
+    dependencies:
+      - target: VijanaBaruBaru
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  VijanaBaruBaru:
+    build:
+      targets:
+        VijanaBaruBaru: all
+        VijanaBaruBaruTests: [test]
+    test:
+      targets:
+        - VijanaBaruBaruTests

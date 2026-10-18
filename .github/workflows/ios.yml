@@ -1,0 +1,132 @@
+name: iOS app
+
+# Builds the iPhone/iPad app (ios/) on a GitHub Mac, so nobody needs a Mac:
+#   1. XcodeGen makes the Xcode project from ios/project.yml
+#   2. the tests run in the iPhone simulator (ios/Tests)
+#   3. screenshots of each tab are taken in the simulator
+#   4. an unsigned .ipa is built for real devices
+# The .ipa, the screenshots and the test log are left as downloads on the
+# run (Actions > this run > Artifacts). Install the .ipa with Sideloadly or
+# AltStore, which sign it with your own Apple ID (ios/README.md).
+
+on:
+  push:
+    branches: ['**']
+    paths:
+      - 'ios/**'
+      - '.github/workflows/ios.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: ios
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Tools
+        run: |
+          xcodebuild -version
+          brew install xcodegen
+          xcodegen --version
+
+      - name: Generate the Xcode project
+        run: xcodegen generate
+
+      - name: Pick a simulator
+        id: sim
+        run: |
+          udid=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"]
+          runtimes = sorted((k for k in devices if "iOS" in k), reverse=True)
+          for rt in runtimes:
+              phones = [d for d in devices[rt] if d["name"].startswith("iPhone")]
+              if phones:
+                  print(phones[0]["udid"]); break
+          ')
+          echo "udid=$udid" >> "$GITHUB_OUTPUT"
+          xcrun simctl list devices available | grep "$udid"
+
+      - name: Test in the simulator
+        env:
+          TMDB_TOKEN: ${{ secrets.TMDB_TOKEN }}
+        run: |
+          status=0
+          xcodebuild test \
+            -project VijanaBaruBaru.xcodeproj -scheme VijanaBaruBaru \
+            -destination "id=${{ steps.sim.outputs.udid }}" \
+            -derivedDataPath DerivedData \
+            CODE_SIGNING_ALLOWED=NO TMDB_TOKEN="$TMDB_TOKEN" > test.log 2>&1 || status=$?
+          grep -E "error:|warning: .*(isolat|Sendable)|Test Case .*(passed|failed|skipped)|Executed|\*\* " test.log || true
+          grep -E "^(7Movies|VixSrc): " test.log || true
+          exit $status
+
+      - name: Screenshots
+        if: always()
+        run: |
+          udid=${{ steps.sim.outputs.udid }}
+          app=$(ls -d DerivedData/Build/Products/Debug-iphonesimulator/VijanaBaruBaru.app 2>/dev/null || true)
+          [ -n "$app" ] || { echo "no simulator build to screenshot"; exit 0; }
+          xcrun simctl boot "$udid" 2>/dev/null || true
+          xcrun simctl status_bar "$udid" override --time 9:41 --batteryLevel 100 || true
+          xcrun simctl install "$udid" "$app"
+          mkdir -p screenshots
+          for tab in home live search library settings; do
+            xcrun simctl terminate "$udid" com.vijanabarubaru.app 2>/dev/null || true
+            xcrun simctl launch "$udid" com.vijanabarubaru.app -startTab "$tab"
+            sleep 12
+            xcrun simctl io "$udid" screenshot "screenshots/$tab.png"
+          done
+          # the app's own log from the simulator run, for the screenshots
+          data=$(xcrun simctl get_app_container "$udid" com.vijanabarubaru.app data 2>/dev/null || true)
+          [ -n "$data" ] && find "$data" -name "app*.log" -exec cp {} screenshots/ \; || true
+
+      - name: Build the .ipa (unsigned)
+        # even when a test failed: an online test can trip on a source having a bad day
+        if: always()
+        env:
+          TMDB_TOKEN: ${{ secrets.TMDB_TOKEN }}
+        run: |
+          status=0
+          xcodebuild build \
+            -project VijanaBaruBaru.xcodeproj -scheme VijanaBaruBaru \
+            -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            CURRENT_PROJECT_VERSION=${{ github.run_number }} \
+            TMDB_TOKEN="$TMDB_TOKEN" > ipa.log 2>&1 || status=$?
+          grep -E "error:|\*\* " ipa.log || true
+          [ $status -eq 0 ] || exit $status
+          rm -rf Payload && mkdir Payload
+          cp -R build/Build/Products/Release-iphoneos/VijanaBaruBaru.app Payload/
+          zip -qry VijanaBaruBaru.ipa Payload
+          ls -la VijanaBaruBaru.ipa
+          shasum -a 256 VijanaBaruBaru.ipa
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: VijanaBaruBaru-ipa
+          path: ios/VijanaBaruBaru.ipa
+          if-no-files-found: ignore
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screenshots-and-logs
+          path: |
+            ios/screenshots/
+            ios/test.log
+            ios/ipa.log
+          if-no-files-found: ignore
