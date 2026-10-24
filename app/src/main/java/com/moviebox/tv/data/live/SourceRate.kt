@@ -25,8 +25,22 @@ object SourceRate {
 
     private const val TAG = "LiveDiag"
 
-    /** Observation window, and the shortest observation judged. */
-    private const val WINDOW_MS = 90_000L
+    /** Observation window, and the shortest observation judged for speed.
+     *  Was 90 s: one 26 s pause of an otherwise steady feed (TNT Sports 1 UK,
+     *  2026-10-24, the best of the match's feeds) read as "77% of real time"
+     *  and the app moved the viewer to the worst one. Over 180 s that pause
+     *  reads 86%; a feed slow all the time still reads under 80%. */
+    private const val WINDOW_MS = 180_000L
+
+    /** A playlist that adds nothing for this long is a pause long enough to
+     *  eat most of the player's ~25 s cushion. */
+    private const val LONG_PAUSE_MS = 20_000L
+    /** This many long pauses within [PAUSES_WINDOW_MS] and the match freezes
+     *  again and again: Hub Premier 1 stopped for 27 s and 22 s within 21 s
+     *  of each other (measured from the PC the same afternoon). One is a
+     *  server hiccup the cushion rides out. */
+    private const val LONG_PAUSES_TO_BREAK = 2
+    private const val PAUSES_WINDOW_MS = 180_000L
 
     /** Below this share of real time the feed cannot be watched without
      *  freezing; healthy feeds measure 0.95-1.1 over 90 s. */
@@ -48,6 +62,12 @@ object SourceRate {
         /** Every seq seen, with its PROGRAM-DATE-TIME (s) and duration, to spot skips. */
         val pdt = HashMap<Long, Pair<Double, Double>>()
         val holes = ArrayDeque<Pair<Long, Double>>()
+        /** The newest chunk seen, when it appeared, and the long pauses
+         *  between new chunks (by sequence number: not every feed stamps
+         *  PROGRAM-DATE-TIME). */
+        var newestSeq = -1L
+        var lastAdvanceMs = startedMs
+        val pauses = ArrayDeque<Pair<Long, Long>>()
         var lastNoteMs = startedMs
         var lastLogMs = startedMs
         var reported = false
@@ -102,6 +122,23 @@ object SourceRate {
                 }
             }
         }
+        // A new chunk appeared: was the wait for it a long pause?
+        val newest = seq?.minus(1)
+        if (newest != null) {
+            if (t.newestSeq < 0) {
+                t.newestSeq = newest
+                t.lastAdvanceMs = now
+            } else if (newest > t.newestSeq) {
+                val waited = now - t.lastAdvanceMs
+                if (waited >= LONG_PAUSE_MS) {
+                    t.pauses.addLast(now to waited)
+                    Log.i(TAG, "SRCRATE ch=$channelId source paused ${waited / 1000}s")
+                }
+                t.newestSeq = newest
+                t.lastAdvanceMs = now
+            }
+        }
+        while (t.pauses.isNotEmpty() && now - t.pauses.first().first > PAUSES_WINDOW_MS) t.pauses.removeFirst()
         // Keep the bookkeeping bounded to the window.
         t.added.entries.removeIf { now - it.value.second > WINDOW_MS }
         while (t.holes.isNotEmpty() && now - t.holes.first().first > HOLES_WINDOW_MS) t.holes.removeFirst()
@@ -117,8 +154,12 @@ object SourceRate {
             Log.i(TAG, "SRCRATE ch=$channelId rate=${"%.2f".format(reading.rate)} " +
                 "skipped=${"%.0f".format(reading.holesS)}s over ${reading.windowS}s host=$host")
         }
-        if (t.reported || watched < WINDOW_MS) return null
+        if (t.reported) return null
         val why = when {
+            t.pauses.size >= LONG_PAUSES_TO_BREAK ->
+                "its source keeps stopping for ${t.pauses.maxOf { it.second } / 1000} s " +
+                    "at a time, so the match freezes"
+            watched < WINDOW_MS -> null
             reading.rate < SLOW_RATE ->
                 "its source sends only ${(reading.rate * 100).toInt()}% of real time, " +
                     "so the match freezes"

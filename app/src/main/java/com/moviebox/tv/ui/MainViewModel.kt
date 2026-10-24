@@ -1493,6 +1493,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val autoSwitchTried = mutableSetOf<String>()
     private var lastAutoSwitchAt = 0L
     @Volatile private var autoSwitchInFlight = false
+    /** A broken verdict that arrived while another attempt was running. It
+     *  used to be dropped: the running attempt (started for a stall) found
+     *  nothing and the broken feed was never tried again (2026-10-24). */
+    @Volatile private var brokenWhileInFlight: Pair<String, String>? = null
     private var lastAutoSwitchFailedAt = 0L
     /** When the viewer last picked a live channel themselves. */
     @Volatile private var lastManualPickAt = 0L
@@ -1547,6 +1551,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         if (autoSwitchInFlight) {
+            if (brokenWhy != null) brokenWhileInFlight = current to brokenWhy
             android.util.Log.i("LiveDiag", "AUTOSWITCH skipped (attempt in flight) reason=$reason")
             return
         }
@@ -1663,6 +1668,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
           } finally {
             autoSwitchInFlight = false
+            // Still on the feed that was found broken meanwhile: try again
+            // with that verdict (it skips the waiting rules).
+            val pending = brokenWhileInFlight
+            brokenWhileInFlight = null
+            if (pending != null) {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    if (_state.value.currentLiveChannel?.id == pending.first) {
+                        autoSwitchFeed("broken: ${pending.second}", urgent = true, brokenWhy = pending.second)
+                    }
+                }
+            }
           }
         }
     }

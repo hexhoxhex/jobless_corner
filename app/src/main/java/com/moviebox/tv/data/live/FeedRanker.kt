@@ -81,14 +81,48 @@ object FeedRanker {
      * out of every automatic pick for [BROKEN_FOR_MS].
      */
     private val broken = ConcurrentHashMap<String, Pair<Long, String>>()
-    const val BROKEN_FOR_MS = 15 * 60 * 1000L
+
+    /** An hour, kept across restarts. It was 15 minutes in memory, and a
+     *  feed found broken at 14:43 (Hub Premier 1, skipping and stopping) was
+     *  picked again at 15:14 after the TV was switched off and on — the worst
+     *  of the match's feeds, moved to from the best (2026-10-24). A broken
+     *  source usually stays broken for the match. Automatic picks only: the
+     *  viewer can still choose it. */
+    const val BROKEN_FOR_MS = 60 * 60 * 1000L
+    private const val PREFS = "feed_broken"
+    private val loaded = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    private fun prefs(): android.content.SharedPreferences? = runCatching {
+        com.moviebox.tv.App.instance.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+    }.getOrNull()
+
+    private fun ensureLoaded() {
+        if (!loaded.compareAndSet(false, true)) return
+        val now = System.currentTimeMillis()
+        prefs()?.all?.forEach { (id, v) ->
+            val parts = (v as? String)?.split('|', limit = 2) ?: return@forEach
+            val at = parts[0].toLongOrNull() ?: return@forEach
+            if (now - at < BROKEN_FOR_MS) broken.putIfAbsent(id, at to parts.getOrElse(1) { "" })
+        }
+    }
 
     /** Called with (channelId, reason) when a feed is first marked broken. */
     @Volatile var onBroken: ((String, String) -> Unit)? = null
 
     fun markBroken(channelId: String, why: String) {
         val fresh = brokenReason(channelId) == null
-        broken[channelId] = System.currentTimeMillis() to why
+        val at = System.currentTimeMillis()
+        broken[channelId] = at to why
+        runCatching {
+            prefs()?.edit()?.apply {
+                // Drop what has expired, so the store stays small.
+                prefs()?.all?.forEach { (id, v) ->
+                    val t = (v as? String)?.substringBefore('|')?.toLongOrNull() ?: 0L
+                    if (at - t >= BROKEN_FOR_MS) remove(id)
+                }
+                putString(channelId, "$at|$why")
+            }?.apply()
+        }
         if (fresh) {
             Log.w(TAG, "FEEDS ch=$channelId marked broken: $why")
             runCatching { onBroken?.invoke(channelId, why) }
@@ -96,8 +130,10 @@ object FeedRanker {
     }
 
     /** Why [channelId] was marked broken, or null when it isn't (any more). */
-    fun brokenReason(channelId: String): String? =
-        broken[channelId]?.takeIf { System.currentTimeMillis() - it.first < BROKEN_FOR_MS }?.second
+    fun brokenReason(channelId: String): String? {
+        ensureLoaded()
+        return broken[channelId]?.takeIf { System.currentTimeMillis() - it.first < BROKEN_FOR_MS }?.second
+    }
 
     /** A fixture that kicked off this long ago may still be on air. */
     private const val ON_AIR_BEFORE_SEC = 3 * 60 * 60L
