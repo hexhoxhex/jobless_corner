@@ -881,8 +881,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         const val MANUAL_PICK_GRACE_MS = 2 * 60 * 1000L
 
         /** Moving away from a BROKEN feed (repeats, bad audio timing) may
-         *  happen sooner than a stall switch, but not back-to-back. */
-        const val BROKEN_SWITCH_GAP_MS = 3 * 60 * 1000L
+         *  happen sooner than a stall switch, but not back-to-back. It was
+         *  3 minutes, and a feed found broken 36 s after a switch was simply
+         *  kept: the verdict was dropped (Hub Premier 3, 12 minutes of skips
+         *  and stalls, 2026-10-24). Now 1 minute, and retried when it ends. */
+        const val BROKEN_SWITCH_GAP_MS = 60 * 1000L
 
         /** Rest after an attempt that found no better feed.
          *
@@ -1579,6 +1582,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             android.util.Log.i(
                 "LiveDiag", "AUTOSWITCH suppressed (switched ${(now - lastAutoSwitchAt) / 1000}s ago) reason=$reason",
             )
+            // A broken feed is not left to play on: try again once the gap
+            // is over, if the viewer is still on it.
+            if (broken) {
+                val wait = gap - (now - lastAutoSwitchAt) + 1_000L
+                viewModelScope.launch {
+                    kotlinx.coroutines.delay(wait)
+                    if (_state.value.currentLiveChannel?.id == current &&
+                        com.moviebox.tv.data.live.FeedRanker.brokenReason(current) != null
+                    ) {
+                        autoSwitchFeed(reason, urgent = true, brokenWhy = brokenWhy)
+                    }
+                }
+            }
             return
         }
         val lang = com.moviebox.tv.data.live.ChannelLanguage

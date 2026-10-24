@@ -1459,6 +1459,11 @@ private const val BIG_JUMP_WINDOW_MS = 120_000L
 /** How long a status note stays over a picture that is playing normally. */
 private const val STATUS_WHILE_PLAYING_MS = 6_000L
 
+/** Target durations a live playlist may stay unchanged before the player
+ *  calls it stuck (Media3: 3.5). 9 x 5 s = 45 s: longer than every source
+ *  pause measured, shorter than a source that has really gone. */
+private const val LIVE_PLAYLIST_STUCK_TARGETS = 9.0
+
 /** The skip pill goes away this long before the intro/recap ends. */
 private const val SKIP_SEGMENT_TAIL_MS = 1_000L
 
@@ -2469,6 +2474,20 @@ private fun VideoPlayer(
                 // of a second at start and makes a mid-stream format change
                 // survivable instead of fatal.
                 .setAllowChunklessPreparation(false)
+                // Patience with a playlist that stops changing. Media3 gives
+                // up after 3.5 target durations (~18 s at 5 s chunks) and
+                // throws PlaylistStuckException, which reloads the stream and
+                // throws away the cushion. Sources pause 9-27 s routinely
+                // (four feeds measured 2026-10-24) and then carry on; a 26 s
+                // pause on TNT Sports 1 UK ended in a reload and a switch to
+                // a worse feed. Waiting lets the picture resume where it was,
+                // the pause's delay kept as cushion (the proxy keeps ~60 s of
+                // chunks behind the source's window for exactly this).
+                .setPlaylistTrackerFactory { dsf, policy, parsers ->
+                    androidx.media3.exoplayer.hls.playlist.DefaultHlsPlaylistTracker(
+                        dsf, policy, parsers, LIVE_PLAYLIST_STUCK_TARGETS,
+                    )
+                }
                 .setLoadErrorHandlingPolicy(
                     object : androidx.media3.exoplayer.upstream
                         .DefaultLoadErrorHandlingPolicy() {

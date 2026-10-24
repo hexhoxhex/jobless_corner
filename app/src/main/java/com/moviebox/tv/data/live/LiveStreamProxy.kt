@@ -488,6 +488,9 @@ class LiveStreamProxy(
         Log.i(DIAG, "PROXY ch=$channelId INVALIDATE (caller-requested)")
         cache.remove(channelId)
         innerState.remove(channelId)
+        history.remove(channelId)
+        servedStart.remove(channelId)
+        lastServed.remove(channelId)
         // Start the channel with a clean slate — a fresh session gets a
         // fresh window, and yesterday's dead names must not block it.
         deadSegments.remove(channelId)
@@ -1191,9 +1194,14 @@ class LiveStreamProxy(
             // from now) gets a real try before we consider this route
             // again.
             state.lastInnerFetchDurationMs = 0L
+            // The playlist the player last got, kept chunks included: a
+            // shorter one would leave a player that sits in them behind the
+            // window.
+            val again = lastServed[channelId]
+            if (again == null) noteServedStart(channelId, cachedForFast)
             return NanoHTTPD.newFixedLengthResponse(
                 NanoHTTPD.Response.Status.OK,
-                "application/vnd.apple.mpegurl", withHoldBack(cachedForFast),
+                "application/vnd.apple.mpegurl", again ?: withHoldBack(cachedForFast),
             )
         }
 
@@ -1270,7 +1278,8 @@ class LiveStreamProxy(
                         "got=$newMediaSeq host=${hostOf(entry.innerUrl)} — " +
                         "serving lastGoodBody, will retry rotation")
                     state.rotationPending = true
-                    val body = state.lastGoodBody ?: servedBody
+                    val body = lastServed[channelId] ?: state.lastGoodBody ?: servedBody
+                    noteServedStart(channelId, body)
                     return NanoHTTPD.newFixedLengthResponse(
                         NanoHTTPD.Response.Status.OK,
                         "application/vnd.apple.mpegurl",
@@ -1330,11 +1339,15 @@ class LiveStreamProxy(
                 // place, invalidate + re-resolve, and refetch with a
                 // fresh-token URL transparently.
                 val rewrittenBody = withHoldBack(
-                    rewriteSegmentUrls(
-                        body = servedBody, channelId = channelId,
-                        baseUrl = entry.innerUrl,
+                    extendWindow(
+                        channelId,
+                        rewriteSegmentUrls(
+                            body = servedBody, channelId = channelId,
+                            baseUrl = entry.innerUrl,
+                        ),
                     ),
                 )
+                lastServed[channelId] = rewrittenBody
                 return NanoHTTPD.newFixedLengthResponse(
                     NanoHTTPD.Response.Status.OK,
                     "application/vnd.apple.mpegurl",
@@ -1415,6 +1428,9 @@ class LiveStreamProxy(
                         Log.i(DIAG, "PROXY ch=$channelId ROTATE OK " +
                             "newHost=${hostOf(refreshed.innerUrl)} " +
                             "mediaSeq=${extractMediaSeq(servedBody)} disc=$disc")
+                        history.remove(channelId)
+                        lastServed.remove(channelId)
+                        noteServedStart(channelId, servedBody)
                         return NanoHTTPD.newFixedLengthResponse(
                             NanoHTTPD.Response.Status.OK,
                             "application/vnd.apple.mpegurl", servedBody,
@@ -1438,9 +1454,11 @@ class LiveStreamProxy(
         if (cached != null && cacheAge < LAST_GOOD_TTL_MS) {
             Log.i(DIAG, "PROXY ch=$channelId CACHE_HIT age=${cacheAge}ms " +
                 "code=$lastResponseCode")
+            val again = lastServed[channelId]
+            if (again == null) noteServedStart(channelId, cached)
             return NanoHTTPD.newFixedLengthResponse(
                 NanoHTTPD.Response.Status.OK,
-                "application/vnd.apple.mpegurl", cached,
+                "application/vnd.apple.mpegurl", again ?: cached,
             )
         }
         Log.w(DIAG, "PROXY ch=$channelId GIVE_UP code=$lastResponseCode " +
@@ -1536,6 +1554,147 @@ class LiveStreamProxy(
     }
 
     private val holdBackLogged: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /**
+     * Chunks already served for each channel, kept after they leave the
+     * source's playlist, so the player can fall further behind live than the
+     * source's ~30 s window without losing its place.
+     *
+     * Every source pauses now and then — measured from the PC on 2026-10-24
+     * across four feeds of one match: pauses of 9-27 s, every feed, sometimes
+     * all at once. The player's cushion was capped by that 30 s window, so a
+     * 26 s pause froze the picture; and the delay a freeze adds could not be
+     * kept, because falling further back meant falling out of the window
+     * (BehindLiveWindow, a jump back to the live edge). With [EXTRA_WINDOW_S]
+     * more behind it, a freeze's delay stays as cushion for the next pause.
+     * The chunk links stay valid for minutes after they leave the playlist
+     * (tested: 118 s later, HTTP 200).
+     */
+    private val history = ConcurrentHashMap<String, java.util.TreeMap<Long, Pair<Double, String>>>()
+
+    /** The first media sequence last served to the player, per channel. A
+     *  playlist that starts EARLIER than the previous one counts as older to
+     *  ExoPlayer and is ignored — the player then thinks the stream stopped. */
+    private val servedStart = ConcurrentHashMap<String, Long>()
+
+    private val headerTags = listOf(
+        "#EXTM3U", "#EXT-X-VERSION", "#EXT-X-TARGETDURATION", "#EXT-X-MEDIA-SEQUENCE",
+        "#EXT-X-DISCONTINUITY-SEQUENCE", "#EXT-X-PLAYLIST-TYPE", "#EXT-X-INDEPENDENT-SEGMENTS",
+        "#EXT-X-ALLOW-CACHE", "#EXT-X-START", "#EXT-X-SERVER-CONTROL",
+    )
+
+    /** Record where a playlist handed to the player starts (any path). */
+    private fun noteServedStart(channelId: String, body: String) {
+        val start = extractMediaSeq(body) ?: return
+        servedStart.merge(channelId, start) { a, b -> maxOf(a, b) }
+    }
+
+    /** [body] with up to [EXTRA_WINDOW_S] of this channel's earlier chunks in
+     *  front. Left as it is (and the history dropped) for anything this
+     *  can't carry safely: discontinuities, keys, init segments, an end. */
+    private fun extendWindow(channelId: String, body: String): String {
+        if (!body.startsWith("#EXTM3U")) return body
+        if (body.contains("#EXT-X-DISCONTINUITY") || body.contains("#EXT-X-KEY") ||
+            body.contains("#EXT-X-MAP") || body.contains("#EXT-X-ENDLIST") ||
+            body.contains("#EXT-X-DATERANGE")
+        ) {
+            history.remove(channelId)
+            noteServedStart(channelId, body)
+            return body
+        }
+        val header = ArrayList<String>()
+        val segs = ArrayList<Pair<Double, String>>()
+        var chunk = StringBuilder()
+        var dur = 0.0
+        var start: Long? = null
+        for (line in body.lineSequence()) {
+            val t = line.trim()
+            when {
+                t.isEmpty() -> Unit
+                t.startsWith("#EXT-X-MEDIA-SEQUENCE:") -> {
+                    start = t.substringAfter(':').trim().toLongOrNull()
+                    header += line
+                }
+                chunk.isEmpty() && headerTags.any { t.startsWith(it) } -> header += line
+                t.startsWith("#") -> {
+                    if (t.startsWith("#EXTINF:")) {
+                        dur = t.substringAfter(':').substringBefore(',').trim().toDoubleOrNull() ?: 0.0
+                    }
+                    chunk.append(line).append('\n')
+                }
+                else -> {
+                    chunk.append(line).append('\n')
+                    segs += dur to chunk.toString()
+                    chunk = StringBuilder()
+                    dur = 0.0
+                }
+            }
+        }
+        val first = start ?: return body.also { noteServedStart(channelId, it) }
+        if (segs.isEmpty() || chunk.isNotEmpty()) {
+            history.remove(channelId)
+            noteServedStart(channelId, body)
+            return body
+        }
+        val h = history.getOrPut(channelId) { java.util.TreeMap() }
+        val out: String
+        synchronized(h) {
+            // Numbering that doesn't continue what we hold (a restart, or a
+            // gap we never saw): start the history over.
+            if (h.isNotEmpty() && (first > h.lastKey() + 1 || first < h.firstKey())) h.clear()
+            // Never start before what the player last got — unless the
+            // numbering itself went back (the proxy re-baselined after a
+            // source restart): then that is the new normal.
+            var floor = servedStart[channelId] ?: Long.MIN_VALUE
+            if (first < floor) {
+                floor = Long.MIN_VALUE
+                h.clear()
+            }
+            segs.forEachIndexed { i, s -> h[first + i] = s }
+            // Keep up to EXTRA_WINDOW_S before this playlist's first chunk,
+            // contiguous.
+            var oldest = first
+            var extra = 0.0
+            while (true) {
+                val prev = h[oldest - 1] ?: break
+                if (oldest - 1 < floor || extra + prev.first > EXTRA_WINDOW_S) break
+                extra += prev.first
+                oldest--
+            }
+            h.headMap(oldest).clear()
+            val newStart = oldest
+            val sb = StringBuilder(body.length + (first - newStart).toInt() * 300)
+            for (l in header) {
+                if (l.trim().startsWith("#EXT-X-MEDIA-SEQUENCE:")) {
+                    sb.append("#EXT-X-MEDIA-SEQUENCE:").append(newStart).append('\n')
+                } else sb.append(l).append('\n')
+            }
+            var seq = newStart
+            while (seq < first) {
+                sb.append(h[seq]?.second ?: break)
+                seq++
+            }
+            if (seq < first) {
+                // A hole after all: serve what the source sent.
+                h.clear()
+                noteServedStart(channelId, body)
+                return body
+            }
+            segs.forEach { sb.append(it.second) }
+            out = sb.toString()
+            servedStart[channelId] = newStart
+            if (first > newStart && extendLogged.add(channelId)) {
+                Log.i(DIAG, "PROXY ch=$channelId WINDOW extended by ${"%.0f".format(extra)} s " +
+                    "(${first - newStart} chunks kept after the source dropped them)")
+            }
+        }
+        return out
+    }
+
+    private val extendLogged: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /** The last playlist the main path handed the player, per channel. */
+    private val lastServed = ConcurrentHashMap<String, String>()
 
     /**
      * Tell the player how far behind the live edge to sit, measured from the
@@ -2266,6 +2425,11 @@ class LiveStreamProxy(
         /** Never sit more than this far behind the newest segment, however
          *  long the source's window is (CNN publishes ~60 s). */
         private const val HOLD_BACK_MAX_S = 30.0
+
+        /** Chunks kept in front of the source's own window (see history):
+         *  the player can then sit up to ~90 s behind live without falling
+         *  out of the window. */
+        private const val EXTRA_WINDOW_S = 60.0
 
         /** Distance kept from the back edge of the window. */
         private const val HOLD_BACK_MARGIN_S = 2.0

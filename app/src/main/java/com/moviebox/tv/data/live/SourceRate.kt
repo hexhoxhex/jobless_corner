@@ -61,6 +61,11 @@ object SourceRate {
         val added = LinkedHashMap<Long, Pair<Double, Long>>()
         /** Every seq seen, with its PROGRAM-DATE-TIME (s) and duration, to spot skips. */
         val pdt = HashMap<Long, Pair<Double, Double>>()
+        /** Every seq seen, stamped or not. New chunks used to be found
+         *  through [pdt] alone, so a feed without PROGRAM-DATE-TIME (Hub
+         *  Premier 3 on hls.lshls.st, 2026-10-24) never had any, read
+         *  "0% of real time" and was given up on. */
+        val seen = HashSet<Long>()
         val holes = ArrayDeque<Pair<Long, Double>>()
         /** The newest chunk seen, when it appeared, and the long pauses
          *  between new chunks (by sequence number: not every feed stamps
@@ -88,7 +93,7 @@ object SourceRate {
             t = Track(host, now)
             tracks[channelId] = t
         }
-        val first = t.pdt.isEmpty()
+        val first = t.seen.isEmpty()
         t.lastNoteMs = now
 
         var seq: Long? = null
@@ -105,7 +110,7 @@ object SourceRate {
                     extinf = line.substringAfter(':').substringBefore(',').toDoubleOrNull() ?: 0.0
                 line.isNotEmpty() && !line.startsWith("#") -> {
                     val s = seq ?: return null
-                    if (s !in t.pdt) {
+                    if (t.seen.add(s)) {
                         if (!first) t.added[s] = extinf to now
                         // A chunk whose start is well after where the previous
                         // one ended: that stretch of the match never arrives.
@@ -145,6 +150,10 @@ object SourceRate {
         if (t.pdt.size > 200) {
             val keep = t.pdt.keys.sorted().takeLast(100).toSet()
             t.pdt.keys.retainAll(keep)
+        }
+        if (t.seen.size > 200) {
+            val keep = t.seen.sorted().takeLast(100).toSet()
+            t.seen.retainAll(keep)
         }
 
         val watched = now - t.startedMs
