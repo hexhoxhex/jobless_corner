@@ -445,10 +445,14 @@ class LiveResolver(
     suspend fun resolveStream(
         channelId: String,
         budgetMs: Long = RESOLVE_BUDGET_MS,
+        /** Tell the viewer ("Fetching streams…"). False for background
+         *  work - feed probes, the health sweep - which used to put that
+         *  note over a match that was playing fine (2026-10-24). */
+        announce: Boolean = true,
     ): String? {
         val started = System.currentTimeMillis()
         return kotlinx.coroutines.withTimeoutOrNull(budgetMs) {
-            resolveStreamUnbounded(channelId)
+            resolveStreamUnbounded(channelId, announce)
         } ?: run {
             android.util.Log.w(
                 "LiveDiag",
@@ -462,16 +466,17 @@ class LiveResolver(
 
     private suspend fun resolveStreamUnbounded(
         channelId: String,
+        announce: Boolean,
     ): String? = withContext(Dispatchers.IO) {
         val t0 = System.currentTimeMillis()
         // The server this channel was playing from stopped answering and a
         // backup is known: go straight to it, before the usual race (which
         // would hand back the same dead server).
         if (unreachable.keys.any { it.startsWith("$channelId|") }) {
-            LiveStatus.note("Switching to a backup server…")
+            if (announce) LiveStatus.note("Switching to a backup server…")
             fromBackup(channelId)?.let { return@withContext it }
         }
-        LiveStatus.note("Fetching streams…")
+        if (announce) LiveStatus.note("Fetching streams…")
         // Race every known resolver strategy IN PARALLEL and take the FIRST
         // one that hands back a validated master manifest — the health check
         // inside each probe (GET + `#EXTM3U` prefix) means only URLs the

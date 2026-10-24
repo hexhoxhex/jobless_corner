@@ -99,8 +99,9 @@ import kotlinx.coroutines.launch
  * green artwork), only the art scales, and entering a row brings the WHOLE
  * row — heading included — into view, which CalmScroll alone could not do.
  *
- * Under Continue watching, "Live now": the matches on right now, as in the
- * sports guide, watchable ones only. OK plays; BACK comes back here.
+ * Under Continue watching, "Live now": the big competitions on right now
+ * (see homeLiveOf), watchable ones only, each with the logo of the channel
+ * OK opens. OK plays; BACK comes back here.
  *
  * Opening a card and coming BACK lands on that same card, scrolled where it
  * was (HomeMemory): the home leaves composition while a title page or the
@@ -190,8 +191,7 @@ fun TvHomeScreen(state: UiState, vm: MainViewModel) {
         }
     }
     val liveNow = remember(state.liveSchedule, state.liveChannels, nowSec) {
-        liveNowOf(classifySchedule(state.liveSchedule, state.liveChannels), nowSec)
-            .filter { it.primary != null }
+        homeLiveOf(classifySchedule(state.liveSchedule, state.liveChannels), nowSec)
             .take(LIVE_ROW_MAX)
     }
     val billboardOnScreen by remember {

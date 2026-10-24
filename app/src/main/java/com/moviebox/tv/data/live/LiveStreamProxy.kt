@@ -307,6 +307,7 @@ class LiveStreamProxy(
             resolver.resolveStream(
                 channelId,
                 budgetMs = LiveResolver.PROBE_RESOLVE_BUDGET_MS,
+                announce = false,
             )
         }.getOrNull()
             ?: return ProbeResult(
@@ -481,7 +482,7 @@ class LiveStreamProxy(
      *  it". For the background [HomeSweepWorker]: patient, because nothing is
      *  waiting on it, and it does not need the proxy's server running. */
     suspend fun verify(channelId: String): String? =
-        refreshCache(channelId, LiveResolver.PATIENT_RESOLVE_BUDGET_MS)?.masterUrl
+        refreshCache(channelId, LiveResolver.PATIENT_RESOLVE_BUDGET_MS, announce = false)?.masterUrl
 
     fun invalidate(channelId: String) {
         Log.i(DIAG, "PROXY ch=$channelId INVALIDATE (caller-requested)")
@@ -1956,6 +1957,7 @@ class LiveStreamProxy(
     private suspend fun refreshCache(
         channelId: String,
         budgetMs: Long = LiveResolver.RESOLVE_BUDGET_MS_DEFAULT,
+        announce: Boolean = true,
     ): CacheEntry? {
         val lock = refreshLocks.getOrPut(channelId) { Mutex() }
         return lock.withLock {
@@ -1966,7 +1968,7 @@ class LiveStreamProxy(
                 // Another thread refreshed inside the lock; reuse that.
                 return@withLock current
             }
-            val masterUrl = resolver.resolveStream(channelId, budgetMs)
+            val masterUrl = resolver.resolveStream(channelId, budgetMs, announce)
                 ?: return@withLock null
             // Fetch master once to learn the inner URL + STREAM-INF line.
             val failCode = IntArray(1)

@@ -25,6 +25,7 @@ object SportCatalog {
     val ORDER: List<String> = listOf(
         FOOTBALL,
         "Motor sports",
+        "Esports",
         "Basketball",
         "Tennis",
         "American Football",
@@ -41,6 +42,7 @@ object SportCatalog {
         "Horse Racing",
         "Water sports",
         "Athletics",
+        "Winter sports",
         "TV & Entertainment",
     )
 
@@ -51,6 +53,22 @@ object SportCatalog {
      * "ice hockey" has to beat "hockey".
      */
     private val RULES: List<Pair<List<String>, String>> = listOf(
+        // First: "rocket league" and "league of legends" must not read as
+        // anything else. Viewers asked for esports on the home (2026-10-24).
+        listOf(
+            "esports", "e-sports", "esport ", "league of legends", "counter-strike",
+            "counter strike", "cs2 ", "dota 2", "dota2", "valorant", "overwatch",
+            "rocket league", "call of duty", "mobile legends", "pubg", "fortnite",
+            "efootball", "ea fc pro", "blast premier", "esl pro league",
+        ) to "Esports",
+        // Before motor sports: "Summer Ski Jumping – Grand Prix Klingenthal"
+        // read as racing on the "grand prix" and sat in the home row.
+        listOf(
+            "ski jumping", "skiing", "alpine ski", "biathlon", "snowboard",
+            "figure skating", "speed skating", "ice skating", "short program",
+            "free skating", "ice dance", "curling", "bobsleigh", "luge",
+            "nordic combined", "cross-country ski",
+        ) to "Winter sports",
         listOf(
             "formula 1", "formula1", "f1 ", "grand prix", "motogp", "moto gp",
             "moto2", "moto3", "nascar", "indycar", "rally", "superbike",

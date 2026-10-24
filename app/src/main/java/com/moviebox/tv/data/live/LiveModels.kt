@@ -21,9 +21,27 @@ data class Channel(
     val players: List<LivePlayer>? = null,
 ) {
     val isPlayable: Boolean get() = status == "ok" && !streamUrl.isNullOrBlank()
-    /** Display name with title-case for the list UI. */
+    /** Display name with title-case for the list UI — "tnt sports 1 uk" is
+     *  "TNT Sports 1 UK", not "Tnt Sports 1 Uk" (shown on the home cards). */
     val displayName: String get() = name.split(' ')
-        .joinToString(" ") { it.replaceFirstChar { ch -> ch.uppercase() } }
+        .joinToString(" ") { w ->
+            val lower = w.lowercase()
+            BRAND_CASE[lower] ?: if (lower in ACRONYMS) w.uppercase()
+            else w.replaceFirstChar { ch -> ch.uppercase() }
+        }
+
+    private companion object {
+        val ACRONYMS = setOf(
+            "uk", "usa", "us", "tv", "nz", "hd", "uhd", "tnt", "espn", "nbc", "abc", "cbs",
+            "hbo", "bbc", "itv", "dazn", "tsn", "mena", "bt", "ufc", "nfl", "nba", "mlb",
+            "nhl", "f1", "cnn", "rtl", "rai", "tvp", "zdf", "ard", "sbs", "cbc", "nhk",
+            "uae", "ksa", "pga", "wwe", "mls", "fs1", "fs2", "ppv",
+        )
+        val BRAND_CASE = mapOf(
+            "bein" to "beIN", "supersport" to "SuperSport", "dstv" to "DStv",
+            "motogp" to "MotoGP", "laliga" to "LaLiga",
+        )
+    }
     /** Available iframe player paths in catalog order. Empty = no fallback. */
     val playerPaths: List<String> get() =
         players?.filter { it.available }?.map { it.path } ?: emptyList()

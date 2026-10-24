@@ -677,7 +677,7 @@ private fun String.shortGroupLabel(): String {
 /** Acronym up to 3 chars from the channel name. "Arena Sport 2 Serbia" -> "AS2",
  *  "ABC" -> "ABC", "Eurosport" -> "EUR". Beats `name.take(3)` which produced
  *  "ARE", "AST", "EUR" for unrelated names — looked broken. */
-private fun initialsOf(name: String): String {
+internal fun initialsOf(name: String): String {
     val words = name.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
     return when {
         words.isEmpty() -> "?"
@@ -692,7 +692,7 @@ private fun initialsOf(name: String): String {
 /** Deterministic two-color diagonal gradient seeded by the channel name.
  *  Same channel always picks the same palette so card backgrounds stay
  *  stable across recompositions. Hues are saturated but not garish. */
-private fun initialsGradient(seed: String): Brush {
+internal fun initialsGradient(seed: String): Brush {
     val hash = seed.hashCode().toUInt().toLong()
     val palette = listOf(
         0xFF1f3a5f to 0xFF2d5a87,  // navy

@@ -203,6 +203,20 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
             com.moviebox.tv.data.live.LiveStatus.clear()
         }
     }
+    // A note posted WHILE the picture plays normally (a background backup
+    // lookup's "Fetching streams…", an info line) used to stay up for good:
+    // the effect above only runs when playback starts or resumes. Hub
+    // Premier 1 / TNT Sports 1 UK (2026-10-24) showed "Fetching streams…"
+    // over a match playing with a 20 s buffer. Let it be read, then go.
+    LaunchedEffect(liveStatusMsg, hasRenderedFrame, playing, buffering) {
+        val msg = liveStatusMsg ?: return@LaunchedEffect
+        if (hasRenderedFrame && playing && !buffering) {
+            kotlinx.coroutines.delay(STATUS_WHILE_PLAYING_MS)
+            if (com.moviebox.tv.data.live.LiveStatus.message.value == msg) {
+                com.moviebox.tv.data.live.LiveStatus.clear()
+            }
+        }
+    }
     // Don't clear on mediaUrl change — the resolver posts "Fetching
     // streams…" milliseconds after mediaUrl is set, and clearing here
     // races the post and hides the message. The resolver overwrites
@@ -1433,6 +1447,18 @@ private const val SCRUB_COMMIT_MS: Long = 700L
 private const val AUDIO_JUMPS_TO_BREAK = 10
 private const val AUDIO_JUMP_WINDOW_MS = 30_000L
 
+/** A re-alignment this big is a visible skip: the picture holds, then jumps
+ *  ahead with the sound. Hub Premier 1 (2026-10-24) did 2.0 s ones, two or
+ *  three a minute (the source's own clock jumping), which never came near
+ *  [AUDIO_JUMPS_TO_BREAK]; the match froze and skipped for six minutes
+ *  while 33 other feeds carried it. A clean feed does none. */
+private const val BIG_AUDIO_JUMP_MS = 1_000L
+private const val BIG_JUMPS_TO_BREAK = 3
+private const val BIG_JUMP_WINDOW_MS = 120_000L
+
+/** How long a status note stays over a picture that is playing normally. */
+private const val STATUS_WHILE_PLAYING_MS = 6_000L
+
 /** The skip pill goes away this long before the intro/recap ends. */
 private const val SKIP_SEGMENT_TAIL_MS = 1_000L
 
@@ -2100,6 +2126,8 @@ private fun VideoPlayer(
     val feedBrokenState = rememberUpdatedState(onFeedBroken)
     // Live audio re-alignments (see onAudioSinkError below), per channel.
     val audioJumps = remember { mutableListOf<Long>() }
+    // ...and the big ones (a visible skip), over a longer window.
+    val bigAudioJumps = remember { mutableListOf<Long>() }
     val lastUnderrunLogAt = remember { mutableStateOf(0L) }
     val feedBrokenReported = remember { mutableStateOf(false) }
     // The polling loop below is keyed on Unit, so it must read the title
@@ -2200,6 +2228,7 @@ private fun VideoPlayer(
     LaunchedEffect(mediaUrl) {
         audioDisabled.value = false
         synchronized(audioJumps) { audioJumps.clear() }
+        synchronized(bigAudioJumps) { bigAudioJumps.clear() }
         feedBrokenReported.value = false
     }
 
@@ -3951,6 +3980,31 @@ private fun VideoPlayer(
                             "${AUDIO_JUMP_WINDOW_MS / 1000}s — this feed's audio timing is broken",
                     )
                     feedBrokenState.value("its sound is out of step with the picture")
+                    return
+                }
+                // Big jumps: the feed itself skips (see BIG_AUDIO_JUMP_MS).
+                val jumpMs = kotlin.math.abs(
+                    audioSinkError.actualPresentationTimeUs -
+                        audioSinkError.expectedPresentationTimeUs,
+                ) / 1000
+                if (jumpMs < BIG_AUDIO_JUMP_MS) return
+                val big = synchronized(bigAudioJumps) {
+                    bigAudioJumps.add(now)
+                    bigAudioJumps.removeAll { now - it > BIG_JUMP_WINDOW_MS }
+                    bigAudioJumps.size
+                }
+                android.util.Log.w(
+                    "LiveDiag",
+                    "PLAYER skip of ${jumpMs}ms (#$big in ${BIG_JUMP_WINDOW_MS / 1000}s)",
+                )
+                if (big >= BIG_JUMPS_TO_BREAK && !feedBrokenReported.value) {
+                    feedBrokenReported.value = true
+                    android.util.Log.w(
+                        "LiveDiag",
+                        "PLAYER $big skips of a second or more in " +
+                            "${BIG_JUMP_WINDOW_MS / 1000}s — this feed keeps skipping",
+                    )
+                    feedBrokenState.value("it keeps freezing and skipping ahead")
                 }
             }
             // The audio output ran dry: the sound breaks up. Logged (at most

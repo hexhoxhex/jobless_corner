@@ -874,8 +874,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         const val AUTO_SWITCH_COOLDOWN_MS = 10 * 60 * 1000L
 
         /** After the viewer picks a feed themselves, leave it alone this
-         *  long unless it turns out broken. */
-        const val MANUAL_PICK_GRACE_MS = 5 * 60 * 1000L
+         *  long unless it turns out broken. It was 5 minutes, and a feed that
+         *  kept stalling stayed frozen that long with 30-odd other feeds of
+         *  the match to hand ("buffering instead of finding alternatives",
+         *  2026-10-24). A switch still needs a feed measured to be better. */
+        const val MANUAL_PICK_GRACE_MS = 2 * 60 * 1000L
 
         /** Moving away from a BROKEN feed (repeats, bad audio timing) may
          *  happen sooner than a stall switch, but not back-to-back. */

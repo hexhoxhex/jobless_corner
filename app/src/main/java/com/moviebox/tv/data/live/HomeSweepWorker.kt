@@ -13,6 +13,7 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.moviebox.tv.remote.RemoteController
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import java.util.concurrent.TimeUnit
 
@@ -99,9 +100,23 @@ class HomeSweepWorker(
         val pending = mutableListOf<String>()   // failures not yet vouched for
         var stopReason = "batch complete"
 
-        suspend fun probe(ch: Channel): Boolean {
+        /** True: plays. False: failed. Null: the viewer started watching
+         *  mid-probe, so it was dropped - it says nothing about the channel.
+         *  A probe can run a minute; checking only between probes let one
+         *  compete with the match the viewer had just opened for minutes
+         *  (emulator, 2026-10-24: 3.7 min of stalling from the start). */
+        suspend fun probe(ch: Channel): Boolean? {
             probes++
-            val master = runCatching { proxy.verify(ch.id) }.getOrNull()
+            val master = kotlinx.coroutines.coroutineScope {
+                val job = async { runCatching { proxy.verify(ch.id) }.getOrNull() }
+                while (job.isActive && !RemoteController.isPlaying) delay(WATCH_POLL_MS)
+                if (job.isActive) {
+                    job.cancel()
+                    return@coroutineScope null
+                }
+                job.await()
+            }
+            if (master == null && RemoteController.isPlaying) return null
             if (master != null) {
                 ok++
                 // Written straight away, so a run stopped early keeps them.
@@ -120,7 +135,11 @@ class HomeSweepWorker(
                 if (timeUp() || RemoteController.isPlaying) return false
                 val c = canaries.removeFirstOrNull() ?: return false
                 queue.removeAll { it.id == c.id }
-                if (probe(c)) return true
+                when (probe(c)) {
+                    true -> return true
+                    null -> return false
+                    false -> Unit
+                }
             }
             return false
         }
@@ -151,7 +170,11 @@ class HomeSweepWorker(
                     stopReason = "viewer started watching"; break
                 }
                 val ch = queue.removeAt(0)
-                if (probe(ch)) {
+                val result = probe(ch)
+                if (result == null) {
+                    stopReason = "viewer started watching"; break
+                }
+                if (result) {
                     // A success proves the source answered, so everything that
                     // failed before it in this stretch was a real failure.
                     pending.forEach {
@@ -197,6 +220,9 @@ class HomeSweepWorker(
         private const val RUN_BUDGET_MS = 8 * 60_000L
 
         private const val SPACING_MS = 15_000L
+
+        /** How often a running probe checks whether the viewer started watching. */
+        private const val WATCH_POLL_MS = 1_000L
 
         /** Canaries tried before concluding the source is not serving us.
          *  The catalogue's own "ok" can be stale, so one miss proves little. */

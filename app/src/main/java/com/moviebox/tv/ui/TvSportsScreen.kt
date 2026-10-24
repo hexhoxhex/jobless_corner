@@ -236,6 +236,62 @@ internal fun liveNowOf(events: List<Classified>, nowSec: Long): List<Classified>
                 .thenBy { it.e.startUnix ?: Long.MAX_VALUE },
         )
 
+/**
+ * The home "Live now" row: the competitions people open the app for, not
+ * the whole day.
+ *
+ * The guide lists every event; the home row ordered them by sport and kick-off
+ * only, so an Indonesian league match sat ahead of the Premier League.
+ * Viewers asked (2026-10-24) for the Champions League, Premier League,
+ * La Liga and Bundesliga first, the other big leagues and UEFA cups after,
+ * then motor racing and esports — and only those. When none of them is on,
+ * the row shows the best of the rest rather than disappearing.
+ */
+internal fun homeLiveOf(events: List<Classified>, nowSec: Long): List<Classified> {
+    val live = liveNowOf(events, nowSec).filter { it.primary != null }
+    val picked = live.mapNotNull { c -> homeTier(c)?.let { it to c } }
+        .sortedWith(
+            compareBy<Pair<Int, Classified>> { it.first }
+                .thenBy { it.second.e.startUnix ?: Long.MAX_VALUE },
+        )
+        .map { it.second }
+    return picked.ifEmpty { live.take(HOME_FALLBACK) }
+}
+
+private const val HOME_FALLBACK = 6
+
+/** Best first. The UEFA one only: "CAF Champions League" (and a judo
+ *  "Champions League") also carry the words. */
+private val HOME_COMPETITIONS: List<Pair<List<String>, Int>> = listOf(
+    listOf("uefa champions league") to 0,
+    listOf("england - premier league") to 1,
+    listOf("spain - la liga", "spain - laliga", "spain - copa del rey", "supercopa de espana") to 2,
+    listOf("germany - bundesliga") to 3,
+    listOf("italy - serie a", "france - ligue 1") to 4,
+    listOf("uefa europa league", "uefa conference league") to 5,
+)
+
+/** Not the main event: women's, youth and second-tier games, and feeds that
+ *  are not one match (studio shows, multi-match simulcasts). */
+private val HOME_NOT = Regex(
+    "\\bwomen\\b|\\bu(19|20|21|23)\\b|\\byouth\\b|bundesliga 2|2 bundesliga|" +
+        "xtra time|simulcast|multiview|multi view",
+)
+
+private val TOP_RACING = Regex("formula 1|\\bf1\\b|motogp|moto gp")
+
+private fun homeTier(c: Classified): Int? {
+    val t = LeagueCatalog.normalise(c.e.title)
+    if (HOME_NOT.containsMatchIn(t)) return null
+    return when (c.sport) {
+        SportCatalog.FOOTBALL ->
+            HOME_COMPETITIONS.firstOrNull { (keys, _) -> keys.any { t.contains(it) } }?.second
+        "Motor sports" -> if (TOP_RACING.containsMatchIn(t)) 6 else 7
+        "Esports" -> 7
+        else -> null
+    }
+}
+
 /** Stable identity of an event for list keys and focus memory. */
 internal fun Classified.key(): String = "live-" + e.title + "|" + e.startUnix
 
@@ -361,17 +417,53 @@ private fun FeedLine(c: Classified) {
             Text("No feed available", color = Dim, fontSize = 13.sp)
             return@Row
         }
+        // The channel OK opens, by its logo (viewers asked, 2026-10-24).
+        ChannelLogoTile(p)
+        Spacer(Modifier.width(8.dp))
+        // Name beside the logo, no pill: the pill and "+ 22 more feeds" left
+        // "TNT Sports …" with the channel number cut off.
         Text(
-            p.displayName, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+            p.displayName, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
             maxLines = 1, overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.clip(RoundedCornerShape(6.dp)).background(Color(0x1AF2F5F8))
-                .padding(horizontal = 8.dp, vertical = 3.dp),
+            modifier = Modifier.weight(1f, fill = false),
         )
         if (c.feeds > 0) {
             Spacer(Modifier.width(8.dp))
             Text(
-                "+ ${c.feeds} more " + if (c.feeds == 1) "feed" else "feeds",
+                "+${c.feeds} " + if (c.feeds == 1) "feed" else "feeds",
                 color = Dim, fontSize = 13.sp, maxLines = 1,
+            )
+        }
+    }
+}
+
+/** A channel's logo on the dark tile the Live TV grid uses; its initials when
+ *  it has none or the image fails (some tv-logos paths have gone). */
+@Composable
+private fun ChannelLogoTile(ch: Channel) {
+    var failed by remember(ch.logo) { mutableStateOf(false) }
+    val monogram = ch.logo.isNullOrBlank() || failed
+    Box(
+        Modifier
+            .size(width = 48.dp, height = 30.dp)
+            .clip(RoundedCornerShape(6.dp))
+            .then(
+                if (monogram) Modifier.background(initialsGradient(ch.displayName))
+                else Modifier.background(Color(0xFF0A0C12)),
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (monogram) {
+            Text(
+                initialsOf(ch.displayName), color = Color.White,
+                fontSize = 12.sp, fontWeight = FontWeight.Black,
+            )
+        } else {
+            coil.compose.AsyncImage(
+                model = ch.logo, contentDescription = ch.displayName,
+                contentScale = androidx.compose.ui.layout.ContentScale.Fit,
+                onError = { failed = true },
+                modifier = Modifier.fillMaxSize().padding(3.dp),
             )
         }
     }
