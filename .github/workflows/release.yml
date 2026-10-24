@@ -118,7 +118,13 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: ${{ steps.apk.outputs.path }}
+          # The first line is what the app's update banner shows (older
+          # versions show only that), so it carries what people need to know:
+          # after the update the TV prepares the app for a minute or two, and
+          # opening it in that time does nothing.
           body: |
+            After updating, give your TV a minute or two before opening the app: it prepares the new version first.
+
             Sideload APK signed with the hexhoxhex release key.
 
             **SHA-256:** `${{ steps.apk.outputs.sha256 }}`

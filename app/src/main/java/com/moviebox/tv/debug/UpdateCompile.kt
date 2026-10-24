@@ -158,7 +158,7 @@ class UpdateResultReceiver : BroadcastReceiver() {
             }
             PackageInstaller.STATUS_SUCCESS -> Unit
             // The viewer declined. Asking again at once would be nagging.
-            PackageInstaller.STATUS_FAILURE_ABORTED -> Unit
+            PackageInstaller.STATUS_FAILURE_ABORTED -> UpdateInstaller.installing.value = false
             else -> {
                 val apk = intent.getStringExtra(UpdateCompile.EXTRA_APK)?.let(::File) ?: return
                 UpdateInstaller.installViaInstallerScreen(context, apk)

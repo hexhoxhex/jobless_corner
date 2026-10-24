@@ -51,6 +51,17 @@ object UpdateInstaller {
     data class DownloadStatus(val pct: Int, val mb: Float, val totalMb: Float)
     val downloadProgress = MutableStateFlow<DownloadStatus?>(null)
 
+    /** The download is done and the install is starting: the banner says
+     *  what happens next. After the viewer confirms, Android closes the app
+     *  and compiles the new version (the base.dm, see UpdateCompile) — 25 s
+     *  on the TCL TV when idle, more just after it wakes — and opening the
+     *  app in that time does nothing at all, no message. On 2026-10-24 the
+     *  user and others took that for an update that broke the app. */
+    val installing = MutableStateFlow(false)
+
+    /** How long the note shows before Android's install prompt covers it. */
+    private const val INSTALL_NOTE_MS = 6_000L
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val client: OkHttpClient = OkHttpClient.Builder()
@@ -85,11 +96,18 @@ object UpdateInstaller {
                 }
                 if (isCompleteApk(file, total)) {
                     Log.i(TAG, "download verified OK: ${file.length()} bytes")
-                    downloadProgress.value = DownloadStatus(
-                        100, file.length() / 1_000_000f, file.length() / 1_000_000f,
-                    )
-                    install(app, file)
                     downloadProgress.value = null
+                    installing.value = true
+                    kotlinx.coroutines.delay(INSTALL_NOTE_MS)
+                    if (!install(app, file)) {
+                        installing.value = false
+                        return@launch
+                    }
+                    // Still here long after: the install was declined or
+                    // failed without word (the installer screen reports
+                    // nothing back). Offer the update again.
+                    kotlinx.coroutines.delay(3 * 60_000L)
+                    installing.value = false
                     return@launch
                 }
                 Log.e(TAG, "APK failed verification (got ${file.length()} / expected $total) " +

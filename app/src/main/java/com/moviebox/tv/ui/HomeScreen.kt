@@ -54,6 +54,8 @@ import com.moviebox.tv.data.local.WatchHistoryEntity
 import com.moviebox.tv.ui.theme.Accent
 import com.moviebox.tv.ui.theme.SurfaceElevated
 import com.moviebox.tv.ui.theme.TextMuted
+import androidx.compose.foundation.focusable
+import androidx.compose.ui.focus.focusRequester
 
 @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable
@@ -370,6 +372,22 @@ internal fun UpdateBanner(
     onDismiss: () -> Unit,
 ) {
     val isTv = LocalIsTv.current
+    val installing by com.moviebox.tv.debug.UpdateInstaller.installing.collectAsState()
+    val downloading by com.moviebox.tv.debug.UpdateInstaller.downloadProgress.collectAsState()
+    // Download turns into the progress readout and then the install note.
+    // The focused button vanishing left the remote with no focus, so the nav
+    // rail took it and opened over the start of the note. Focus stays on the
+    // banner's status instead, when it was the viewer who pressed Download.
+    val statusFocus = remember { androidx.compose.ui.focus.FocusRequester() }
+    var pressed by remember { mutableStateOf(false) }
+    val busy = installing || downloading != null
+    androidx.compose.runtime.LaunchedEffect(busy, installing) {
+        if (busy && pressed) runCatching { statusFocus.requestFocus() }
+    }
+    val statusModifier = Modifier
+        .focusRequester(statusFocus)
+        .tvFocusRing(shape = RoundedCornerShape(12.dp), scaleOnFocus = 1f)
+        .focusable()
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -384,6 +402,32 @@ internal fun UpdateBanner(
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // After the download: what happens next, before Android's prompt
+        // covers the screen. Opening the app while the new version is being
+        // prepared does nothing at all, which read as a broken update.
+        if (installing) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    "Installing ${update.name}",
+                    fontWeight = FontWeight.SemiBold, fontSize = 16.sp,
+                    color = androidx.compose.ui.graphics.Color.White,
+                )
+                Text(
+                    "Confirm when Android asks. The app then closes while your " +
+                        (if (isTv) "TV" else "phone") + " gets the new version " +
+                        "ready, which can take a minute or two. Open Vijana " +
+                        "BaruBaru again after that.",
+                    fontSize = 14.sp, color = TextMuted, maxLines = 3,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Box(statusModifier.padding(6.dp)) {
+                CircularProgressIndicator(
+                    color = Accent, strokeWidth = 3.dp, modifier = Modifier.size(28.dp),
+                )
+            }
+        } else {
         Column(Modifier.weight(1f)) {
             Text(
                 "Update available — ${update.name}",
@@ -410,7 +454,7 @@ internal fun UpdateBanner(
         val dl by com.moviebox.tv.debug.UpdateInstaller.downloadProgress.collectAsState()
         val status = dl
         if (status != null) {
-            Column(horizontalAlignment = Alignment.End) {
+            Column(statusModifier.padding(6.dp), horizontalAlignment = Alignment.End) {
                 Text(
                     if (status.pct >= 0) "Downloading ${status.pct}%"
                     else "Downloading… ${"%.1f".format(status.mb)} MB",
@@ -445,7 +489,7 @@ internal fun UpdateBanner(
                 Modifier
                     .clip(RoundedCornerShape(18.dp))
                     .background(Accent)
-                    .clickable(onClick = onUpdate)
+                    .clickable { pressed = true; onUpdate() }
                     .padding(horizontal = 14.dp, vertical = 8.dp),
             ) {
                 Text("Download",
@@ -462,6 +506,7 @@ internal fun UpdateBanner(
             ) {
                 Text("×", color = TextMuted, fontSize = 18.sp)
             }
+        }
         }
     }
 }
