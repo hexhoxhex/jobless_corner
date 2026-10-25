@@ -108,7 +108,23 @@ object SevenMovies {
         fun fresh(maxAgeMs: Long) = android.os.SystemClock.elapsedRealtime() - at < maxAgeMs
     }
     private val tokens = java.util.concurrent.ConcurrentHashMap<String, Kept<JSONObject>>()
-    private val warmVela = java.util.concurrent.ConcurrentHashMap<String, Kept<JSONObject>>()
+    /** path -> (server, its answer), fetched by [warm]. */
+    private val warmKept = java.util.concurrent.ConcurrentHashMap<String, Pair<String, Kept<JSONObject>>>()
+
+    /**
+     * The server that played a series' last episode ("tv/1434" -> "titan").
+     *
+     * The servers don't all number a season the same way: for Family Guy
+     * season 13, Vela's episode 7 is Titan's (and TMDB's) episode 6 — Vela
+     * counts the hour-long first episode as two (checked frame by frame,
+     * 2026-10-25). Episode 6 played from Titan, episode 7 came from Vela
+     * (always warmed), and the viewer got episode 6 again; switching the
+     * other way skips one. Each server numbers consistently with itself, so
+     * a run of episodes stays on the server it started on.
+     */
+    private val lastServer = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    private fun titleKeyOf(path: String) = path.split('/').take(2).joinToString("/")
     private const val TOKEN_KEEP_MS = 60 * 60_000L
     private const val VELA_KEEP_MS = 10 * 60_000L
 
@@ -144,19 +160,23 @@ object SevenMovies {
         resolution: String = "best",
     ): PlayInfo? = findStream(pathOf(tmdbId, season, episode), title, season, episode, resolution)
 
-    /** Ask for an episode's Vela streams without playing it, so vidrift has
+    /** Ask for an episode's streams without playing it, so vidrift has
      *  them ready when the viewer gets there (the first lookup of an episode
-     *  takes ~9 s, the next ~1.3 s). Once per episode per run. */
+     *  takes ~9 s, the next ~1.3 s) — from the server playing this series
+     *  (see [lastServer]), Vela when there is none yet. Once per episode
+     *  per run. */
     fun warm(tmdbId: Int, season: Int, episode: Int) {
         val path = pathOf(tmdbId, season, episode)
         if (!warmed.add(path)) return
+        val server = lastServer[titleKeyOf(path)] ?: "vela"
+        if (server == "orion" && !hevc) return
         background.launch {
             val token = bootMeta(path)?.optString("playbackToken")
                 ?.takeIf { it.isNotBlank() } ?: return@launch
-            val answer = fetchJson(sourceUrl(path, token, "vela"), warmClient)
+            val answer = fetchJson(sourceUrl(path, token, server), warmClient)
             val ok = answer?.optBoolean("success") == true
-            if (ok) warmVela[path] = Kept(answer!!)
-            android.util.Log.i(TAG, "warmed $path: $ok")
+            if (ok) warmKept[path] = server to Kept(answer!!)
+            android.util.Log.i(TAG, "warmed $path from $server: $ok")
         }
     }
 
@@ -208,6 +228,7 @@ object SevenMovies {
             android.util.Log.i(
                 TAG, "$path via $server (${info.selected}, ${info.selectedDub}) in ${spent()} ms",
             )
+            lastServer[titleKeyOf(path)] = server
             return info
         }
 
@@ -223,13 +244,20 @@ object SevenMovies {
         // order (ffprobe) — and in HLS the player reads only the FIRST audio
         // track of a TS, so the English preference can't reach the English
         // one. It played Tamil.
-        val titleKey = path.split('/').take(2).joinToString("/")
+        val titleKey = titleKeyOf(path)
         // Warmed while the previous episode played: no lookups at all —
-        // unless this show is known to have dubs.
-        warmVela.remove(path)?.takeIf { it.fresh(VELA_KEEP_MS) }?.let { kept ->
-            if (titleKey !in dubbedTitles) {
-                consider("vela", kept.value)?.let { return@coroutineScope it }
+        // unless this show is known to have dubs and it was Vela's.
+        warmKept.remove(path)?.takeIf { it.second.fresh(VELA_KEEP_MS) }?.let { (server, kept) ->
+            if (server != "vela" || titleKey !in dubbedTitles) {
+                consider(server, kept.value)?.let { return@coroutineScope it }
             }
+        }
+        // The server the series has been playing from goes first: another
+        // one may number the episodes differently (see [lastServer]).
+        lastServer[titleKey]?.takeIf { it != "vela" && (it != "orion" || hevc) }?.let { server ->
+            consider(server, fetchJson(sourceUrl(path, token, server)))
+                ?.let { return@coroutineScope it }
+            android.util.Log.i(TAG, "$path: $server, which played the last episode, has nothing")
         }
         // Vela and Titan are asked together; Vela gets a head start. Orion's
         // list comes along to tell whether dubs exist.
@@ -250,6 +278,14 @@ object SevenMovies {
         }
         if (velaEarly != null) {
             consider("vela", velaEarly)?.let { titan.cancel(); return@coroutineScope it }
+        }
+        // A series playing from Vela waits for Vela (and asks once more if
+        // it failed — the API answers 502 now and then) before Titan, whose
+        // numbering may differ (see [lastServer]).
+        if (lastServer[titleKey] == "vela" && velaEarly == null) {
+            (consider("vela", vela.await())
+                ?: consider("vela", fetchJson(sourceUrl(path, token, "vela"))))
+                ?.let { titan.cancel(); return@coroutineScope it }
         }
         if (dubs.isEmpty()) {
             consider("titan", titan.await())?.let { vela.cancel(); return@coroutineScope it }
