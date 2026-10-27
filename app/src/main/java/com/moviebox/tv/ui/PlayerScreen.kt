@@ -681,6 +681,7 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                 mediaUrl = play.mediaUrl,
                 forceHls = play.hls,
                 headers = play.headers,
+                prefetchAhead = play.provider == com.moviebox.tv.data.Repository.Provider.SEVENMOVIES.label,
                 // Subtitles are drawn by the app (SubtitleText below), so
                 // the player is not handed the files: its language-based
                 // choice could not tell two English tracks apart, had no
@@ -2031,6 +2032,8 @@ private fun VideoPlayer(
     mediaUrl: String,
     /** Headers this stream's CDN requires (Referer/Origin). See [StreamHeaders]. */
     headers: Map<String, String> = emptyMap(),
+    /** Download the next chunks side by side (see [VodPrefetch]). */
+    prefetchAhead: Boolean = false,
     captions: List<CaptionTrack>,
     contentKey: String,
     onEnded: () -> Unit,
@@ -2129,6 +2132,7 @@ private fun VideoPlayer(
     val fatalLiveState = rememberUpdatedState(onFatalLiveError)
     val stabilisingState = rememberUpdatedState(onStabilising)
     val feedBrokenState = rememberUpdatedState(onFeedBroken)
+    val prefetchState = rememberUpdatedState(prefetchAhead)
     // Live audio re-alignments (see onAudioSinkError below), per channel.
     val audioJumps = remember { mutableListOf<Long>() }
     // ...and the big ones (a visible skip), over a longer window.
@@ -2334,26 +2338,29 @@ private fun VideoPlayer(
             // this remember, so it reads StreamHeaders at createDataSource
             // time rather than capturing a snapshot — HLS makes a new data
             // source per segment, so each one picks up the current values.
+            // Chunks VodPrefetch fetched ahead are read from it; its own
+            // downloads come through [direct], the same stack and headers.
+            val delegate = DefaultHttpDataSource.Factory()
+                .setAllowCrossProtocolRedirects(true)
+                .setConnectTimeoutMs(15_000)
+                .setReadTimeoutMs(20_000)
+                .setUserAgent(
+                    "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 " +
+                    "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+                )
+            val direct = {
+                delegate.setDefaultRequestProperties(
+                    Constants.mediaHeadersFor(StreamHeaders.current),
+                )
+                delegate.createDataSource()
+            }
             object : androidx.media3.datasource.HttpDataSource.Factory {
-                private val delegate = DefaultHttpDataSource.Factory()
-                    .setAllowCrossProtocolRedirects(true)
-                    .setConnectTimeoutMs(15_000)
-                    .setReadTimeoutMs(20_000)
-                    .setUserAgent(
-                        "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 " +
-                        "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
-                    )
-
                 override fun setDefaultRequestProperties(
                     defaultRequestProperties: MutableMap<String, String>,
                 ) = apply { delegate.setDefaultRequestProperties(defaultRequestProperties) }
 
-                override fun createDataSource(): androidx.media3.datasource.HttpDataSource {
-                    delegate.setDefaultRequestProperties(
-                        Constants.mediaHeadersFor(StreamHeaders.current),
-                    )
-                    return delegate.createDataSource()
-                }
+                override fun createDataSource(): androidx.media3.datasource.HttpDataSource =
+                    PrefetchingDataSource(direct(), direct)
             }
         }
         // Live tuning: keep the latency tight to ~12s but allow a real cushion
@@ -3540,6 +3547,27 @@ private fun VideoPlayer(
             override fun onIsPlayingChanged(isPlayingNow: Boolean) {
                 playingState.value(isPlayingNow)
             }
+            override fun onTimelineChanged(
+                timeline: androidx.media3.common.Timeline, reason: Int,
+            ) {
+                // The playlist is in: hand its chunks to the prefetcher, the
+                // way the HLS source resolves them, so the URLs it opens match.
+                // Not for byte-range playlists, whose chunks share one URL.
+                val playlist = (exo.currentManifest as?
+                    androidx.media3.exoplayer.hls.HlsManifest)?.mediaPlaylist
+                if (liveState.value || !prefetchState.value || playlist == null ||
+                    playlist.segments.any {
+                        it.byteRangeLength != androidx.media3.common.C.LENGTH_UNSET.toLong()
+                    }
+                ) {
+                    if (playlist != null || !prefetchState.value) VodPrefetch.stop()
+                    return
+                }
+                VodPrefetch.start(playlist.segments.map {
+                    androidx.media3.common.util.UriUtil
+                        .resolveToUri(playlist.baseUri, it.url).toString()
+                })
+            }
             override fun onRenderedFirstFrame() {
                 reloadsSinceFrame.value = 0
                 firstFrameState.value()
@@ -4146,6 +4174,7 @@ private fun VideoPlayer(
             }
             RemoteController.clearPlayback()
             freezeWatchdog.stop()
+            VodPrefetch.stop()
             exo.removeListener(listener)
             exo.removeAnalyticsListener(analytics)
             exo.release()

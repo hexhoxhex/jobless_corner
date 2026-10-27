@@ -588,7 +588,20 @@ class LiveStreamProxy(
         }
 
         val segT0 = System.currentTimeMillis()
+        // The first try gets [SEG_FIRST_BYTES_MS] to answer and send its
+        // first bytes, then it is cut off and a fresh connection tries.
+        // Waiting out the socket's 15 s instead froze El Clasico on
+        // Viaplay Sports 1 UK (2026-10-25): a chunk sat unanswered for 15 s
+        // and the retry fetched all 1.5 MB of it in 0.37 s; the next stuck
+        // one hung the channel for 45 s and walked the viewer off the feed.
+        val firstBytes = segWatchdog.schedule(
+            { runCatching { lastCall?.cancel() } }, SEG_FIRST_BYTES_MS, TimeUnit.MILLISECONDS,
+        )
         var resp = fetchOnce(originalUrl)
+        if (resp == null || !resp.isSuccessful) firstBytes.cancel(false)
+        if (resp == null && System.currentTimeMillis() - segT0 >= SEG_FIRST_BYTES_MS) {
+            return stuckChunk(channelId, originalUrl, segName, segT0, "no answer")
+        }
         if (resp == null) {
             // Was silent: a failed segment left no trace in the log.
             Log.w(DIAG, "PROXY ch=$channelId SEG ${shortSeg(originalUrl)} fetch failed " +
@@ -717,6 +730,11 @@ class LiveStreamProxy(
             if (n < 0) break
             got += n
         }
+        firstBytes.cancel(false)
+        if (got < head.size && System.currentTimeMillis() - segT0 >= SEG_FIRST_BYTES_MS) {
+            resp.close()
+            return stuckChunk(channelId, originalUrl, segName, segT0, "no data")
+        }
         if (DisguisedSegment.isPng(head, got)) {
             var file = readDisguisedBody(
                 channelId, originalUrl, lastCall, stream, head, got, len, segT0,
@@ -733,68 +751,7 @@ class LiveStreamProxy(
                 retried = true
                 file = fetchFresh(channelId, lastUrl)
             }
-            val dlMs = System.currentTimeMillis() - segT0
-            // Slow on a fresh connection too: this one file is slow at the
-            // CDN (TNT Sports 3, 11:14 the same day: 100 KB/s on three
-            // connections in a row while the chunks around it came in 1-2 s;
-            // the picture froze 45 s). Waiting for it costs a freeze and
-            // then a jump of 30+ s; skipping it costs one chunk. Only when
-            // the channel's other chunks are arriving fine — on a line
-            // that is slow for everything, skipping would just play nothing.
-            // At most one a minute: skipping is for the odd bad file. When
-            // slow chunks are the norm (seen on the emulator 2026-10-17:
-            // most USA Network chunks at ~75 KB/s), skipping each one turned
-            // playback into a run of 11-second jumps; waiting lets the stall
-            // check move the viewer to a feed that downloads properly.
-            if (file == null && recentlyHealthy(channelId) && !skippedRecently(channelId)) {
-                lastSkipAt[channelId] = android.os.SystemClock.elapsedRealtime()
-                markSkippedSegment(channelId, segName)
-                Log.w(DIAG, "PROXY ch=$channelId SEG ${shortSeg(originalUrl)} SKIPPED after " +
-                    "${dlMs}ms: slow on every connection while the chunks around it " +
-                    "arrive quickly — the player moves on to the next one")
-                return emptySegment()
-            }
-            if (file == null) {
-                Log.w(DIAG, "PROXY ch=$channelId SEG ${shortSeg(originalUrl)} read failed " +
-                    "after ${dlMs}ms (len=$len)")
-                return NanoHTTPD.newFixedLengthResponse(
-                    NanoHTTPD.Response.Status.SERVICE_UNAVAILABLE,
-                    "text/plain", "segment read failed",
-                )
-            }
-            val size = file.size
-            val tU = System.currentTimeMillis()
-            val ts = DisguisedSegment.unwrap(file)
-            if (ts != null) {
-                val (buf, tsLen) = ts
-                // One line per segment: how long it took to arrive and to
-                // unwrap, and its timestamp span — so a gap between two
-                // consecutive segments, or one arriving too slowly to keep
-                // up, is visible instead of guessed at.
-                val pts = DisguisedSegment.ptsRange(buf, tsLen)
-                Log.i(DIAG, "PROXY ch=$channelId SEGSTAT ${shortSeg(originalUrl)} " +
-                    "bytes=$size/$len dl=${dlMs}ms${if (retried) " retried" else ""} " +
-                    "unwrap=${System.currentTimeMillis() - tU}ms " +
-                    "ts=$tsLen pts=" + (pts?.let { "%.3f..%.3f".format(it.first / 90000.0, it.second / 90000.0) } ?: "none"))
-                pts?.let { notePts(channelId, originalUrl, it) }
-                if (!retried && dlMs < HEALTHY_SEG_MS) noteHealthy(channelId)
-                if (unwrapLogged.add(channelId)) {
-                    Log.i(
-                        DIAG,
-                        "PROXY ch=$channelId SEG was a PNG-disguised stream — " +
-                            "unwrapped $size -> $tsLen bytes of MPEG-TS",
-                    )
-                }
-                return NanoHTTPD.newFixedLengthResponse(
-                    NanoHTTPD.Response.Status.OK, "video/mp2t",
-                    java.io.ByteArrayInputStream(buf, 0, tsLen), tsLen.toLong(),
-                )
-            }
-            Log.w(DIAG, "PROXY ch=$channelId SEG is a PNG with no stream inside")
-            return NanoHTTPD.newFixedLengthResponse(
-                NanoHTTPD.Response.Status.OK, ct,
-                java.io.ByteArrayInputStream(file, 0, size), size.toLong(),
-            )
+            return serveWhole(channelId, originalUrl, segName, file, retried, segT0, len, ct)
         }
         val joined = java.io.SequenceInputStream(
             java.io.ByteArrayInputStream(head, 0, got), stream,
@@ -809,6 +766,90 @@ class LiveStreamProxy(
                 NanoHTTPD.Response.Status.OK, ct, joined,
             )
         }
+    }
+
+    /** The first try at a chunk gave nothing in time ([what]): one try on a
+     *  fresh connection, then the same rules as a chunk whose body stalls. */
+    private fun stuckChunk(
+        channelId: String, originalUrl: String, segName: String, segT0: Long, what: String,
+    ): NanoHTTPD.Response {
+        Log.w(DIAG, "PROXY ch=$channelId SEG ${shortSeg(originalUrl)} $what after " +
+            "${System.currentTimeMillis() - segT0}ms — trying a fresh connection")
+        val file = fetchFresh(channelId, originalUrl)
+        return serveWhole(channelId, originalUrl, segName, file, true, segT0, -1L, "video/mp2t")
+    }
+
+    /** A chunk read whole ([file]; null if every try failed): unwrapped if
+     *  disguised, skipped or failed if missing. */
+    private fun serveWhole(
+        channelId: String, originalUrl: String, segName: String, file: ByteArray?,
+        retried: Boolean, segT0: Long, len: Long, ct: String,
+    ): NanoHTTPD.Response {
+        val dlMs = System.currentTimeMillis() - segT0
+        // Slow on a fresh connection too: this one file is slow at the
+        // CDN (TNT Sports 3, 11:14 the same day: 100 KB/s on three
+        // connections in a row while the chunks around it came in 1-2 s;
+        // the picture froze 45 s). Waiting for it costs a freeze and
+        // then a jump of 30+ s; skipping it costs one chunk. Only when
+        // the channel's other chunks are arriving fine — on a line
+        // that is slow for everything, skipping would just play nothing.
+        // At most one a minute: skipping is for the odd bad file. When
+        // slow chunks are the norm (seen on the emulator 2026-10-17:
+        // most USA Network chunks at ~75 KB/s), skipping each one turned
+        // playback into a run of 11-second jumps; waiting lets the stall
+        // check move the viewer to a feed that downloads properly.
+        if (file == null && recentlyHealthy(channelId) && !skippedRecently(channelId)) {
+            lastSkipAt[channelId] = android.os.SystemClock.elapsedRealtime()
+            markSkippedSegment(channelId, segName)
+            Log.w(DIAG, "PROXY ch=$channelId SEG ${shortSeg(originalUrl)} SKIPPED after " +
+                "${dlMs}ms: slow on every connection while the chunks around it " +
+                "arrive quickly — the player moves on to the next one")
+            return emptySegment()
+        }
+        if (file == null) {
+            Log.w(DIAG, "PROXY ch=$channelId SEG ${shortSeg(originalUrl)} read failed " +
+                "after ${dlMs}ms (len=$len)")
+            return NanoHTTPD.newFixedLengthResponse(
+                NanoHTTPD.Response.Status.SERVICE_UNAVAILABLE,
+                "text/plain", "segment read failed",
+            )
+        }
+        val size = file.size
+        val tU = System.currentTimeMillis()
+        val png = DisguisedSegment.isPng(file, file.size)
+        val ts = if (png) DisguisedSegment.unwrap(file) else null
+        if (ts != null) {
+            val (buf, tsLen) = ts
+            // One line per segment: how long it took to arrive and to
+            // unwrap, and its timestamp span — so a gap between two
+            // consecutive segments, or one arriving too slowly to keep
+            // up, is visible instead of guessed at.
+            val pts = DisguisedSegment.ptsRange(buf, tsLen)
+            Log.i(DIAG, "PROXY ch=$channelId SEGSTAT ${shortSeg(originalUrl)} " +
+                "bytes=$size/$len dl=${dlMs}ms${if (retried) " retried" else ""} " +
+                "unwrap=${System.currentTimeMillis() - tU}ms " +
+                "ts=$tsLen pts=" + (pts?.let { "%.3f..%.3f".format(it.first / 90000.0, it.second / 90000.0) } ?: "none"))
+            pts?.let { notePts(channelId, originalUrl, it) }
+            if (!retried && dlMs < HEALTHY_SEG_MS) noteHealthy(channelId)
+            if (unwrapLogged.add(channelId)) {
+                Log.i(
+                    DIAG,
+                    "PROXY ch=$channelId SEG was a PNG-disguised stream — " +
+                        "unwrapped $size -> $tsLen bytes of MPEG-TS",
+                )
+            }
+            return NanoHTTPD.newFixedLengthResponse(
+                NanoHTTPD.Response.Status.OK, "video/mp2t",
+                java.io.ByteArrayInputStream(buf, 0, tsLen), tsLen.toLong(),
+            )
+        }
+        if (png) Log.w(DIAG, "PROXY ch=$channelId SEG is a PNG with no stream inside")
+        else Log.i(DIAG, "PROXY ch=$channelId SEGSTAT ${shortSeg(originalUrl)} " +
+            "bytes=$size dl=${dlMs}ms${if (retried) " retried" else ""} plain")
+        return NanoHTTPD.newFixedLengthResponse(
+            NanoHTTPD.Response.Status.OK, ct,
+            java.io.ByteArrayInputStream(file, 0, size), size.toLong(),
+        )
     }
 
     /**
@@ -2545,6 +2586,10 @@ class LiveStreamProxy(
         private const val SEG_SLOW_CHECK_MS: Long = 5_000L
         /** ...or when it hasn't finished this long after the request. */
         private const val SEG_BODY_BUDGET_MS: Long = 9_000L
+        /** A chunk's first try must answer and send its first bytes within
+         *  this (healthy ones: 0.2-2 s for all of a 2 MB chunk) or it is cut
+         *  off for a fresh connection. */
+        private const val SEG_FIRST_BYTES_MS: Long = 5_000L
         /** The fresh-connection retry, start to finish. With the first try
          *  this stays inside the player's 30 s wait on the proxy. */
         private const val SEG_RETRY_BUDGET_MS: Long = 7_000L
