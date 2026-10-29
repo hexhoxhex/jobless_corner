@@ -295,7 +295,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     val continueWatching: StateFlow<List<WatchHistoryEntity>> =
-        watchDao.continueWatching()
+        // Every row, not just unfinished ones: a show's card is its LATEST
+        // episode, finished or not (opening a finished one starts the next,
+        // see resumeFrom). Taking the newest unfinished row instead brought
+        // back an episode left half-watched days before the ones after it.
+        watchDao.all()
             .map { list ->
                 val deny = TastePrefs.denyLanguages()
                 // Live channel names, so a legacy live-TV row (the "Fox Usa"
@@ -317,13 +321,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     // actually there"). Same filter Repository uses for
                     // home rows — keeps the two surfaces consistent.
                     .filter { !UnavailableCatalog.isUnavailable(it.subjectId) }
-                    // Hide near-finished items. The DAO already excludes
-                    // within-20s-of-end, but a movie stopped at 92%+ is
-                    // effectively watched — showing it as "continue" is
-                    // noise. Percentage catches long films the 20 s
-                    // absolute window misses. durationMs==0 (unknown) is
-                    // kept — we can't judge it.
-                    .filter { it.durationMs <= 0 || it.progress < 0.92f }
                     // Collapse to ONE card per title. aoneroom rotates
                     // subjectIds, so the same show/film can hold several
                     // ids in history (the "two Family Guy / two Scary Movie
@@ -338,6 +335,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     // cards of one show (2026-10-15).
                     .map { it.copy(title = com.moviebox.tv.data.TitleClean.stripEpisodeLabel(it.title)) }
                     .distinctBy { com.moviebox.tv.data.TitleClean.showKey(it.title) }
+                    // A watched film is done; a series goes on with the next
+                    // episode. durationMs==0 (unknown) is kept.
+                    .filter { it.season > 0 || it.durationMs <= 0 || !it.finished }
                     .take(30)
                     .toList()
             }
@@ -1861,10 +1861,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         autoPlayFor = null
         // The billboard's "Resume S2 E4" label is drawn from this same rule,
         // so the button does what it says.
-        val resume = resumeEntryFor(historyByKey.value.values, d.subjectId, want)
+        val resume = continuePointFor(
+            historyByKey.value.values, setOfNotNull(d.subjectId, s.detailItem?.subjectId), want, d,
+        )
         if (d.isSeries && d.seasons.isNotEmpty()) {
             if (resume != null && resume.season > 0) {
-                playEpisode(resume.season, resume.episode, restoreResume = true)
+                playEpisode(resume.season, resume.episode, restoreResume = resume.resume)
             } else {
                 val first = d.seasons.firstOrNull { it.realEpisodes?.isNotEmpty() ?: (it.episodes > 0) }
                     ?: d.seasons.first()
@@ -1930,7 +1932,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             } else item.subjectId
 
             subjectId = resolvedId
-            runCatching { repo.details(resolvedId, titleHint = item.title) }
+            runCatching { detailsOrFallback(resolvedId, item) }
                 .onSuccess { d ->
                     _state.update { it.copy(details = d, detailLoading = false) }
                     autoPlayIfRequested(d)
@@ -1968,7 +1970,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (cur.details?.subjectId == item.subjectId) return
         _state.update { it.copy(detailLoading = true) }
         viewModelScope.launch {
-            runCatching { repo.details(item.subjectId, titleHint = item.title) }
+            runCatching { detailsOrFallback(item.subjectId, item) }
                 .onSuccess { d ->
                     _state.update {
                         if (it.detailItem?.subjectId == item.subjectId) {
@@ -2008,6 +2010,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         .trailerYouTubeId(d.title, d.isSeries)
                 }.getOrNull()
             if (meta == null && ytId == null) return@launch
+            // Every source is asked for the show this page shows.
+            meta?.tmdbId?.let { repo.pinTmdbIdentity(subjectId, it, meta.isTv) }
             _state.update { s ->
                 val cur = s.details
                 if (cur != null && cur.subjectId == subjectId) {
@@ -2396,6 +2400,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      *  in-app Up Next card. */
     fun playEpisode(se: Int, ep: Int, restoreResume: Boolean = false) {
         skipResumeNext = !restoreResume
+        // A reload's position belongs to the episode that was reloading.
+        pendingResumeMs = null
+        streamReloading = false
         _state.update { it.copy(currentSe = se, currentEp = ep) }
         // Mirror to RemoteController *synchronously*, before the resolve
         // coroutine runs. The PlayerScreen LaunchedEffect that used to
@@ -2412,6 +2419,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      *  saved watch-history position. Set by [playEpisode] when the caller
      *  explicitly wants a fresh start. */
     @Volatile private var skipResumeNext: Boolean = false
+
+    /** One-shot, consumed by [resolve]: when the asked-for episode isn't on
+     *  any source, try S1E1 instead. Only for an episode taken from saved
+     *  history (Continue watching, the phone remote): one the viewer picked
+     *  or advanced to must fail as itself, not start the show over. */
+    @Volatile private var firstEpisodeFallbackNext: Boolean = false
+
+    /** The resolve in flight; a newer one cancels it (see [resolve]). */
+    private var resolveJob: kotlinx.coroutines.Job? = null
+
+    /** The source that served the last stream, and for which title: the
+     *  next episode asks it first (see Repository.resolvePlayAnyProvider). */
+    private var lastServed: Pair<String, Repository.Provider>? = null
 
     fun changeQuality(label: String) { quality = label; resolve() }
     fun changeDub(name: String) { dub = name; resolve() }
@@ -2435,14 +2455,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun nextEpisode() {
         val s = _state.value
-        val seasons = s.details?.seasons ?: return
-        val se = s.currentSe ?: return
-        val ep = s.currentEp ?: return
-        val cur = seasons.firstOrNull { it.season == se } ?: return
-        val next = if (ep < cur.episodes) se to (ep + 1)
-        else seasons.getOrNull(seasons.indexOfFirst { it.season == se } + 1)
-            ?.let { it.season to 1 }
-        next?.let { playEpisode(it.first, it.second) }
+        if (!episodesKnown(s)) return
+        val d = s.details ?: return
+        // From the episode on screen: currentSe/Ep move as soon as a switch
+        // starts, so a second press mid-switch would skip one.
+        val se = s.play?.season?.takeIf { it > 0 } ?: s.currentSe ?: return
+        val ep = s.play?.episode?.takeIf { it > 0 } ?: s.currentEp ?: return
+        nextEpisodeAfter(d, se, ep)?.let { playEpisode(it.first, it.second) }
     }
 
     /** Tear down + recreate the LiveStreamProxy + drop ExoPlayer state.
@@ -2566,6 +2585,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             )
         }
         viewModelScope.launch {
+            // The phone may hand over an episode from saved history.
+            firstEpisodeFallbackNext = true
             pendingTmdbId =
                 if (subjectId.startsWith("tmdb:")) subjectId else null
             // TMDB-browsed picks need to be resolved to an aoneroom subjectId.
@@ -2816,6 +2837,48 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         resolve()
     }
 
+    /** The media [checkEpisodeLength] last looked at: each is checked once. */
+    @Volatile private var lengthChecked: String? = null
+
+    /**
+     * A series episode whose video is far longer or shorter than TMDB's
+     * runtime for that episode is the wrong video — a film, or another
+     * episode a source filed under this number. The next source is asked
+     * instead of playing it. Generous on purpose (1.8x + 5 min, half - 2
+     * min): a 22-minute episode only fails as a 45-minute-plus or
+     * 9-minute-minus video, so a true episode never gets thrown away.
+     */
+    fun checkEpisodeLength(play: PlayInfo, durationMs: Long) {
+        if (play.isLive || play.season <= 0 || play.episode <= 0 || durationMs <= 0) return
+        if (lengthChecked == play.mediaUrl) return
+        lengthChecked = play.mediaUrl
+        val s = _state.value
+        val tmdbId = s.details?.tmdbId?.takeIf { episodesKnown(s) }
+            ?: repo.tmdbKeyFor(play.providerSubjectId)?.takeIf { it.second }?.first
+            ?: return
+        viewModelScope.launch {
+            val key = "$tmdbId|${play.season}"
+            val eps = _episodeMeta.value[key]
+                ?: runCatching { repo.episodeMeta(tmdbId, play.season) }.getOrNull()
+                    ?.also { list -> _episodeMeta.update { it + (key to list) } }
+                ?: return@launch
+            val expected = eps.firstOrNull { it.number == play.episode }
+                ?.runtimeMin?.takeIf { it > 0 } ?: return@launch
+            val got = durationMs / 60_000.0
+            if (got <= expected * 1.8 + 5 && got >= expected * 0.5 - 2) return@launch
+            if (_state.value.play?.mediaUrl != play.mediaUrl) return@launch
+            android.util.Log.w(
+                "VodDiag",
+                "S${play.season}E${play.episode} from ${play.provider} runs ${got.toInt()} min, " +
+                    "TMDB says $expected — the wrong video; trying another source",
+            )
+            com.moviebox.tv.data.live.LiveStatus.note(
+                "${play.provider} sent the wrong video — trying another source…",
+            )
+            failoverProvider()
+        }
+    }
+
     /** Sources whose stream failed for the episode in [failedFor]. */
     private val failedProviders = mutableSetOf<Repository.Provider>()
     private var failedFor: String? = null
@@ -2838,9 +2901,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 )
             }
         }
-        viewModelScope.launch {
+        // One resolve at a time. Two in flight raced: at the end of S14E1 the
+        // card moved on to E2 and then, while E2 loaded, on to E3; E2's
+        // stream landed second and played under E3's name until E3's
+        // replaced it — the "plays twice" and the skipped episode
+        // (2026-10-29). The newest request wins; an older result is dropped.
+        val allowFirstEpisode = firstEpisodeFallbackNext
+        firstEpisodeFallbackNext = false
+        resolveJob?.cancel()
+        resolveJob = viewModelScope.launch {
+            val wantSubject = subjectId
             val originalSe = _state.value.currentSe
             val originalEp = _state.value.currentEp
+            var expectSe = originalSe
+            var expectEp = originalEp
             // Try the requested (se, ep) first. If it fails AND we asked
             // for something other than S1E1, retry once with S1E1 — this
             // catches "saved watch history pointed at S3 but aoneroom
@@ -2869,13 +2943,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     only = pinnedProvider,
                     exclude = if (failedFor == failoverKey()) failedProviders.toSet()
                     else emptySet(),
+                    prefer = lastServed?.takeIf { it.first == wantSubject }?.second,
                 )
             }
             var primary = attempt(originalSe, originalEp)
+            if (coroutineContext[kotlinx.coroutines.Job]?.isActive == false) return@launch
             val askedSpecificEpisode =
                 originalSe != null && originalEp != null &&
                     (originalSe != 1 || originalEp != 1)
-            if (primary.isFailure && askedSpecificEpisode) {
+            if (primary.isFailure && askedSpecificEpisode && allowFirstEpisode) {
                 android.util.Log.w(
                     "VodDiag",
                     "resolve: S${originalSe}E${originalEp} failed " +
@@ -2884,7 +2960,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         "isn't on this source",
                 )
                 val retry = attempt(1, 1)
+                if (coroutineContext[kotlinx.coroutines.Job]?.isActive == false) return@launch
                 if (retry.isSuccess) {
+                    expectSe = 1
+                    expectEp = 1
                     // Update state so the player UI reflects the actual
                     // episode being served + future history saves key on it.
                     _state.update {
@@ -2899,8 +2978,21 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
             primary.onSuccess { p ->
+                if (subjectId != wantSubject || _state.value.currentSe != expectSe ||
+                    _state.value.currentEp != expectEp
+                ) {
+                    android.util.Log.w(
+                        "VodDiag",
+                        "dropped a late stream for S${expectSe}E$expectEp — " +
+                            "now on S${_state.value.currentSe}E${_state.value.currentEp}",
+                    )
+                    slowHint.cancel()
+                    return@onSuccess
+                }
                 pendingTmdbId = null
                 quality = p.selected
+                Repository.Provider.entries.firstOrNull { it.label == p.provider }
+                    ?.let { lastServed = wantSubject to it }
                 val key = WatchHistoryEntity.keyOf(
                     subjectId, _state.value.currentSe, _state.value.currentEp,
                 )
@@ -2950,6 +3042,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 )
             }.onFailure { e ->
                 slowHint.cancel()
+                // Another request took over: its own result decides.
+                if (subjectId != wantSubject || _state.value.currentSe != expectSe ||
+                    _state.value.currentEp != expectEp
+                ) return@onFailure
                 // Always release the reload guard, or a failed re-resolve
                 // would block every later recovery attempt.
                 streamReloading = false
@@ -3087,8 +3183,27 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 details = it.details?.takeIf { d -> d.subjectId == h.subjectId },
             )
         }
+        // The card is the show's latest episode. Finished: the episode after
+        // it plays, from the show's list (never a guess past a season's
+        // end); with no list, the show's page so the viewer picks.
+        if (h.season > 0 && h.finished) {
+            _state.update { it.copy(screen = Screen.PLAYER, play = null, playLoading = true, error = null) }
+            viewModelScope.launch {
+                val known = ensureEpisodeList()
+                if (_state.value.detailItem?.subjectId != h.subjectId) return@launch
+                val next = _state.value.details?.takeIf { known }
+                    ?.let { nextEpisodeAfter(it, h.season, h.episode) }
+                if (next != null) {
+                    playEpisode(next.first, next.second)
+                } else {
+                    _state.update { it.copy(screen = Screen.DETAIL, playLoading = false) }
+                }
+            }
+            return
+        }
         // Load details too so autoplay-next works for series.
         if (h.season > 0) viewModelScope.launch { ensureEpisodeList() }
+        firstEpisodeFallbackNext = true
         resolve()
     }
 
@@ -3114,28 +3229,49 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 if (_state.value.detailItem?.subjectId != item.subjectId) return false
                 _state.update { it.copy(details = d) }
                 enumerateEpisodesInBackground(item.subjectId, d)
+                fetchMetadataInBackground(d)
                 return true
             }
             kotlinx.coroutines.delay(attempt * 3_000L)
         }
-        // The source won't say: TMDB knows how many episodes each season has.
-        val title = com.moviebox.tv.data.TitleClean.showTitle(item.title)
-        val seasons = runCatching { repo.tmdbSeasonsByTitle(title, item.year) }.getOrDefault(emptyList())
-        if (seasons.isNotEmpty() && _state.value.detailItem?.subjectId == item.subjectId) {
-            android.util.Log.i("VodDiag", "episode list for '$title' from TMDB (${seasons.size} seasons)")
-            _state.update {
-                it.copy(
-                    details = Details(
-                        subjectId = item.subjectId, title = item.title, type = item.type,
-                        description = "", year = item.year, isSeries = true,
-                        seasons = seasons, dubs = emptyList(),
-                    ),
-                )
-            }
-            return true
+        val d = detailsFallback(item.subjectId, item)
+        if (d.seasons.isEmpty() || _state.value.detailItem?.subjectId != item.subjectId) {
+            android.util.Log.w("VodDiag", "episode list for '${item.title}' could not be loaded")
+            return false
         }
-        android.util.Log.w("VodDiag", "episode list for '${item.title}' could not be loaded")
-        return false
+        _state.update { it.copy(details = d) }
+        fetchMetadataInBackground(d)
+        return true
+    }
+
+    /** True for the empty stand-in [Repository.details] returns when the
+     *  source refused (no title; for a series, no seasons). */
+    private fun isStandIn(d: Details, item: Item): Boolean =
+        d.title.isBlank() || (item.isSeries && d.seasons.isEmpty())
+
+    /** Details for [item] when the source won't give them: its own title and
+     *  year (so TMDB fills the description and pictures, see
+     *  [fetchMetadataInBackground]) and, for a series, TMDB's seasons and
+     *  episode counts. */
+    private suspend fun detailsFallback(subjectId: String, item: Item): Details {
+        val title = com.moviebox.tv.data.TitleClean.showTitle(item.title)
+        val seasons = if (item.isSeries) {
+            runCatching { repo.tmdbSeasonsByTitle(title, item.year) }.getOrDefault(emptyList())
+        } else emptyList()
+        android.util.Log.i(
+            "VodDiag", "details for '$title' from TMDB (source refused; ${seasons.size} seasons)",
+        )
+        return Details(
+            subjectId = subjectId, title = item.title, type = item.type,
+            description = "", year = item.year, isSeries = item.isSeries,
+            seasons = seasons, dubs = emptyList(),
+        )
+    }
+
+    /** [Repository.details], with [detailsFallback] in place of the stand-in. */
+    private suspend fun detailsOrFallback(subjectId: String, item: Item): Details {
+        val d = repo.details(subjectId, titleHint = item.title)
+        return if (isStandIn(d, item)) detailsFallback(subjectId, item) else d
     }
 
     // -- downloads ---------------------------------------------------------
@@ -3256,17 +3392,65 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 /** The history row billboard Play resumes: the newest unfinished one past
  *  30 s for this title, matched by id or title (source ids rotate). The
  *  billboard's label is drawn from the same rule. */
-internal fun resumeEntryFor(
+/** Where a show or film picks up: the episode the viewer touched LAST —
+ *  resumed when unfinished, else the one after it ([resume] false).
+ *
+ *  The old rule took the newest UNFINISHED row, so once the viewer finished
+ *  S14E3 the Resume button, the billboard and Continue watching all reached
+ *  back to an S13E2 left half-watched days earlier (2026-10-29). */
+internal data class ContinuePoint(
+    val season: Int,
+    val episode: Int,
+    /** Resume this episode at its saved spot; false = start it fresh. */
+    val resume: Boolean,
+    val minutesLeft: Int?,
+)
+
+/** [details] must be this title's (or null): the episode after a finished
+ *  one comes from its list, or is the next number when there's no list. */
+internal fun continuePointFor(
     history: Collection<WatchHistoryEntity>,
-    subjectId: String,
+    subjectIds: Set<String>,
     title: String,
-): WatchHistoryEntity? {
-    val norm = { t: String -> t.trim().lowercase().replace(Regex("[^a-z0-9]+"), "") }
-    val want = norm(title)
-    return history
-        .filter { it.subjectId == subjectId || norm(it.title) == want }
-        .filter { !it.finished && it.positionMs > 30_000 }
-        .maxByOrNull { it.updatedAt }
+    details: Details?,
+): ContinuePoint? {
+    val key = com.moviebox.tv.data.TitleClean.showKey(title)
+    val latest = history
+        .filter {
+            it.subjectId in subjectIds ||
+                (key.isNotEmpty() && com.moviebox.tv.data.TitleClean.showKey(it.title) == key)
+        }
+        .maxByOrNull { it.updatedAt } ?: return null
+    val left = if (latest.durationMs > 0 && latest.positionMs > 30_000) {
+        ((latest.durationMs - latest.positionMs) / 60_000L).toInt().coerceAtLeast(1)
+    } else null
+    if (latest.season <= 0) {
+        return if (latest.finished || latest.positionMs <= 30_000) null
+        else ContinuePoint(0, 0, true, left)
+    }
+    if (!latest.finished) return ContinuePoint(latest.season, latest.episode, true, left)
+    val next = if (details != null && details.seasons.isNotEmpty()) {
+        nextEpisodeAfter(details, latest.season, latest.episode) ?: return null
+    } else latest.season to latest.episode + 1
+    return ContinuePoint(next.first, next.second, false, null)
+}
+
+/** The episode after S[se]E[ep] in [d]'s list, skipping episodes the
+ *  source is known to lack; null after the last one. */
+internal fun nextEpisodeAfter(d: Details, se: Int, ep: Int): Pair<Int, Int>? {
+    val flat = buildList {
+        for (s in d.seasons.sortedBy { it.season }) {
+            val eps = s.realEpisodes ?: (1..s.episodes).toList()
+            for (e in eps) {
+                if (com.moviebox.tv.data.MissingEpisodeCatalog.isPresent(d.subjectId, s.season, e)) {
+                    add(s.season to e)
+                }
+            }
+        }
+    }
+    val idx = flat.indexOf(se to ep)
+    return if (idx >= 0) flat.getOrNull(idx + 1)
+    else flat.firstOrNull { (s, e) -> s > se || (s == se && e > ep) }
 }
 
 /** True when [state] holds the episode list of the title it is on: details

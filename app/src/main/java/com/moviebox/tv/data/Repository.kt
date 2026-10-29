@@ -702,6 +702,10 @@ class Repository(
          *  failover walks on down the list instead of handing back the same
          *  dead link. Ignored when [only] is set (an explicit pick). */
         exclude: Set<Provider> = emptySet(),
+        /** The source that played the previous episode of this show in this
+         *  session: asked first, so a run of episodes stays on one source's
+         *  numbering (two sources can number a season differently). */
+        prefer: Provider? = null,
     ): PlayInfo {
         // A provider that served this title before goes first. Without this
         // every episode re-walks the whole chain — Malcolm in the Middle
@@ -721,7 +725,7 @@ class Repository(
         // counted as MovieBox's, so MovieBox went first whatever the config
         // said and the configured order never applied to most titles.
         val keyed = Provider.of(subjectId).takeIf { it != Provider.AONEROOM }
-        val first = only ?: remembered ?: keyed
+        val first = only ?: remembered ?: prefer?.takeIf { it !in exclude } ?: keyed
         // Remote config decides which providers are live and in what order —
         // a source that dies is a published file edit, not an app release.
         // Falls back to the built-in list if the config is absent or bad.
@@ -785,7 +789,7 @@ class Repository(
             }
             val id = runCatching {
                 kotlinx.coroutines.withTimeoutOrNull(LOOKUP_TIMEOUT_MS) {
-                    idForProvider(p, subjectId, title, year, isSeries)
+                    idForProvider(p, subjectId, title, year, isSeries, season)
                 }
             }.getOrNull() ?: continue
             com.moviebox.tv.data.live.LiveStatus.note("Loading from ${p.label}…")
@@ -829,27 +833,58 @@ class Repository(
      *  that provider (TMDB id for VixSrc, catalogue search for the others). */
     private suspend fun idForProvider(
         p: Provider, subjectId: String, title: String, year: Int?, isSeries: Boolean,
+        season: Int?,
     ): String? {
         if (Provider.of(subjectId) == p) return subjectId
         if (title.isBlank()) return null
+        // The TMDB-keyed sources get the show's TMDB identity: its own id when
+        // the item carries one, else the one pinned for it (the detail page's
+        // confident match, or the first match made by name). Matching by name
+        // on every episode could land on a same-named show.
+        suspend fun keyed(prefix: String) =
+            tmdbIdentityFor(subjectId, title, year, isSeries)?.let { (id, isTv) ->
+                "$prefix${if (isTv) "tv" else "movie"}:$id"
+            }
         return when (p) {
-            Provider.VIXSRC -> tmdb.matchId(title, year, isSeries)?.let { (id, isTv) ->
-                "${com.moviebox.tv.net.VixSrc.PREFIX}${if (isTv) "tv" else "movie"}:$id"
-            }
-            Provider.SEVENMOVIES -> tmdb.matchId(title, year, isSeries)?.let { (id, isTv) ->
-                "${com.moviebox.tv.net.SevenMovies.PREFIX}${if (isTv) "tv" else "movie"}:$id"
-            }
-            Provider.VIDNEST -> tmdb.matchId(title, year, isSeries)?.let { (id, isTv) ->
-                "${com.moviebox.tv.net.VidNest.PREFIX}${if (isTv) "tv" else "movie"}:$id"
-            }
-            Provider.ICEFY -> tmdb.matchId(title, year, isSeries)?.let { (id, isTv) ->
-                "${com.moviebox.tv.net.Icefy.PREFIX}${if (isTv) "tv" else "movie"}:$id"
-            }
-            Provider.FOURKHDHUB -> com.moviebox.tv.net.FourKHdHub.search(title)
-                .firstOrNull { titleMatches(it.title, title) }?.subjectId
+            Provider.VIXSRC -> keyed(com.moviebox.tv.net.VixSrc.PREFIX)
+            Provider.SEVENMOVIES -> keyed(com.moviebox.tv.net.SevenMovies.PREFIX)
+            Provider.VIDNEST -> keyed(com.moviebox.tv.net.VidNest.PREFIX)
+            Provider.ICEFY -> keyed(com.moviebox.tv.net.Icefy.PREFIX)
+            // A series only from a series page, by the same show name — the
+            // loose name match took "Family Guy" for any Family Guy special.
+            Provider.FOURKHDHUB -> com.moviebox.tv.net.FourKHdHub.search(title).firstOrNull {
+                if (isSeries || season != null) {
+                    "-series-" in it.subjectId &&
+                        TitleClean.showKey(it.title) == TitleClean.showKey(title)
+                } else titleMatches(it.title, title)
+            }?.subjectId
             Provider.AONEROOM -> resolveByTitle(title, year, isSeries)?.subjectId
         }
     }
+
+    /** TMDB identity per catalogue id, pinned for the session. */
+    private val tmdbIdentity = java.util.concurrent.ConcurrentHashMap<String, Pair<Int, Boolean>>()
+
+    /** Pin [subjectId]'s TMDB identity — the detail page's confident match. */
+    fun pinTmdbIdentity(subjectId: String, tmdbId: Int, isTv: Boolean) {
+        tmdbIdentity[subjectId] = tmdbId to isTv
+    }
+
+    /** The TMDB id a play of [subjectId] goes by: the id inside a TMDB-keyed
+     *  subject, the pinned one, or a match by name (then pinned, so every
+     *  episode of the session asks for the same show). */
+    private suspend fun tmdbIdentityFor(
+        subjectId: String, title: String, year: Int?, isSeries: Boolean,
+    ): Pair<Int, Boolean>? {
+        tmdbKeyOf(subjectId)?.let { return it }
+        tmdbIdentity[subjectId]?.let { return it }
+        val match = tmdb.matchId(title, year, isSeries) ?: return null
+        tmdbIdentity[subjectId] = match
+        return match
+    }
+
+    /** The TMDB id inside a TMDB-keyed subject ("7m:tv:1434"), or null. */
+    fun tmdbKeyFor(subjectId: String): Pair<Int, Boolean>? = tmdbKeyOf(subjectId)
 
     /** (tmdbId, isTv) for any TMDB-keyed subjectId — the browse form
      *  `tmdb:tv:123` and the provider forms `vn:tv:123` / `ice:movie:9`

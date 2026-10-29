@@ -111,12 +111,14 @@ private val Glass = Color(0x24F2F5F8)
 
 private const val SAFE_START = 56
 
-/** Where "Resume" picks up: the newest unfinished history row for this
- *  title (matched by id OR title, since aoneroom rotates subject ids). */
+/** Where "Resume" picks up: see [continuePointFor] — the episode watched
+ *  last, or the one after it once that is finished. */
 private data class ResumePoint(
     val season: Int,
     val episode: Int,
     val minutesLeft: Int?,
+    /** Resume [episode] where it stopped; false = start it (the next one). */
+    val resume: Boolean,
 )
 
 private fun resumePoint(
@@ -124,21 +126,10 @@ private fun resumePoint(
     item: Item,
     details: Details?,
 ): ResumePoint? {
-    val ids = setOfNotNull(item.subjectId, details?.subjectId)
-    val norm = item.title.trim().lowercase().replace(Regex("[^a-z0-9]+"), "")
-    val row = history.asSequence()
-        .filter {
-            it.subjectId in ids ||
-                it.title.trim().lowercase().replace(Regex("[^a-z0-9]+"), "") == norm
-        }
-        .filter { !it.finished && it.positionMs > 30_000 }
-        .filter { it.durationMs <= 0 || it.progress < 0.92f }
-        .maxByOrNull { it.updatedAt }
-        ?: return null
-    val left = if (row.durationMs > 0) {
-        ((row.durationMs - row.positionMs) / 60_000L).toInt().coerceAtLeast(1)
-    } else null
-    return ResumePoint(row.season, row.episode, left)
+    val cp = continuePointFor(
+        history, setOfNotNull(item.subjectId, details?.subjectId), item.title, details,
+    ) ?: return null
+    return ResumePoint(cp.season, cp.episode, cp.minutesLeft, cp.resume)
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -160,7 +151,7 @@ fun TvDetailScreen(state: UiState, vm: MainViewModel) {
         if (state.details == null && !state.detailLoading) vm.ensureDetails(item)
     }
 
-    val resume = remember(history, item.subjectId, d?.subjectId) {
+    val resume = remember(history, item.subjectId, d) {
         resumePoint(history.values, item, d)
     }
 
@@ -359,7 +350,7 @@ private fun Header(
                 modifier = Modifier.focusRequester(primaryFocus),
                 onClick = primary.onClick,
             )
-            if (resume != null && state.availability != Availability.UNAVAILABLE) {
+            if (resume != null && resume.resume && state.availability != Availability.UNAVAILABLE) {
                 PillButton("Start over", Icons.Rounded.Replay) {
                     if (isSeries) vm.playEpisode(resume.season, resume.episode, restoreResume = false)
                     else vm.playMovieFromStart()
@@ -401,9 +392,13 @@ private fun primaryAction(
             PrimaryAction("Not available — pick from search", Icons.Rounded.Search, false) {
                 vm.pickFromSearch()
             }
-        resume != null && isSeries && resume.season > 0 ->
+        resume != null && isSeries && resume.season > 0 && resume.resume ->
             PrimaryAction("Resume S${resume.season} E${resume.episode}$left", Icons.Rounded.PlayArrow, false) {
                 vm.playEpisode(resume.season, resume.episode, restoreResume = true)
+            }
+        resume != null && isSeries && resume.season > 0 ->
+            PrimaryAction("Play S${resume.season} E${resume.episode}", Icons.Rounded.PlayArrow, false) {
+                vm.playEpisode(resume.season, resume.episode, restoreResume = false)
             }
         resume != null && !isSeries ->
             PrimaryAction("Resume$left", Icons.Rounded.PlayArrow, false) { vm.playMovie() }

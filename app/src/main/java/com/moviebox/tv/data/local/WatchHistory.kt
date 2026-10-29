@@ -34,9 +34,11 @@ data class WatchHistoryEntity(
         get() = if (durationMs > 0)
             (positionMs.toFloat() / durationMs).coerceIn(0f, 1f) else 0f
 
-    /** Considered finished when within 20s of the end. */
+    /** Considered finished within 20 s of the end or past 92%: an episode
+     *  left in its closing credits showed "1 min left" and was offered for
+     *  resume ahead of the episodes after it (2026-10-29). */
     val finished: Boolean
-        get() = durationMs > 0 && positionMs >= durationMs - 20_000
+        get() = durationMs > 0 && (positionMs >= durationMs - 20_000 || progress >= 0.92f)
 
     companion object {
         fun keyOf(subjectId: String, season: Int?, episode: Int?): String =

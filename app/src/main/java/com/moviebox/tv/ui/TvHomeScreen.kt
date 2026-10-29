@@ -528,11 +528,12 @@ private fun Billboard(
             ) {
                 // Says what OK will do: the rule Play itself resumes by.
                 val resume = remember(hero, history) {
-                    resumeEntryFor(history, hero.item.subjectId, hero.item.title)
+                    continuePointFor(history, setOf(hero.item.subjectId), hero.item.title, null)
                 }
                 val playLabel = when {
                     resume == null -> "Play"
-                    resume.season > 0 -> "Resume S${resume.season} E${resume.episode}"
+                    resume.season > 0 && resume.resume -> "Resume S${resume.season} E${resume.episode}"
+                    resume.season > 0 -> "Play S${resume.season} E${resume.episode}"
                     else -> "Resume"
                 }
                 PillButton(

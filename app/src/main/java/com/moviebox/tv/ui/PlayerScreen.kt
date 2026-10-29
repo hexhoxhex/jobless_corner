@@ -296,9 +296,19 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
     // episode ever followed on by itself again.
     var creditsDismissed by remember(play?.mediaUrl) { mutableStateOf(false) }
     var endDismissed by remember(play?.mediaUrl) { mutableStateOf(false) }
+    // Set once this episode hands over to the next one: the card goes and
+    // can't fire again. It used to stay up while the next episode loaded,
+    // re-aimed at the episode after that, and fired a second time.
+    var advanced by remember(play?.mediaUrl) { mutableStateOf(false) }
+    // Once the length is known: far off the episode's runtime means the
+    // source sent the wrong video (see MainViewModel.checkEpisodeLength).
+    LaunchedEffect(play?.mediaUrl, durationMs > 0) {
+        val p = play
+        if (p != null && durationMs > 0) vm.checkEpisodeLength(p, durationMs)
+    }
     val creditsCountdown = inCredits && !creditsDismissed
-    val endish = (nearEnd && !creditsDismissed) || creditsCountdown ||
-        (contentEnded && !endDismissed)
+    val endish = !advanced && ((nearEnd && !creditsDismissed) || creditsCountdown ||
+        (contentEnded && !endDismissed))
     val nextPick = recommendations.firstOrNull {
         it.subjectId != state.detailItem?.subjectId
     }
@@ -1361,11 +1371,14 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                 // as finished, or Continue watching would offer it again
                 // (the credits start before the "finished" mark).
                 val advance = {
-                    val p = play
-                    if (p != null && durationMs > 0) {
-                        vm.saveProgress(durationMs, durationMs, p.season, p.episode)
+                    if (!advanced) {
+                        advanced = true
+                        val p = play
+                        if (p != null && durationMs > 0) {
+                            vm.saveProgress(durationMs, durationMs, p.season, p.episode)
+                        }
+                        vm.playEpisode(upNext.first, upNext.second)
                     }
-                    vm.playEpisode(upNext.first, upNext.second)
                 }
                 var counter by remember(upNext, counting) {
                     mutableStateOf(AUTO_ADVANCE_SECONDS)
@@ -1420,13 +1433,13 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                         kotlinx.coroutines.delay(1_000)
                         counter -= 1
                     }
-                    vm.openItem(nextPick)
+                    if (!advanced) { advanced = true; vm.openItem(nextPick) }
                 }
                 UpNextItemCard(
                     title = nextPick.title,
                     coverUrl = nextPick.coverUrl,
                     secondsRemaining = if (counting) counter else null,
-                    onPlayNow = { vm.openItem(nextPick) },
+                    onPlayNow = { if (!advanced) { advanced = true; vm.openItem(nextPick) } },
                     // This title only: autoplay stays on for the next one.
                     onDismiss = { endDismissed = true },
                 )
@@ -1678,30 +1691,12 @@ private const val SKIP_BUTTON_WINDOW_MS: Long = 40_000L
  *  cross-season jump (e.g. Family Guy S2 last episode → S3E1) fall out
  *  naturally and never lands on a phantom episode. */
 private fun nextEpisodeFor(state: UiState): Pair<Int, Int>? {
-    val seasons = state.details?.seasons ?: return null
-    val se = state.currentSe ?: return null
-    val ep = state.currentEp ?: return null
-    val subjectId = state.details.subjectId
-
-    val flat = buildList {
-        for (s in seasons.sortedBy { it.season }) {
-            val eps = s.realEpisodes ?: (1..s.episodes).toList()
-            for (e in eps) {
-                if (com.moviebox.tv.data.MissingEpisodeCatalog
-                        .isPresent(subjectId, s.season, e)
-                ) add(s.season to e)
-            }
-        }
-    }
-    val idx = flat.indexOf(se to ep)
-    return if (idx >= 0) {
-        flat.getOrNull(idx + 1)
-    } else {
-        // Current episode isn't in the list (it may itself have been
-        // filtered, or details are mid-refresh). Best effort: the first
-        // tuple that sorts after it.
-        flat.firstOrNull { (s, e) -> s > se || (s == se && e > ep) }
-    }
+    val d = state.details ?: return null
+    // The episode on screen, not currentSe/Ep: those move the moment a
+    // switch starts, while this player is still showing the old episode.
+    val se = state.play?.season?.takeIf { it > 0 } ?: state.currentSe ?: return null
+    val ep = state.play?.episode?.takeIf { it > 0 } ?: state.currentEp ?: return null
+    return nextEpisodeAfter(d, se, ep)
 }
 
 @Composable
