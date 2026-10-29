@@ -3219,6 +3219,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     suspend fun ensureEpisodeList(): Boolean {
         val item = _state.value.detailItem ?: return false
         if (episodesKnown(_state.value)) return true
+        // This show's list is in hand but lacks the episode playing.
+        _state.value.details
+            ?.takeIf { it.subjectId == item.subjectId && it.title.isNotBlank() && it.seasons.isNotEmpty() }
+            ?.let { return adoptEpisodeList(withTmdbSeasons(it, item), item) }
         for (attempt in 1..3) {
             // A refused details call doesn't throw: it comes back as an empty
             // stand-in (no title, no seasons), which read as "no episode
@@ -3230,7 +3234,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 _state.update { it.copy(details = d) }
                 enumerateEpisodesInBackground(item.subjectId, d)
                 fetchMetadataInBackground(d)
-                return true
+                if (episodesKnown(_state.value)) return true
+                return adoptEpisodeList(withTmdbSeasons(d, item), item)
             }
             kotlinx.coroutines.delay(attempt * 3_000L)
         }
@@ -3241,7 +3246,48 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
         _state.update { it.copy(details = d) }
         fetchMetadataInBackground(d)
-        return true
+        return episodesKnown(_state.value)
+    }
+
+    /**
+     * [d] with TMDB's seasons when it lacks the episode playing: the seasons
+     * it doesn't have are added, and the playing season is TMDB's. A source's
+     * list can be a fragment of the show (MovieBox's "Futurama" is season 14
+     * alone) while the episode plays from a TMDB-keyed source. Unchanged when
+     * TMDB doesn't have the episode either: no list then, rather than a guess.
+     */
+    private suspend fun withTmdbSeasons(d: Details, item: Item): Details {
+        val s = _state.value
+        val se = s.play?.season?.takeIf { it > 0 } ?: s.currentSe ?: return d
+        val ep = s.play?.episode?.takeIf { it > 0 } ?: s.currentEp ?: return d
+        if (listsEpisode(d, se, ep)) return d
+        val tmdb = runCatching {
+            repo.tmdbSeasonsFor(
+                item.subjectId, com.moviebox.tv.data.TitleClean.showTitle(item.title), item.year,
+            )
+        }.getOrDefault(emptyList())
+        val playing = tmdb.firstOrNull { it.season == se }?.takeIf { ep <= it.episodes }
+        if (playing == null) {
+            android.util.Log.w(
+                "VodDiag", "'${item.title}' S${se}E$ep is in neither the source's episode list nor TMDB's",
+            )
+            return d
+        }
+        val own = d.seasons.associateBy { it.season }
+        val merged = (own.keys + tmdb.map { it.season }).sorted().map { n ->
+            if (n == se) playing else own[n] ?: tmdb.first { it.season == n }
+        }
+        android.util.Log.i(
+            "VodDiag", "'${item.title}': source lists seasons ${own.keys.sorted()} " +
+                "without S${se}E$ep; using TMDB's seasons too (${merged.size})",
+        )
+        return d.copy(seasons = merged)
+    }
+
+    private fun adoptEpisodeList(d: Details, item: Item): Boolean {
+        if (_state.value.detailItem?.subjectId != item.subjectId) return false
+        _state.update { it.copy(details = d) }
+        return episodesKnown(_state.value)
     }
 
     /** True for the empty stand-in [Repository.details] returns when the
@@ -3429,7 +3475,7 @@ internal fun continuePointFor(
         else ContinuePoint(0, 0, true, left)
     }
     if (!latest.finished) return ContinuePoint(latest.season, latest.episode, true, left)
-    val next = if (details != null && details.seasons.isNotEmpty()) {
+    val next = if (details != null && listsEpisode(details, latest.season, latest.episode)) {
         nextEpisodeAfter(details, latest.season, latest.episode) ?: return null
     } else latest.season to latest.episode + 1
     return ContinuePoint(next.first, next.second, false, null)
@@ -3453,6 +3499,14 @@ internal fun nextEpisodeAfter(d: Details, se: Int, ep: Int): Pair<Int, Int>? {
     else flat.firstOrNull { (s, e) -> s > se || (s == se && e > ep) }
 }
 
+/** True when [d]'s list has S[se]E[ep]. MovieBox's "Futurama" lists only
+ *  season 14 (3 episodes); S1E9 played from 7Movies was followed by S14E1
+ *  (2026-10-29). A list without the episode playing can't say what's next. */
+internal fun listsEpisode(d: Details, se: Int, ep: Int): Boolean {
+    val s = d.seasons.firstOrNull { it.season == se } ?: return false
+    return ep <= (s.realEpisodes?.maxOrNull() ?: s.episodes)
+}
+
 /** True when [state] holds the episode list of the title it is on: details
  *  for the same subject, or for the same show by name (a MovieBox copy of a
  *  title picked elsewhere). A previous title's list doesn't count. */
@@ -3462,6 +3516,9 @@ internal fun episodesKnown(state: UiState): Boolean {
     // The empty stand-in a refused details call returns knows nothing; nor
     // does a list with no seasons while an episode is playing.
     if (d.title.isBlank() || (state.currentSe != null && d.seasons.isEmpty())) return false
+    val se = state.play?.season?.takeIf { it > 0 } ?: state.currentSe
+    val ep = state.play?.episode?.takeIf { it > 0 } ?: state.currentEp
+    if (se != null && se > 0 && ep != null && ep > 0 && !listsEpisode(d, se, ep)) return false
     return d.subjectId == item.subjectId ||
         com.moviebox.tv.data.TitleClean.showKey(d.title) ==
         com.moviebox.tv.data.TitleClean.showKey(item.title)

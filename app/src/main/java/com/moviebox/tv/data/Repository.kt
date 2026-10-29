@@ -987,6 +987,17 @@ class Repository(
         }
     }
 
+    /** A series' seasons and episode counts from TMDB, for the TMDB identity
+     *  its plays go by ([tmdbIdentityFor]). Empty when no match. */
+    suspend fun tmdbSeasonsFor(subjectId: String, title: String, year: Int?): List<SeasonInfo> {
+        val (id, isTv) = runCatching { tmdbIdentityFor(subjectId, title, year, true) }.getOrNull()
+            ?: return emptyList()
+        if (!isTv) return emptyList()
+        return tmdb.seasonsOf(id).map { (se, n) ->
+            SeasonInfo(season = se, episodes = n, resolutions = emptyList())
+        }
+    }
+
     /** Loose title equality for cross-provider matching — provider titles carry
      *  their own decorations ("S1-S5", "[English]", release tags). */
     private fun titleMatches(a: String, b: String): Boolean {
