@@ -641,35 +641,58 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun backfillHistoryCovers() {
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             val rows = runCatching { watchDao.allOnce() }.getOrNull() ?: return@launch
+            // Covers this backfill used to get wrong: it took MovieBox's top
+            // search hit whatever its title, and a row from another source
+            // (a "7m:" id never matches a MovieBox one) got another show's
+            // poster for good — American Dad showed Rick and Morty, Bob's
+            // Burgers The Cleveland Show (2026-10-29). Such a row has a
+            // MovieBox image on a non-MovieBox id; looked up again once.
+            val prefs = getApplication<android.app.Application>()
+                .getSharedPreferences("migrations", android.content.Context.MODE_PRIVATE)
+            val repair = !prefs.getBoolean("history_covers_v2", false)
+            val suspect = if (!repair) emptyList() else rows.filter { r ->
+                !r.subjectId.all(Char::isDigit) && r.coverUrl.orEmpty().contains("aoneroom.com")
+            }
             // First pass: pre-populate knownCovers from rows that ALREADY have
             // a cover. That way /api/history's in-process fallback can serve
             // posters for the missing rows immediately, even before the async
             // search-backfill below finishes.
             rows.forEach { r ->
+                if (r in suspect) return@forEach
                 r.coverUrl?.takeIf { it.isNotBlank() }?.let { knownCovers[r.subjectId] = it }
             }
-            val missing = rows.filter { it.coverUrl.isNullOrBlank() && it.title.isNotBlank() }
-            if (missing.isEmpty()) return@launch
-            android.util.Log.i(
+            val missing = rows.filter { it.coverUrl.isNullOrBlank() && it.title.isNotBlank() } +
+                suspect
+            if (missing.isNotEmpty()) android.util.Log.i(
                 "VodDiag",
-                "backfillHistoryCovers: ${missing.size} rows missing covers",
+                "backfillHistoryCovers: ${missing.size} rows missing covers " +
+                    "(${suspect.size} to look up again)",
             )
             for (row in missing.take(50)) {  // hard cap so a huge history can't hammer the API
                 runCatching {
-                    val items = com.moviebox.tv.net.H5Api.search(row.title, perPage = 5)
-                    // Prefer an exact subjectId match, then a year match, then the top hit.
-                    val pick = items.firstOrNull { it.subjectId == row.subjectId }
-                        ?: items.firstOrNull { row.year != null && it.year == row.year }
-                        ?: items.firstOrNull()
-                    val cover = pick?.coverUrl?.takeIf { it.isNotBlank() }
-                    if (cover != null) {
-                        knownCovers[row.subjectId] = cover
-                        watchDao.upsert(row.copy(coverUrl = cover))
-                    }
+                    val cover = historyCoverFor(row)
+                    if (cover != null) knownCovers[row.subjectId] = cover
+                    else knownCovers.remove(row.subjectId)
+                    if (cover != null || row in suspect) watchDao.upsert(row.copy(coverUrl = cover))
                 }
                 kotlinx.coroutines.delay(80)  // gentle, don't burst the H5 search rate limit
             }
+            if (repair) prefs.edit().putBoolean("history_covers_v2", true).apply()
         }
+    }
+
+    /** The poster for a history row: TMDB's own for a TMDB-keyed id, else a
+     *  MovieBox search hit that IS this title (same id, or the same show
+     *  name) — never just the top hit. Null when nothing matches. */
+    private suspend fun historyCoverFor(row: WatchHistoryEntity): String? {
+        repo.tmdbPosterFor(row.subjectId)?.let { return it }
+        val items = com.moviebox.tv.net.H5Api.search(row.title, perPage = 5)
+        val key = com.moviebox.tv.data.TitleClean.showKey(row.title)
+        val same = items.filter { com.moviebox.tv.data.TitleClean.showKey(it.title) == key }
+        val pick = items.firstOrNull { it.subjectId == row.subjectId }
+            ?: same.firstOrNull { row.year != null && it.year == row.year }
+            ?: same.firstOrNull()
+        return pick?.coverUrl?.takeIf { it.isNotBlank() }
     }
 
     fun loadHome() {
@@ -3059,19 +3082,60 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 ),
                 currentSe = h.season.takeIf { it > 0 },
                 currentEp = h.episode.takeIf { it > 0 },
+                // Another title's episode list must not stand in for this
+                // one's (see episodesKnown).
+                details = it.details?.takeIf { d -> d.subjectId == h.subjectId },
             )
         }
         // Load details too so autoplay-next works for series.
-        if (h.season > 0) {
-            viewModelScope.launch {
-                runCatching { repo.details(h.subjectId, titleHint = h.title) }
-                    .onSuccess { d ->
-                        _state.update { it.copy(details = d) }
-                        enumerateEpisodesInBackground(h.subjectId, d)
-                    }
-            }
-        }
+        if (h.season > 0) viewModelScope.launch { ensureEpisodeList() }
         resolve()
+    }
+
+    /**
+     * Load the playing series' episode list if it isn't in hand, asking
+     * again a couple of times: true once it is.
+     *
+     * Resuming Family Guy from Continue watching (2026-10-29) asked once,
+     * while MovieBox was rejecting the session token, and gave up quietly.
+     * With no list the player took S13E14 for the last episode and offered
+     * the top recommendation — American Dad — as "Watch next".
+     */
+    suspend fun ensureEpisodeList(): Boolean {
+        val item = _state.value.detailItem ?: return false
+        if (episodesKnown(_state.value)) return true
+        for (attempt in 1..3) {
+            // A refused details call doesn't throw: it comes back as an empty
+            // stand-in (no title, no seasons), which read as "no episode
+            // after this one". Only a real list counts.
+            val d = runCatching { repo.details(item.subjectId, titleHint = item.title) }.getOrNull()
+                ?.takeIf { it.title.isNotBlank() && it.seasons.isNotEmpty() }
+            if (d != null) {
+                if (_state.value.detailItem?.subjectId != item.subjectId) return false
+                _state.update { it.copy(details = d) }
+                enumerateEpisodesInBackground(item.subjectId, d)
+                return true
+            }
+            kotlinx.coroutines.delay(attempt * 3_000L)
+        }
+        // The source won't say: TMDB knows how many episodes each season has.
+        val title = com.moviebox.tv.data.TitleClean.showTitle(item.title)
+        val seasons = runCatching { repo.tmdbSeasonsByTitle(title, item.year) }.getOrDefault(emptyList())
+        if (seasons.isNotEmpty() && _state.value.detailItem?.subjectId == item.subjectId) {
+            android.util.Log.i("VodDiag", "episode list for '$title' from TMDB (${seasons.size} seasons)")
+            _state.update {
+                it.copy(
+                    details = Details(
+                        subjectId = item.subjectId, title = item.title, type = item.type,
+                        description = "", year = item.year, isSeries = true,
+                        seasons = seasons, dubs = emptyList(),
+                    ),
+                )
+            }
+            return true
+        }
+        android.util.Log.w("VodDiag", "episode list for '${item.title}' could not be loaded")
+        return false
     }
 
     // -- downloads ---------------------------------------------------------
@@ -3203,4 +3267,18 @@ internal fun resumeEntryFor(
         .filter { it.subjectId == subjectId || norm(it.title) == want }
         .filter { !it.finished && it.positionMs > 30_000 }
         .maxByOrNull { it.updatedAt }
+}
+
+/** True when [state] holds the episode list of the title it is on: details
+ *  for the same subject, or for the same show by name (a MovieBox copy of a
+ *  title picked elsewhere). A previous title's list doesn't count. */
+internal fun episodesKnown(state: UiState): Boolean {
+    val d = state.details ?: return false
+    val item = state.detailItem ?: return false
+    // The empty stand-in a refused details call returns knows nothing; nor
+    // does a list with no seasons while an episode is playing.
+    if (d.title.isBlank() || (state.currentSe != null && d.seasons.isEmpty())) return false
+    return d.subjectId == item.subjectId ||
+        com.moviebox.tv.data.TitleClean.showKey(d.title) ==
+        com.moviebox.tv.data.TitleClean.showKey(item.title)
 }

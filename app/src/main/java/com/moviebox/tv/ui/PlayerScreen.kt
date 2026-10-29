@@ -275,7 +275,11 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
     // buttons instead of seeking the movie — otherwise the buttons are
     // unreachable (the user's "remote only fast-forwards/rewinds, can't
     // pick Next or Cancel" complaint). Reused by the rendering below.
-    val upNext = nextEpisodeFor(state)
+    // The episode list of THIS show. Without it "no next episode" means
+    // only "don't know": treating that as the end of the series offered
+    // another show as Watch next in the middle of Family Guy (2026-10-29).
+    val listKnown = episodesKnown(state)
+    val upNext = if (listKnown) nextEpisodeFor(state) else null
     val nearEnd = play != null && !play.isLive && durationMs > 0 &&
         positionMs >= (durationMs - SKIP_BUTTON_WINDOW_MS)
     // The closing song / "thank you for watching" part of an episode:
@@ -300,7 +304,8 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
     }
     val showUpNext = endish && state.currentSe != null && upNext != null
     val endOfContent = endish && state.currentSe == null && play?.isLive == false
-    val endOfSeries = endish && state.currentSe != null && upNext == null
+    val endOfSeries = endish && state.currentSe != null && upNext == null && listKnown
+    val episodesUnknown = endish && state.currentSe != null && !listKnown
     val upNextCardVisible = showUpNext ||
         ((endOfContent || endOfSeries) && nextPick != null)
     // Mirror overlay visibility to the singleton MainActivity's
@@ -1432,6 +1437,15 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
         if ((endOfContent || endOfSeries) && nextPick == null) {
             LaunchedEffect(contentEnded) {
                 if (contentEnded && state.autoplayNext) vm.back()
+            }
+        }
+        // A series episode near its end with the show's episode list not
+        // in hand: fetch it, and the Up Next card appears once it's in. If
+        // it can't be had, the details page at the real end — never another
+        // show.
+        if (episodesUnknown) {
+            LaunchedEffect(contentEnded) {
+                if (!vm.ensureEpisodeList() && contentEnded && state.autoplayNext) vm.back()
             }
         }
     }

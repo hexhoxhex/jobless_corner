@@ -932,6 +932,26 @@ class Repository(
                 runCatching { tmdb.matchId(it, year, isSeries) }.getOrNull()
             }
 
+    /** TMDB's poster for a TMDB-keyed subject ("7m:tv:1433"); null for any
+     *  other id or when TMDB can't be reached. */
+    suspend fun tmdbPosterFor(subjectId: String): String? {
+        val (id, isSeries) = tmdbKeyOf(subjectId) ?: return null
+        return runCatching {
+            com.moviebox.tv.data.tmdb.TmdbRepository.poster(tmdb.details(id, isSeries).posterPath, "w500")
+        }.getOrNull()
+    }
+
+    /** A series' seasons and episode counts from TMDB, found by name — for
+     *  when the source's own details can't be had. Empty when no match. */
+    suspend fun tmdbSeasonsByTitle(title: String, year: Int?): List<SeasonInfo> {
+        val (id, isTv) = runCatching { tmdb.matchId(title, year, true) }.getOrNull()
+            ?: return emptyList()
+        if (!isTv) return emptyList()
+        return tmdb.seasonsOf(id).map { (se, n) ->
+            SeasonInfo(season = se, episodes = n, resolutions = emptyList())
+        }
+    }
+
     /** Loose title equality for cross-provider matching — provider titles carry
      *  their own decorations ("S1-S5", "[English]", release tags). */
     private fun titleMatches(a: String, b: String): Boolean {
