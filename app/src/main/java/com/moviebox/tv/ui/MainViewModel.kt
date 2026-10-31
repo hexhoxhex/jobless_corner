@@ -3021,10 +3021,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     failoverProvider()
                     return@onSuccess
                 }
+                // A watched episode starts over: The Vampire Diaries S4E15,
+                // picked from the list with its spot saved 21 s from the
+                // end, played the credits and rolled on to S4E16 (2026-10-31).
                 val resume = when {
                     reloadAt != null -> reloadAt
                     skipNow -> 0L
-                    else -> watchDao.positionOf(key) ?: 0L
+                    else -> watchDao.entryOf(key)?.takeUnless { it.finished }?.positionMs ?: 0L
                 }
                 skipResumeNext = false
                 android.util.Log.i(

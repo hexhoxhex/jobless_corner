@@ -72,6 +72,9 @@ interface WatchHistoryDao {
     @Query("SELECT positionMs FROM watch_history WHERE key = :key")
     suspend fun positionOf(key: String): Long?
 
+    @Query("SELECT * FROM watch_history WHERE key = :key")
+    suspend fun entryOf(key: String): WatchHistoryEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(entity: WatchHistoryEntity)
 
