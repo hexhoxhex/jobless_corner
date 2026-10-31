@@ -186,6 +186,11 @@ fun TvHomeScreen(state: UiState, vm: MainViewModel) {
     var lastKeyAt by remember { mutableLongStateOf(SystemClock.uptimeMillis()) }
     val nowSec by produceState(System.currentTimeMillis() / 1000) {
         while (true) {
+            // The schedule reloaded only on app start and Live-tab opens, so
+            // a TV left on Home kept the morning's schedule — and its Live
+            // now row — all day (2026-10-31: the corrected Bundesliga games
+            // never reached it). No-op while the last load is under 10 min old.
+            vm.loadLiveIfStale()
             delay(60_000)
             value = System.currentTimeMillis() / 1000
         }

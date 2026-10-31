@@ -85,6 +85,15 @@ object LeagueCatalog {
         )),
     )
 
+    /**
+     * Not the men's game the built-in headings name. Women's football and
+     * futsal share the competition names — "Italy - Serie A (women)", "UEFA
+     * Futsal Champions League" — and on 2026-10-31 filled the Serie A and
+     * Champions League headings with games nobody looking there wanted.
+     * The viewer's own leagues are exempt: they may be exactly these.
+     */
+    private val NOT_BUILT_IN = Regex("\\bwomen|femenin|frauen|futsal")
+
     @Volatile private var custom: List<League> = emptyList()
     @Volatile private var loaded = false
 
@@ -176,9 +185,10 @@ object LeagueCatalog {
         ensureLoaded()
         val comp = normalise(competition)
         if (comp.isEmpty()) return null
-        return (custom + BUILT_IN).firstOrNull { league ->
+        fun List<League>.match() = firstOrNull { league ->
             league.patterns.any { it.isNotBlank() && comp.contains(it) }
         }
+        return custom.match() ?: BUILT_IN.takeUnless { NOT_BUILT_IN.containsMatchIn(comp) }?.match()
     }
 
     /**
