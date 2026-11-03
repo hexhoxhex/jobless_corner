@@ -497,6 +497,9 @@ object RemoteController {
     /** Probe a feed's health without disturbing what is playing. */
     suspend fun probeChannel(channelId: String) = vm?.probeChannel(channelId)
 
+    /** Diagnostics: the same measurement of a given playlist. */
+    fun probeMaster(channelId: String, master: String) = vm?.probeMaster(channelId, master)
+
     fun liveSchedule(): List<ScheduleEvent> =
         vm?.state?.value?.liveSchedule ?: emptyList()
 

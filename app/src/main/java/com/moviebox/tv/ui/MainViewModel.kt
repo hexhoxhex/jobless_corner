@@ -1494,6 +1494,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** Measure a feed without touching playback. See LiveStreamProxy.probe. */
     suspend fun probeChannel(channelId: String) = liveProxy.probe(channelId)
 
+    /** Diagnostics: the same measurement of a given playlist. */
+    fun probeMaster(channelId: String, master: String) = liveProxy.probeUrl(channelId, master)
+
     /** Channels carrying the same fixture as [channelId]. */
     fun siblingFeeds(channelId: String): Map<String, String> =
         com.moviebox.tv.data.live.FeedRanker.siblingsOf(

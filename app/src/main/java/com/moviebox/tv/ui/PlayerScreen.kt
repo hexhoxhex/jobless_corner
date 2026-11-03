@@ -2326,9 +2326,8 @@ private fun VideoPlayer(
         // fresh handshake more often than the browser does).
         val httpFactory = if (isLive) {
             // 30 s read: the proxy sends nothing until a disguised chunk is
-            // whole, and it may spend up to ~16 s on one (a stalled
-            // connection, then a fresh one). Giving up sooner only made the
-            // player ask again and fetch the same chunk twice.
+            // whole, and it may spend up to 26 s on one (a stalled connection,
+            // then pieces). Giving up sooner only made the player ask again.
             val ok = okhttp3.OkHttpClient.Builder()
                 .protocols(listOf(okhttp3.Protocol.HTTP_1_1))
                 .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)

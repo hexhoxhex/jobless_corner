@@ -1077,6 +1077,56 @@ class RemoteServer(
                 }
             }
 
+            // Measure one feed now, as ranking and auto-switch would. Playback
+            // isn't touched. fresh=1 measures hosts again instead of reusing a
+            // reading; url= measures that playlist instead of a channel's.
+            uri == "/api/debug/probe" && method == Method.POST -> {
+                if (!RemoteAccess.isSuperuser(dev)) {
+                    newFixedLengthResponse(
+                        Response.Status.FORBIDDEN, "application/json",
+                        "{\"error\":\"Superuser only\"}",
+                    )
+                } else {
+                    com.moviebox.tv.data.live.LiveStreamProxy.debugProbeFresh = p("fresh") == "1"
+                    val r = kotlinx.coroutines.runBlocking {
+                        val url = p("url").orEmpty()
+                        if (url.isBlank()) RemoteController.probeChannel(p("id").orEmpty())
+                        else RemoteController.probeMaster(p("id").orEmpty(), url)
+                    }
+                    com.moviebox.tv.data.live.LiveStreamProxy.debugProbeFresh = false
+                    json(
+                        JSONObject()
+                            .put("ok", r?.ok ?: false)
+                            .put("kbps", r?.throughputKbps ?: 0)
+                            .put("needs_kbps", r?.declaredKbps ?: 0)
+                            .put("headroom", (r?.headroom ?: 0f).toDouble())
+                            .put("chunk_hosts", r?.chunkHosts.orEmpty())
+                            .put("note", r?.note.orEmpty())
+                            .toString()
+                    )
+                }
+            }
+
+            // How live chunks from a slow host are fetched: connections and
+            // piece size, to compare on the TV. conns=0 is one connection only;
+            // slow=<host> treats that host as slow from now on (empty clears it).
+            uri == "/api/debug/pieces" && method == Method.POST -> {
+                if (!RemoteAccess.isSuperuser(dev)) {
+                    newFixedLengthResponse(
+                        Response.Status.FORBIDDEN, "application/json",
+                        "{\"error\":\"Superuser only\"}",
+                    )
+                } else {
+                    val pieces = com.moviebox.tv.data.live.ChunkPieces
+                    p("conns")?.toIntOrNull()?.let { pieces.connections = it.coerceIn(0, 64) }
+                    p("kb")?.toIntOrNull()?.let { pieces.pieceBytes = it.coerceIn(16, 1024) * 1024 }
+                    p("slow")?.let {
+                        com.moviebox.tv.data.live.LiveStreamProxy.debugSlowHost = it.ifBlank { null }
+                    }
+                    ok()
+                }
+            }
+
             // Skip the next chunk of a live channel, to test that playback
             // carries on past a chunk the proxy gave up on.
             uri == "/api/debug/skipchunk" && method == Method.POST -> {
@@ -1153,6 +1203,7 @@ class RemoteServer(
                             .put("declared_kbps", r.declaredKbps)
                             .put("headroom", String.format("%.2f", r.headroom).toDouble())
                             .put("host", r.host)
+                            .put("chunk_hosts", r.chunkHosts)
                             .put("note", r.note)
                             .put("lag_s", r.sourceLagSec)
                     }

@@ -277,6 +277,8 @@ class LiveStreamProxy(
          *  source that has stalled or fallen behind shows it here
          *  (beIN Sports MENA English 1: 209 s on 2026-10-17). */
         val sourceLagSec: Int = -1,
+        /** The CDN hosts its chunks are on. */
+        val chunkHosts: String = "",
     ) {
         /** Achieved throughput over required bitrate. Below ~1.3 the feed
          *  has no margin and will bleed its buffer under any hiccup. */
@@ -297,9 +299,10 @@ class LiveStreamProxy(
      *    the serving cache, or the rotation state.
      *  - It must not steal the bandwidth it is measuring. Pulling a full
      *    13 Mbps probe stream would starve the very playback we are trying
-     *    to protect. So we read at most [PROBE_BYTES] or [PROBE_MS] of ONE
-     *    segment and abort — enough to measure rate, small enough to be
-     *    background noise.
+     *    to protect. So during playback we go by the chunks it has fetched
+     *    anyway, and only read at most [PROBE_BYTES] or [PROBE_MS] from a host
+     *    it isn't using: enough to measure rate, small enough to be background
+     *    noise. A whole chunk is fetched only when nothing is playing.
      */
     suspend fun probe(channelId: String): ProbeResult {
         val t0 = System.currentTimeMillis()
@@ -316,8 +319,8 @@ class LiveStreamProxy(
         return probeUrl(channelId, master, t0)
     }
 
-    /** Measure the stream at [master] (see [probe]): a playlist round trip
-     *  and part of its newest segment. Also used to rate backup routes. */
+    /** Measure the stream at [master] (see [probe]): a playlist round trip and
+     *  how its chunks would fetch, host by host. Also used to rate backup routes. */
     fun probeUrl(
         channelId: String,
         master: String,
@@ -349,55 +352,50 @@ class LiveStreamProxy(
             )
         }
 
-        // Newest segment = the one playback would actually be pulling.
-        val segRel = plBody.lineSequence()
-            .map { it.trim() }
-            .filter { it.isNotEmpty() && !it.startsWith("#") }
-            .lastOrNull()
-            ?: return ProbeResult(
+        // Every chunk listed. They are shared out between CDN hosts and the
+        // player loads them in order, so what a feed costs is the sum over all
+        // of them. Reading just the newest one made the score depend on which
+        // host it landed on, and counted the wait for the first byte against a
+        // 512 KB read, which capped the score below what a heavy feed needs.
+        // Measured against real fetches on the TV (2026-11-03): 39 of 50 probes
+        // of 5 healthy feeds fell under the 1.3 bar. Sky Sports Main Event
+        // scored 0.17-2.6 while it really fetched at 1.85x, so auto-switch
+        // nearly always reported "no better feed".
+        val chunks = listedChunks(plBody, innerUrl)
+        if (chunks.isEmpty()) {
+            return ProbeResult(
                 channelId, false, playlistMs, 0, declaredKbps, host,
                 "no segments listed",
             )
-        // Duration of that newest segment, from the #EXTINF just before it.
-        val segDurationSec = plBody.lineSequence()
-            .map { it.trim() }
-            .filter { it.startsWith("#EXTINF:") }
-            .lastOrNull()
-            ?.removePrefix("#EXTINF:")?.substringBefore(',')?.toDoubleOrNull()
-            ?: 0.0
-        val segUrl = if (segRel.startsWith("http")) segRel else {
-            innerUrl.substringBeforeLast('/') + "/" + segRel
         }
-
-        var bytes = 0L
-        var segLength = -1L
-        val tSeg = System.currentTimeMillis()
-        val fetched = runCatching {
-            clientFor(segUrl).newCall(buildCdnRequest(segUrl).build())
-                .execute().use { r ->
-                    if (!r.isSuccessful) return@use false
-                    segLength = r.body?.contentLength() ?: -1L
-                    val stream = r.body?.byteStream() ?: return@use false
-                    val buf = ByteArray(16 * 1024)
-                    while (true) {
-                        val n = stream.read(buf)
-                        if (n <= 0) break
-                        bytes += n
-                        if (bytes >= PROBE_BYTES) break
-                        if (System.currentTimeMillis() - tSeg > PROBE_MS) break
-                    }
-                    true
-                }
-        }.getOrDefault(false)
-        val segMs = (System.currentTimeMillis() - tSeg).coerceAtLeast(1)
-
-        if (!fetched || bytes <= 0) {
-            return ProbeResult(
-                channelId, false, playlistMs, 0, declaredKbps, host,
-                "segment failed",
-            )
+        val byHost = chunks.groupBy { hostOf(it.first) }
+        val chunkHosts = byHost.keys.joinToString(",") { it.substringBefore('.') }
+        val speeds = HashMap<String, ChunkSpeed>()
+        var sampledBytes = 0L
+        var sampledSec = 0.0
+        for ((chunkHost, listed) in byHost) {
+            // The oldest listed on this host: the proxy holds the player
+            // about 30 s behind live, so that's where it would be reading.
+            val (url, sec) = listed.first()
+            val head = chunkHead(url)
+            val speed = speedOf(chunkHost, url, head)
+                ?: return ProbeResult(
+                    channelId, false, playlistMs, 0, declaredKbps, host,
+                    "segment failed on ${chunkHost.substringBefore('.')}",
+                    chunkHosts = chunkHosts,
+                )
+            speeds[chunkHost] = speed
+            val size = head?.size ?: speed.sampleSize
+            if (size > 0 && sec > 0.5) {
+                sampledBytes += size
+                sampledSec += sec
+            }
         }
-        val kbps = ((bytes * 8L) / segMs).toInt()  // bytes/ms*8 == kbit/s
+        val bytesPerSec = if (sampledSec > 0) sampledBytes / sampledSec else declaredKbps * 1000.0 / 8
+        val videoMs = chunks.sumOf { it.second } * 1000
+        val fetchMs = chunks.sumOf { (url, sec) ->
+            speeds.getValue(hostOf(url)).msFor(bytesPerSec * sec)
+        }.coerceAtLeast(1.0)
         // No declared bitrate? Work out what the feed really needs from the
         // segment itself: its full size over its duration.
         //
@@ -409,11 +407,11 @@ class LiveStreamProxy(
         // the 6 probed feeds were usable. Content-Length is the size of the
         // whole segment (measured: 4734780 B for a 10.0 s cdnlivetv segment =
         // 3788 kbps required), so this is the real requirement, not a guess.
-        val requiredKbps = if (declaredKbps > 0) declaredKbps
-            else if (segLength > 0 && segDurationSec > 0.5) {
-                ((segLength * 8.0) / 1000.0 / segDurationSec).toInt()
-            } else 0
+        val requiredKbps = if (declaredKbps > 0) declaredKbps else (bytesPerSec * 8 / 1000).toInt()
         val how = if (declaredKbps > 0) "declared" else if (requiredKbps > 0) "from segment" else "unknown"
+        // What it can be fetched at, so that headroom comes out as seconds of
+        // video per second of fetching.
+        val kbps = (requiredKbps * videoMs / fetchMs).toInt()
         // The newest chunk's end by the playlist's own clock.
         var pdtSec: Double? = null
         var lastEnd: Double? = null
@@ -431,11 +429,193 @@ class LiveStreamProxy(
         val lagSec = lastEnd?.let { (System.currentTimeMillis() / 1000.0 - it).toInt() } ?: -1
         return ProbeResult(
             channelId, true, playlistMs, kbps, requiredKbps, host,
-            "measured ${bytes / 1024}KB in ${segMs}ms, needs ${requiredKbps}kbps ($how)" +
+            "${(videoMs / 1000).toInt()}s of video in ${(fetchMs / 1000).toInt()}s, " +
+                speeds.entries.joinToString { (h, s) -> "${h.substringBefore('.')}: ${s.how}" } +
+                ", needs ${requiredKbps}kbps ($how)" +
                 (if (lagSec >= 0) ", ${lagSec}s behind live" else ""),
             sourceLagSec = lagSec,
+            chunkHosts = chunkHosts,
         )
     }
+
+    /** Every chunk in a media playlist, oldest first, with its seconds. */
+    private fun listedChunks(playlist: String, playlistUrl: String): List<Pair<String, Double>> {
+        val out = ArrayList<Pair<String, Double>>()
+        var seconds = 0.0
+        for (raw in playlist.lineSequence()) {
+            val line = raw.trim()
+            when {
+                line.startsWith("#EXTINF:") ->
+                    seconds = line.removePrefix("#EXTINF:").substringBefore(',').toDoubleOrNull() ?: 0.0
+                line.isEmpty() || line.startsWith("#") -> Unit
+                else -> {
+                    val url = if (line.startsWith("http")) line else {
+                        playlistUrl.substringBeforeLast('/') + "/" + line
+                    }
+                    out += url to seconds
+                    seconds = 0.0
+                }
+            }
+        }
+        return out
+    }
+
+    /** What fetching a chunk from one host costs, in ms for a size in bytes. */
+    private class ChunkSpeed(
+        val how: String,
+        /** Whole size of the chunk measured; -1 if not known here. */
+        val sampleSize: Long,
+        val msFor: (Double) -> Double,
+    ) {
+        val at = android.os.SystemClock.elapsedRealtime()
+    }
+
+    /** One chunk really fetched, unwrapped and ready. */
+    private class Fetched(val at: Long, val bytes: Long, val ms: Long, val pieces: Boolean)
+
+    /**
+     * Chunks really fetched lately, per host: the best guide there is to what
+     * the next one will cost, at no cost at all. A short sample can't stand in
+     * for them. Measured on the TV (2026-11-03): four pieces came back in 53 ms,
+     * making a 5 MB chunk look instant when it took 1-3 s, and the same four on
+     * p19 took 1.2-8 s minutes apart, so scores swung fivefold and passed a feed
+     * that really fetched at 1.1x.
+     */
+    private val fetched = ConcurrentHashMap<String, ArrayDeque<Fetched>>()
+
+    private fun noteFetched(host: String, bytes: Long, ms: Long, pieces: Boolean) {
+        val q = fetched.getOrPut(host) { ArrayDeque() }
+        synchronized(q) {
+            q.addLast(Fetched(android.os.SystemClock.elapsedRealtime(), bytes, ms, pieces))
+            while (q.size > FETCHED_KEEP) q.removeFirst()
+        }
+    }
+
+    /** Pieces take as many rounds of [ChunkPieces.connections] as they need,
+     *  and a round lasts about as long as its slowest piece. One connection
+     *  is simply size over rate. */
+    private fun realSpeed(host: String): ChunkSpeed? {
+        val q = fetched[host] ?: return null
+        val now = android.os.SystemClock.elapsedRealtime()
+        val recent = synchronized(q) { q.filter { now - it.at < FETCHED_FRESH_MS } }
+        val last = recent.lastOrNull() ?: return null
+        val same = recent.filter { it.pieces == last.pieces }
+        if (last.pieces) {
+            val piece = ChunkPieces.pieceBytes.toDouble()
+            val connections = ChunkPieces.connections.coerceAtLeast(1)
+            fun rounds(bytes: Double) = kotlin.math.ceil(bytes / piece / connections).coerceAtLeast(1.0)
+            val round = same.map { it.ms / rounds(it.bytes.toDouble()) }.average()
+            return ChunkSpeed("${same.size} chunks in pieces, ${round.toInt()}ms a round", -1) { size ->
+                rounds(size) * round
+            }
+        }
+        val perMs = same.sumOf { it.bytes }.toDouble() / same.sumOf { it.ms }.coerceAtLeast(1)
+        return ChunkSpeed("${same.size} chunks at ${perMs.toInt()} KB/s", -1) { size -> size / perMs }
+    }
+
+    /** Short reads, for a host no chunk has come from lately. Hosts are shared
+     *  by every feed on them, so one serves them all for [HOST_SPEED_KEEP_MS]. */
+    private val hostSpeeds = ConcurrentHashMap<String, ChunkSpeed>()
+
+    /** When the player last asked for a chunk: it is using the line. */
+    @Volatile private var chunkAskedAt = 0L
+
+    private fun playingNow(): Boolean =
+        chunkAskedAt != 0L && android.os.SystemClock.elapsedRealtime() - chunkAskedAt < PLAYING_WITHIN_MS
+
+    /** Size and kind of a chunk, for the price of 8 bytes. */
+    private class ChunkHead(val size: Long, val disguised: Boolean)
+
+    private fun chunkHead(url: String): ChunkHead? = runCatching {
+        piecesClient.newCall(buildCdnRequest(url).header("Range", "bytes=0-7").build())
+            .execute().use { r ->
+                if (r.code != 206) return@use null
+                val size = r.header("Content-Range")?.substringAfterLast('/')?.toLongOrNull()
+                    ?: return@use null
+                val first = r.body?.bytes() ?: return@use null
+                ChunkHead(size, DisguisedSegment.isPng(first, first.size))
+            }
+    }.getOrNull()
+
+    /**
+     * What chunks cost from [host]. Recent real chunks if there are any, which
+     * during playback there nearly always are. With nothing playing there is no
+     * viewer to steal from, so fetch one whole chunk, the way playback would.
+     * Otherwise a short read: a host playback isn't using, while it's using the
+     * line.
+     */
+    private fun speedOf(host: String, url: String, head: ChunkHead?): ChunkSpeed? {
+        if (debugProbeFresh) {
+            fetched.remove(host)
+            hostSpeeds.remove(host)
+        }
+        realSpeed(host)?.let { return it }
+        hostSpeeds[host]?.takeIf {
+            android.os.SystemClock.elapsedRealtime() - it.at < HOST_SPEED_KEEP_MS
+        }?.let { return it }
+        if (head?.disguised == true && !playingNow()) {
+            fetchWholeChunk(host, url)
+            realSpeed(host)?.let { return it }
+        }
+        return oneConnectionSpeed(url)?.also { hostSpeeds[host] = it }
+    }
+
+    /** One disguised chunk, by the same rules as [handleSegment]: 5 s on one
+     *  connection, then pieces, remembering the host if it needed them. */
+    private fun fetchWholeChunk(host: String, url: String) {
+        val piecesOn = ChunkPieces.connections > 0
+        if (!piecesOn || (host !in slowHosts && host != debugSlowHost)) {
+            val t0 = System.currentTimeMillis()
+            val call = clientFor(url).newCall(buildCdnRequest(url).build())
+            val cut = segWatchdog.schedule({ runCatching { call.cancel() } }, HEALTHY_SEG_MS, TimeUnit.MILLISECONDS)
+            val file = runCatching {
+                call.execute().use { r -> if (r.isSuccessful) r.body?.bytes() else null }
+            }.getOrNull()
+            cut.cancel(false)
+            val ms = System.currentTimeMillis() - t0
+            if (file != null) {
+                noteFetched(host, file.size.toLong(), ms, false)
+                return
+            }
+            if (!piecesOn || ms < HEALTHY_SEG_MS) return
+            noteSlowHost(host)
+        }
+        val job = ChunkPieces(SPEED_TEST, url, piecesClient) { buildCdnRequest(it) }
+        val t0 = System.currentTimeMillis()
+        job.start()
+        job.await(PIECES_WAIT_MS)
+        val file = job.take()
+        job.cancel()
+        if (file != null) noteFetched(host, file.size.toLong(), System.currentTimeMillis() - t0, true)
+    }
+
+    /** A short read on one connection. The wait for the first byte is kept
+     *  apart from the rate: a chunk pays it once, whatever its size. */
+    private fun oneConnectionSpeed(url: String): ChunkSpeed? = runCatching {
+        val t0 = System.currentTimeMillis()
+        clientFor(url).newCall(buildCdnRequest(url).build()).execute().use { r ->
+            if (!r.isSuccessful) return@use null
+            val firstByteMs = System.currentTimeMillis() - t0
+            val body = r.body ?: return@use null
+            val stream = body.byteStream()
+            val buf = ByteArray(16 * 1024)
+            var bytes = 0L
+            while (true) {
+                val n = stream.read(buf)
+                if (n <= 0) break
+                bytes += n
+                if (bytes >= PROBE_BYTES) break
+                if (System.currentTimeMillis() - t0 > PROBE_MS) break
+            }
+            if (bytes <= 0) return@use null
+            val bodyMs = (System.currentTimeMillis() - t0 - firstByteMs).coerceAtLeast(1)
+            val perMs = bytes.toDouble() / bodyMs
+            ChunkSpeed(
+                "one connection, ${firstByteMs}ms then ${perMs.toInt()} KB/s",
+                body.contentLength(),
+            ) { size -> firstByteMs + size / perMs }
+        }
+    }.getOrNull()
 
     /**
      * Resolve [channelId] straight into the serving cache and return the
@@ -588,6 +768,23 @@ class LiveStreamProxy(
         }
 
         val segT0 = System.currentTimeMillis()
+        chunkAskedAt = android.os.SystemClock.elapsedRealtime()
+        noteAsked(channelId, originalUrl)
+        // A host known to be slow on one connection goes straight to pieces:
+        // the first try would only spend 5 s finding that out again. If the
+        // host refuses instead, the usual handling below deals with it.
+        val chunkHost = hostOf(originalUrl)
+        if ((chunkHost in slowHosts || chunkHost == debugSlowHost) &&
+            ChunkPieces.connections > 0 && chunkHost != debugBlockedHost
+        ) {
+            val job = fetchInPieces(channelId, originalUrl, segName, segT0)
+            if (!job.refused) {
+                return serveWhole(
+                    channelId, originalUrl, segName, job.take(), false, segT0, -1L,
+                    job.contentType, pieces = true,
+                )
+            }
+        }
         // The first try gets [SEG_FIRST_BYTES_MS] to answer and send its
         // first bytes, then it is cut off and a fresh connection tries.
         // Waiting out the socket's 15 s instead froze El Clasico on
@@ -745,13 +942,24 @@ class LiveStreamProxy(
             // TNT Sports 3, 2026-10-15: one 7 MB chunk took 64 s on a stuck
             // connection while playlist fetches on others answered in
             // 0.23 s; the picture froze for 31 s and recovery skipped 35 s
-            // of the match. A fresh connection fetches it in 1-2 s.
+            // of the match. A fresh connection fetches it in 1-2 s, and pieces
+            // are fresh connections too: they cover that case and the host
+            // that is simply slow, which a second lone connection can't help.
             var retried = false
+            var pieces = false
             if (file == null) {
                 retried = true
-                file = fetchFresh(channelId, lastUrl)
+                if (ChunkPieces.connections > 0) {
+                    noteSlowHost(hostOf(lastUrl))
+                    pieces = true
+                    file = fetchInPieces(channelId, lastUrl, segName, segT0).take()
+                } else {
+                    file = fetchFresh(channelId, lastUrl)
+                }
             }
-            return serveWhole(channelId, originalUrl, segName, file, retried, segT0, len, ct)
+            return serveWhole(
+                channelId, originalUrl, segName, file, retried, segT0, len, ct, pieces,
+            )
         }
         val joined = java.io.SequenceInputStream(
             java.io.ByteArrayInputStream(head, 0, got), stream,
@@ -775,15 +983,87 @@ class LiveStreamProxy(
     ): NanoHTTPD.Response {
         Log.w(DIAG, "PROXY ch=$channelId SEG ${shortSeg(originalUrl)} $what after " +
             "${System.currentTimeMillis() - segT0}ms — trying a fresh connection")
-        val file = fetchFresh(channelId, originalUrl)
-        return serveWhole(channelId, originalUrl, segName, file, true, segT0, -1L, "video/mp2t")
+        var file = fetchFresh(channelId, originalUrl)
+        var pieces = false
+        // Silent, then too slow on a second connection as well. Time is left
+        // before the player gives up: the host may just be slow. Only a host
+        // of disguised chunks is marked for it: those are read whole anyway,
+        // and plain ones are better streamed straight through to the player.
+        if (file == null && ChunkPieces.connections > 0) {
+            pieces = true
+            file = fetchInPieces(channelId, originalUrl, segName, segT0).take()
+            if (file != null && DisguisedSegment.isPng(file, file.size)) {
+                noteSlowHost(hostOf(originalUrl))
+            }
+        }
+        return serveWhole(
+            channelId, originalUrl, segName, file, true, segT0, -1L, "video/mp2t", pieces,
+        )
     }
+
+    /** Hosts that have been too slow on one connection. Kept for as long as
+     *  the app runs: pieces cost nothing noticeable on a host that recovers,
+     *  and finding out again costs 5 s of an empty buffer. */
+    private val slowHosts: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    private fun noteSlowHost(host: String) {
+        if (slowHosts.add(host)) {
+            Log.w(DIAG, "PROXY $host is too slow on one connection — its chunks come in pieces from now on")
+        }
+    }
+
+    /** Chunks being fetched in pieces, by name. The player waits [PIECES_WAIT_MS]
+     *  at most; if it asks again it finds the same download further along. */
+    private val pieceJobs = ConcurrentHashMap<String, ChunkPieces>()
+
+    /** For [ChunkPieces]: its connections stay open between chunks, one chunk
+     *  from a host arriving every 10 s or so, and a single stalled request
+     *  loses little, because another connection asks for that piece again. */
+    private val piecesClient: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(5, TimeUnit.SECONDS)
+        .callTimeout(8, TimeUnit.SECONDS)
+        .connectionPool(okhttp3.ConnectionPool(32, 30, TimeUnit.SECONDS))
+        .protocols(listOf(okhttp3.Protocol.HTTP_1_1))
+        .build()
+
+    /**
+     * Fetch a chunk in pieces, waiting until the player's patience is nearly up.
+     * Finished or not, the job comes back; take() gives null when the chunk
+     * isn't there yet, and if it is still coming, the next ask picks it up.
+     */
+    private fun fetchInPieces(
+        channelId: String, url: String, segName: String, askedAt: Long,
+    ): ChunkPieces {
+        // Leaving a channel stops what it was fetching, which would otherwise
+        // compete with the new channel's chunks on the same slow route.
+        pieceJobs.entries.removeAll { (_, other) ->
+            (other.channelId != channelId).also { if (it) other.cancel() }
+        }
+        val fresh = ChunkPieces(channelId, url, piecesClient) { buildCdnRequest(it) }
+        val running = pieceJobs.putIfAbsent(segName, fresh)
+        val job = running ?: fresh.also {
+            it.start()
+            segWatchdog.schedule(
+                { if (pieceJobs.remove(segName, it)) it.cancel() },
+                PIECES_KEEP_MS, TimeUnit.MILLISECONDS,
+            )
+        }
+        val wait = (PIECES_WAIT_MS - (System.currentTimeMillis() - askedAt)).coerceAtLeast(1_000L)
+        val done = job.await(wait)
+        if (done) pieceJobs.remove(segName, job)
+        Log.i(DIAG, "PROXY ch=$channelId SEG ${shortSeg(url)} ${shortHost(url)} " +
+            "${if (done) "in pieces" else "pieces still coming"}: ${job.describe()}")
+        return job
+    }
+
+    private fun shortHost(url: String): String = hostOf(url).substringBefore('.')
 
     /** A chunk read whole ([file]; null if every try failed): unwrapped if
      *  disguised, skipped or failed if missing. */
     private fun serveWhole(
         channelId: String, originalUrl: String, segName: String, file: ByteArray?,
-        retried: Boolean, segT0: Long, len: Long, ct: String,
+        retried: Boolean, segT0: Long, len: Long, ct: String, pieces: Boolean = false,
     ): NanoHTTPD.Response {
         val dlMs = System.currentTimeMillis() - segT0
         // Slow on a fresh connection too: this one file is slow at the
@@ -798,9 +1078,11 @@ class LiveStreamProxy(
         // most USA Network chunks at ~75 KB/s), skipping each one turned
         // playback into a run of 11-second jumps; waiting lets the stall
         // check move the viewer to a feed that downloads properly.
+        if (file == null) fetched.remove(hostOf(originalUrl))
         if (file == null && recentlyHealthy(channelId) && !skippedRecently(channelId)) {
             lastSkipAt[channelId] = android.os.SystemClock.elapsedRealtime()
             markSkippedSegment(channelId, segName)
+            pieceJobs.remove(segName)?.cancel()
             Log.w(DIAG, "PROXY ch=$channelId SEG ${shortSeg(originalUrl)} SKIPPED after " +
                 "${dlMs}ms: slow on every connection while the chunks around it " +
                 "arrive quickly — the player moves on to the next one")
@@ -826,11 +1108,17 @@ class LiveStreamProxy(
             // up, is visible instead of guessed at.
             val pts = DisguisedSegment.ptsRange(buf, tsLen)
             Log.i(DIAG, "PROXY ch=$channelId SEGSTAT ${shortSeg(originalUrl)} " +
-                "bytes=$size/$len dl=${dlMs}ms${if (retried) " retried" else ""} " +
+                "bytes=$size/$len dl=${dlMs}ms${if (retried) " retried" else ""}" +
+                "${if (pieces) " pieces" else ""} host=${shortHost(originalUrl)} " +
                 "unwrap=${System.currentTimeMillis() - tU}ms " +
                 "ts=$tsLen pts=" + (pts?.let { "%.3f..%.3f".format(it.first / 90000.0, it.second / 90000.0) } ?: "none"))
             pts?.let { notePts(channelId, originalUrl, it) }
+            if (!retried) {
+                noteFetched(hostOf(originalUrl), size.toLong(), System.currentTimeMillis() - segT0, pieces)
+            }
             if (!retried && dlMs < HEALTHY_SEG_MS) noteHealthy(channelId)
+            // It got here on one connection, but too slowly to rely on.
+            if (!retried && !pieces && dlMs >= HEALTHY_SEG_MS) noteSlowHost(hostOf(originalUrl))
             if (unwrapLogged.add(channelId)) {
                 Log.i(
                     DIAG,
@@ -845,7 +1133,8 @@ class LiveStreamProxy(
         }
         if (png) Log.w(DIAG, "PROXY ch=$channelId SEG is a PNG with no stream inside")
         else Log.i(DIAG, "PROXY ch=$channelId SEGSTAT ${shortSeg(originalUrl)} " +
-            "bytes=$size dl=${dlMs}ms${if (retried) " retried" else ""} plain")
+            "bytes=$size dl=${dlMs}ms${if (retried) " retried" else ""}" +
+            "${if (pieces) " pieces" else ""} host=${shortHost(originalUrl)} plain")
         return NanoHTTPD.newFixedLengthResponse(
             NanoHTTPD.Response.Status.OK, ct,
             java.io.ByteArrayInputStream(file, 0, size), size.toLong(),
@@ -892,7 +1181,7 @@ class LiveStreamProxy(
                 val el = System.currentTimeMillis() - startedAt
                 if (len > 0 && el > SEG_SLOW_CHECK_MS && total < len * SEG_SLOW_MIN_FRACTION) {
                     Log.w(DIAG, "PROXY ch=$channelId SEG ${shortSeg(url)} stalling: " +
-                        "${total / 1024} of ${len / 1024} KB after ${el}ms — trying a fresh connection")
+                        "${total / 1024} of ${len / 1024} KB after ${el}ms — asking again")
                     runCatching { call?.cancel() }
                     return null
                 }
@@ -901,7 +1190,7 @@ class LiveStreamProxy(
         } catch (e: java.io.IOException) {
             Log.w(DIAG, "PROXY ch=$channelId SEG ${shortSeg(url)} read stopped after " +
                 "${System.currentTimeMillis() - startedAt}ms (${out.size() / 1024} of " +
-                "${len / 1024} KB): ${e.javaClass.simpleName} — trying a fresh connection")
+                "${len / 1024} KB): ${e.javaClass.simpleName} — asking again")
             return null
         } finally {
             watchdog.cancel(false)
@@ -986,6 +1275,19 @@ class LiveStreamProxy(
     private val lastSegPts = ConcurrentHashMap<String, Pair<String, Long>>()
     /** Per channel: when a re-sent chunk of the match was seen. */
     private val repeats = ConcurrentHashMap<String, MutableList<Long>>()
+    /** Per channel, since it last started: its chunks in the order the player asked for them. */
+    private val askedChunks = ConcurrentHashMap<String, ArrayDeque<String>>()
+
+    private fun noteAsked(channelId: String, url: String) {
+        val name = shortSeg(url)
+        val asked = askedChunks.getOrPut(channelId) { ArrayDeque() }
+        synchronized(asked) {
+            if (name !in asked) {
+                asked.addLast(name)
+                while (asked.size > ASKED_CHUNKS_KEEP) asked.removeFirst()
+            }
+        }
+    }
 
     /**
      * Spot a feed re-sending part of the match it already sent: a NEW
@@ -997,8 +1299,22 @@ class LiveStreamProxy(
      * (see [FeedRanker.markBroken]); a retry of the same URL doesn't count.
      */
     private fun notePts(channelId: String, url: String, range: Pair<Long, Long>) {
-        val prev = lastSegPts.put(channelId, url to range.second) ?: return
-        if (prev.first == url) return
+        // Only chunks in the order they were asked for can be compared. One
+        // can finish late: at a channel start the player moves on from its
+        // first load (its proactive seek does this), the proxy can't see it
+        // hang up, and that chunk arrives after newer ones, which looked like
+        // the source re-sending part of the match. Two of those would mark a
+        // healthy feed broken.
+        val name = shortSeg(url)
+        val asked = askedChunks[channelId] ?: return
+        val prev = lastSegPts[channelId]
+        val late = synchronized(asked) {
+            val at = asked.indexOf(name)
+            at < 0 || (prev != null && at < asked.indexOf(shortSeg(prev.first)))
+        }
+        if (late) return
+        lastSegPts[channelId] = url to range.second
+        if (prev == null || shortSeg(prev.first) == name) return
         val back = prev.second - range.first // 90 kHz ticks
         // 1-60 s backwards: a repeat. More is a restart/discontinuity (or
         // the 33-bit clock wrapping), not the same seconds sent twice.
@@ -1125,6 +1441,12 @@ class LiveStreamProxy(
 
     /** Serve a master playlist pointing at our own /inner/<id> endpoint. */
     private fun handleMaster(channelId: String): NanoHTTPD.Response {
+        // A new start begins behind the live edge, so its first chunk starts
+        // before the last one of the previous visit ended. Coming back within
+        // half a minute twice marked a healthy feed broken (2026-11-03).
+        lastSegPts.remove(channelId)
+        askedChunks.remove(channelId)
+
         // Make sure we've at least resolved once, so the upstream master body
         // is available to learn the codecs/resolution headers from. If we
         // can't resolve right now, return 503 and let ExoPlayer retry.
@@ -2445,6 +2767,10 @@ class LiveStreamProxy(
         @Volatile var debugSkipNext: String? = null
         /** Test hook: a server every fetch treats as refusing connections. */
         @Volatile var debugBlockedHost: String? = null
+        /** Test hook: treat this host as slow without waiting to find out. */
+        @Volatile var debugSlowHost: String? = null
+        /** Test hook: measure hosts on every probe instead of reusing a reading. */
+        @Volatile var debugProbeFresh = false
 
         /**
          * Rendition ceiling for live, applied where the choice actually
@@ -2494,6 +2820,16 @@ class LiveStreamProxy(
         /** ...or this long, whichever comes first. Keeps a health check
          *  from stealing the bandwidth it is trying to measure. */
         private const val PROBE_MS = 2_500L
+        /** How long one short read of a CDN host serves every feed on it. */
+        private const val HOST_SPEED_KEEP_MS = 60_000L
+        /** Real chunks kept per host, and how long they count: its speed
+         *  swings within minutes. */
+        private const val FETCHED_KEEP = 8
+        private const val FETCHED_FRESH_MS = 120_000L
+        /** A chunk asked for this recently means something is playing. */
+        private const val PLAYING_WITHIN_MS = 20_000L
+        /** Channel id on a chunk fetched only to measure its host. */
+        private const val SPEED_TEST = "speed-test"
 
         private const val TAG = "LiveStreamProxy"
         /** Single-stream diagnostic tag. Grep `adb logcat | grep LiveDiag`
@@ -2596,6 +2932,13 @@ class LiveStreamProxy(
         /** The retry gives up early when it is as slow as the first try. */
         private const val FRESH_SLOW_CHECK_MS: Long = 3_500L
         private const val FRESH_SLOW_MIN_FRACTION: Double = 0.35
+        /** How long one ask for a chunk waits on its pieces, counted from the
+         *  request: inside the 30 s the player waits on the proxy. */
+        private const val PIECES_WAIT_MS: Long = 26_000L
+        /** A download nobody came back for is dropped after this. Long enough
+         *  for the player's retry (8 s at most) and a second full wait. */
+        private const val PIECES_KEEP_MS: Long = 60_000L
+        private const val ASKED_CHUNKS_KEEP: Int = 32
         /** A chunk that arrives on the first try within this counts toward
          *  "the channel is fine" ([recentlyHealthy]). */
         private const val HEALTHY_SEG_MS: Long = 5_000L
