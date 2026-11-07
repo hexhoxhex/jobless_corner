@@ -339,9 +339,10 @@ class LiveStreamProxy(
         // Playlist timing.
         val tPl = System.currentTimeMillis()
         val plBody = runCatching {
-            clientFor(innerUrl).newCall(buildCdnRequest(tokenized(innerUrl)).build())
+            val sent = tokenized(innerUrl)
+            clientFor(innerUrl).newCall(buildCdnRequest(sent).build())
                 .execute().use { r ->
-                    if (!r.isSuccessful) null else r.body?.string()
+                    if (!r.isSuccessful) null else r.body?.string()?.let { unseal(it, sent) }
                 }
         }.getOrNull()
         val playlistMs = System.currentTimeMillis() - tPl
@@ -2347,7 +2348,9 @@ class LiveStreamProxy(
     private fun fetchInnerOnce(url: String): Pair<okhttp3.Response, String> {
         val req = buildCdnRequest(tokenized(url)).build()
         return clientFor(url).newCall(req).execute().use { resp ->
-            val body = resp.body?.string() ?: ""
+            val body = (resp.body?.string() ?: "").let {
+                if (resp.isSuccessful) unseal(it, req.url.toString()) else it
+            }
             // Diagnostic: when the CDN blocks us, dump a snapshot of the
             // request headers + response body preview. Cloudflare bot-
             // management includes the block reason in the HTML body
@@ -2684,7 +2687,17 @@ class LiveStreamProxy(
     // says "token required" once is remembered, and its playlist fetches
     // carry a token from then on.
 
-    private data class PlaylistToken(val value: String, val renewAt: Long, val validUntil: Long)
+    // 2026-11-07: the token answer gained a key ({"k": ..., "token": ...}),
+    // and the playlists fetched with that token list every chunk as an
+    // AES-CTR sealed line instead of its address. Read as an address, the
+    // line pointed at the edge itself, every chunk came back 404, and the
+    // retries that followed got this address banned for an hour. The
+    // site's player opens each line with the key: AES-CTR, the counter's
+    // last 8 bytes being the chunk's sequence number. See [unseal].
+
+    private data class PlaylistToken(
+        val value: String, val key: String?, val renewAt: Long, val validUntil: Long,
+    )
 
     /** True (and the host remembered) when [code]/[body] is the edge's
      *  "token required" refusal. */
@@ -2736,11 +2749,68 @@ class LiveStreamProxy(
             val value = json?.optString("token")?.takeIf { it.isNotBlank() }
             if (value != null) {
                 val ttl = json.optInt("ttl", 120).coerceAtLeast(20)
-                playlistTokens[key] = PlaylistToken(value, now + ttl * 500L, now + ttl * 900L)
+                val playKey = json.optString("k").takeIf { it.isNotBlank() }
+                playlistTokens[key] = PlaylistToken(value, playKey, now + ttl * 500L, now + ttl * 900L)
+                if (playKey != null) {
+                    // Kept past the token's own life: a fetch sent with it
+                    // may come back after it was renewed.
+                    playKeys.values.removeIf { it.second < now }
+                    playKeys[value] = playKey to now + ttl * 2000L
+                }
                 return value
             }
             return playlistTokens[key]?.takeIf { now < it.validUntil }?.value
         }
+    }
+
+    /** [body] with each sealed chunk line opened into its address, when it
+     *  was fetched as [sentUrl] with a token that came with a key; [body]
+     *  itself otherwise. A line that does not open into an address is left
+     *  as it was. */
+    private fun unseal(body: String, sentUrl: String): String {
+        val token = sentUrl.substringAfter('?', "").split('&')
+            .firstOrNull { it.startsWith("t=") }?.removePrefix("t=")
+            ?.let { runCatching { java.net.URLDecoder.decode(it, "UTF-8") }.getOrNull() }
+            ?: return body
+        val playKey = playKeys[token]?.first ?: return body
+        val keyBytes = runCatching {
+            android.util.Base64.decode(playKey, android.util.Base64.URL_SAFE)
+        }.getOrNull()?.takeIf { it.size == 16 } ?: return body
+        val aes = javax.crypto.spec.SecretKeySpec(keyBytes, "AES")
+        var seq = 0L
+        var opened = 0
+        val out = StringBuilder(body.length * 2)
+        for (rawLine in body.lineSequence()) {
+            val line = rawLine.trim()
+            if (line.isEmpty()) continue
+            if (line.startsWith("#")) {
+                if (line.startsWith("#EXT-X-MEDIA-SEQUENCE:")) {
+                    line.substringAfter(':').trim().toLongOrNull()?.let { seq = it }
+                }
+                out.append(line).append('\n')
+                continue
+            }
+            val address = if (SEALED_LINE.matches(line)) runCatching {
+                val counter = java.nio.ByteBuffer.allocate(16).putLong(8, seq).array()
+                val cipher = javax.crypto.Cipher.getInstance("AES/CTR/NoPadding")
+                cipher.init(
+                    javax.crypto.Cipher.DECRYPT_MODE, aes,
+                    javax.crypto.spec.IvParameterSpec(counter),
+                )
+                String(
+                    cipher.doFinal(android.util.Base64.decode(line, android.util.Base64.URL_SAFE)),
+                    Charsets.UTF_8,
+                )
+            }.getOrNull()?.takeIf { it.startsWith("http") } else null
+            if (address != null) opened++
+            out.append(address ?: line).append('\n')
+            seq++
+        }
+        if (opened == 0) return body
+        if (unsealLogged.add(hostOf(sentUrl))) {
+            Log.i(DIAG, "PROXY ${hostOf(sentUrl)} seals its chunk lines — opening them with the token's key")
+        }
+        return out.toString()
     }
 
     /** BANDWIDTH=... off a #EXT-X-STREAM-INF line; 0 when absent. */
@@ -2762,6 +2832,12 @@ class LiveStreamProxy(
         private val tokenHosts: MutableSet<String> = ConcurrentHashMap.newKeySet()
         private val playlistTokens = ConcurrentHashMap<String, PlaylistToken>()
         private val playlistTokenLock = Any()
+        /** Token -> (its key, kept until). See [unseal]. */
+        private val playKeys = ConcurrentHashMap<String, Pair<String, Long>>()
+        /** Hosts already reported as sealing; one log line each. */
+        private val unsealLogged: MutableSet<String> = ConcurrentHashMap.newKeySet()
+        /** A sealed chunk line: base64url only, too long to be a file name. */
+        private val SEALED_LINE = Regex("""[A-Za-z0-9_-]{40,}""")
 
         /** See handleSegment: the channel whose next chunk is skipped. */
         @Volatile var debugSkipNext: String? = null
