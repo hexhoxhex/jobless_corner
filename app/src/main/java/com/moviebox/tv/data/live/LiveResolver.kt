@@ -958,6 +958,7 @@ class LiveResolver(
         // after a faster daddyN answer has already resolved.
         if (!allowJs) return null
         return JsIframeResolver.resolve(iframeUrl, wrapper)
+            ?.also { notePlayerPage(it, iframeUrl, wrapper) }
     }
 
     private val pageClient: OkHttpClient by lazy { playerClient() }
@@ -1102,6 +1103,7 @@ class LiveResolver(
                     mapOf("Origin" to origin, "Referer" to "$origin/"),
                 )
             }
+            notePlayerPage(url, pageUrl, referer)
             return url to how
         }
 
@@ -1286,6 +1288,21 @@ class LiveResolver(
         /** Extract the host from a URL using string parsing — matches
          *  [LiveStreamProxy.hostOf]'s approach and avoids `java.net.URI`'s
          *  known-quirky `.host` behavior on some URL patterns. */
+        /** Stream (without its query) -> the page its player runs in and
+         *  the page that embeds that one; for [SourceTeacher]. */
+        private val playerPages = java.util.concurrent.ConcurrentHashMap<String, Pair<String, String>>()
+
+        fun notePlayerPage(stream: String, page: String, referer: String) {
+            if (playerPages.size > 200) playerPages.clear()
+            playerPages[stream.substringBefore('?')] = page to referer
+        }
+
+        /** The player page [stream] was found on; failing that, the last one
+         *  found for a stream on the same host (the same source's player). */
+        fun playerPageFor(stream: String): Pair<String, String>? =
+            playerPages[stream.substringBefore('?')]
+                ?: playerPages.entries.lastOrNull { hostFromUrl(it.key) == hostFromUrl(stream) }?.value
+
         private fun hostFromUrl(url: String): String? =
             url.substringAfter("//", "").substringBefore('/')
                 .substringBefore(':').lowercase().takeIf { it.isNotEmpty() }

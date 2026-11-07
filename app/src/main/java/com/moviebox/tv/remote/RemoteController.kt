@@ -500,6 +500,9 @@ object RemoteController {
     /** Diagnostics: the same measurement of a given playlist. */
     fun probeMaster(channelId: String, master: String) = vm?.probeMaster(channelId, master)
 
+    /** Diagnostics: run a lesson on a channel's source now. */
+    suspend fun teachChannel(channelId: String): String = vm?.teachChannel(channelId) ?: "no player"
+
     fun liveSchedule(): List<ScheduleEvent> =
         vm?.state?.value?.liveSchedule ?: emptyList()
 

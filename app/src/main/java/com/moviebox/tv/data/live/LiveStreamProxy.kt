@@ -2005,6 +2005,8 @@ class LiveStreamProxy(
         CapturedHeaders.headersFor(host)?.forEach { (name, value) ->
             builder.header(name, value)
         }
+        // What the source's own player sent, when it has taught us.
+        Lessons.forHost(host)?.headers?.forEach { (name, value) -> builder.header(name, value) }
         return builder
     }
 
@@ -2614,6 +2616,53 @@ class LiveStreamProxy(
         Log.w(DIAG, "FORMAT ch=$channelId the chunks $host lists come back 404 — its format " +
             "has changed; pausing it ${UNREADABLE_PAUSE_MS / 60_000} min instead of reloading")
         LiveStatus.note("This source's video isn't reaching us")
+        teach(channelId, host)
+    }
+
+    /** Where each channel's stream was last resolved to. */
+    private val lastMaster = ConcurrentHashMap<String, String>()
+
+    /** Set by whoever plays: start [channelId] again after a lesson. */
+    @Volatile var onLearned: ((channelId: String) -> Unit)? = null
+
+    /**
+     * Have [SourceTeacher] watch [channelId]'s player and learn what [host]
+     * now wants. At most once per host per [TEACH_EVERY_MS]; the page it
+     * loads is the one the resolver found the stream on.
+     */
+    private fun teach(channelId: String, host: String) {
+        val now = System.currentTimeMillis()
+        val last = lastLesson[host] ?: 0L
+        if (now - last < TEACH_EVERY_MS) return
+        if (!lastLesson.replace(host, last, now) && lastLesson.putIfAbsent(host, now) != null) return
+        val page = lastMaster[channelId]?.let { LiveResolver.playerPageFor(it) }
+        if (page == null) {
+            Log.w(DIAG, "LEARN $host: no player page known for ch=$channelId")
+            return
+        }
+        scope.launch { teachNow(channelId, host, page.first, page.second) }
+    }
+
+    /** Run a lesson now (also for /api/debug/teach); the report it logged. */
+    suspend fun teachNow(channelId: String, host: String, pageUrl: String, referer: String): SourceTeacher.Result {
+        val result = SourceTeacher.learn(pageUrl, referer, host)
+        val lesson = result.lesson ?: return result
+        Lessons.save(lesson)
+        unreadableUntil.remove(host)
+        unreadableUntil.remove(lesson.host)
+        missingChunks.remove(channelId)
+        cache.remove(channelId)
+        LiveStatus.note("Learned how the source changed — reconnecting")
+        runCatching { onLearned?.invoke(channelId) }
+        return result
+    }
+
+    /** For /api/debug/teach: the player page and host a channel was last
+     *  resolved through. */
+    fun lessonTargetFor(channelId: String): Triple<String, String, String>? {
+        val master = lastMaster[channelId] ?: return null
+        val page = LiveResolver.playerPageFor(master) ?: return null
+        return Triple(hostOf(master), page.first, page.second)
     }
 
     /** Give a channel's source a clean slate. Called when the USER picks
@@ -2650,6 +2699,7 @@ class LiveStreamProxy(
             val masterUrl = resolver.resolveStream(channelId, budgetMs, announce)
                 ?: return@withLock null
             lastHost[channelId] = hostOf(masterUrl)
+            lastMaster[channelId] = masterUrl
             // Fetch master once to learn the inner URL + STREAM-INF line.
             val failCode = IntArray(1)
             val parsed = parseMaster(masterUrl, failCode)
@@ -2657,6 +2707,12 @@ class LiveStreamProxy(
             // reason to try every other route on it.
             if (parsed == null && HostGate.heldForMs(hostOf(masterUrl)) > 0) {
                 return@withLock null
+            }
+            // Refused in a way that isn't "no such channel" and isn't a ban:
+            // the source may want something new; let its player show us.
+            // Only for what is being watched, never for background checks.
+            if (announce && parsed == null && failCode[0] in setOf(400, 401, 403)) {
+                teach(channelId, hostOf(masterUrl))
             }
             if (parsed == null) {
                 // 404/410 = this stream does not exist on the CDN (body:
@@ -2855,9 +2911,7 @@ class LiveStreamProxy(
     // site's player opens each line with the key: AES-CTR, the counter's
     // last 8 bytes being the chunk's sequence number. See [unseal].
 
-    private data class PlaylistToken(
-        val value: String, val key: String?, val renewAt: Long, val validUntil: Long,
-    )
+    private data class PlaylistToken(val value: String, val renewAt: Long, val validUntil: Long)
 
     /** True (and the host remembered) when [code]/[body] is the edge's
      *  "token required" refusal. */
@@ -2874,30 +2928,34 @@ class LiveStreamProxy(
      *  otherwise, or when no token could be had. */
     private fun tokenized(url: String): String {
         val host = hostOf(url)
-        if (host !in tokenHosts) return url
+        val recipe = Lessons.forHost(host)?.token
+        if (host !in tokenHosts && recipe == null) return url
         // "https://edge.../premium343/index.m3u8" -> "premium343"
         val slug = url.substringAfter("//").substringAfter('/', "")
             .substringBefore('/').substringBefore('?')
         if (slug.isBlank()) return url
         val token = playlistToken(host, slug, url) ?: return url
+        val param = recipe?.param ?: "t"
         val base = url.substringBefore('?')
         val kept = url.substringAfter('?', "").split('&')
-            .filter { it.isNotBlank() && !it.startsWith("t=") && !it.startsWith("_=") }
-        return base + "?" + (kept + ("t=" + java.net.URLEncoder.encode(token, "UTF-8")))
+            .filter { it.isNotBlank() && !it.startsWith("$param=") && !it.startsWith("_=") }
+        return base + "?" + (kept + ("$param=" + java.net.URLEncoder.encode(token, "UTF-8")))
             .joinToString("&")
     }
 
     /** The token for [slug] on [host]: cached until half its life, then
      *  fetched again; an older one is used while still valid if the fetch
-     *  fails. */
+     *  fails. Asked for the way [Lessons] says when the source has taught
+     *  us, else the way the edge did on 2026-10-18. */
     private fun playlistToken(host: String, slug: String, refUrl: String): String? {
         val key = "$host|$slug"
         playlistTokens[key]?.let { if (System.currentTimeMillis() < it.renewAt) return it.value }
         synchronized(playlistTokenLock) {
             val now = System.currentTimeMillis()
             playlistTokens[key]?.let { if (now < it.renewAt) return it.value }
-            val tokenUrl = "https://$host/api/playlist-token?slug=" +
-                java.net.URLEncoder.encode(slug, "UTF-8")
+            val recipe = Lessons.forHost(host)?.token
+            val tokenUrl = recipe?.url(slug) ?: ("https://$host/api/playlist-token?slug=" +
+                java.net.URLEncoder.encode(slug, "UTF-8"))
             val json = runCatching {
                 clientFor(refUrl).newCall(buildCdnRequest(tokenUrl).build()).execute().use { r ->
                     if (!r.isSuccessful) {
@@ -2906,17 +2964,15 @@ class LiveStreamProxy(
                     } else org.json.JSONObject(r.body?.string().orEmpty())
                 }
             }.getOrNull()
-            val value = json?.optString("token")?.takeIf { it.isNotBlank() }
+            val value = json?.optString(recipe?.tokenField ?: "token")?.takeIf { it.isNotBlank() }
             if (value != null) {
-                val ttl = json.optInt("ttl", 120).coerceAtLeast(20)
-                val playKey = json.optString("k").takeIf { it.isNotBlank() }
-                playlistTokens[key] = PlaylistToken(value, playKey, now + ttl * 500L, now + ttl * 900L)
-                if (playKey != null) {
-                    // Kept past the token's own life: a fetch sent with it
-                    // may come back after it was renewed.
-                    playKeys.values.removeIf { it.second < now }
-                    playKeys[value] = playKey to now + ttl * 2000L
-                }
+                val ttl = json.optInt(recipe?.ttlField ?: "ttl", 120).coerceAtLeast(20)
+                playlistTokens[key] = PlaylistToken(value, now + ttl * 500L, now + ttl * 900L)
+                // The whole answer, for opening sealed lines: kept past the
+                // token's own life, as a fetch sent with it may come back
+                // after it was renewed.
+                tokenAnswers.values.removeIf { it.second < now }
+                tokenAnswers[value] = json to now + ttl * 2000L
                 return value
             }
             return playlistTokens[key]?.takeIf { now < it.validUntil }?.value
@@ -2924,19 +2980,56 @@ class LiveStreamProxy(
     }
 
     /** [body] with each sealed chunk line opened into its address, when it
-     *  was fetched as [sentUrl] with a token that came with a key; [body]
+     *  was fetched as [sentUrl] with a token whose answer can open them; [body]
      *  itself otherwise. A line that does not open into an address is left
-     *  as it was. */
+     *  as it was.
+     *
+     *  The rule comes from [Lessons] when the source has taught us one, else
+     *  the edge's own of 2026-11-07. When neither opens lines that look
+     *  sealed, [Seal.search] tries the usual ways against the token answer,
+     *  and a rule that opens every line is kept and used at once: a source
+     *  that renames the key field, changes the cipher, the counter or the
+     *  encoding keeps playing without an update. */
     private fun unseal(body: String, sentUrl: String): String {
+        val host = hostOf(sentUrl)
+        val lesson = Lessons.forHost(host)
+        val param = lesson?.token?.param ?: "t"
         val token = sentUrl.substringAfter('?', "").split('&')
-            .firstOrNull { it.startsWith("t=") }?.removePrefix("t=")
+            .firstOrNull { it.startsWith("$param=") }?.removePrefix("$param=")
             ?.let { runCatching { java.net.URLDecoder.decode(it, "UTF-8") }.getOrNull() }
             ?: return body
-        val playKey = playKeys[token]?.first ?: return body
-        val keyBytes = runCatching {
-            android.util.Base64.decode(playKey, android.util.Base64.URL_SAFE)
-        }.getOrNull()?.takeIf { it.size == 16 } ?: return body
-        val aes = javax.crypto.spec.SecretKeySpec(keyBytes, "AES")
+        val answer = tokenAnswers[token]?.first ?: return body
+        val rules = listOfNotNull(lesson?.seal, SealRule.BUILT_IN.takeUnless { debugNoBuiltInSeal })
+        for (rule in rules) {
+            openWith(rule, body, answer)?.let { opened ->
+                if (unsealLogged.add(host)) {
+                    Log.i(DIAG, "PROXY $host seals its chunk lines — opening them with $rule")
+                }
+                return opened
+            }
+        }
+        if (body.lineSequence().none { Seal.looksSealed(it.trim()) }) return body
+        // Sealed, and nothing we know opens it: work it out, at most once a
+        // minute per host.
+        val now = System.currentTimeMillis()
+        if (now - (lastSealSearch[host] ?: 0L) < SEAL_SEARCH_EVERY_MS) return body
+        lastSealSearch[host] = now
+        val t0 = System.currentTimeMillis()
+        val found = Seal.search(body, answer)
+        if (found == null) {
+            Log.w(DIAG, "LEARN $host: sealed lines no known rule opens; the search found none " +
+                "in ${System.currentTimeMillis() - t0}ms (answer fields ${answer.keys().asSequence().toList()})")
+            return body
+        }
+        Log.w(DIAG, "LEARN $host: worked out the new sealing in ${System.currentTimeMillis() - t0}ms — $found")
+        Lessons.save(
+            (lesson ?: Lesson(host, now, null, null, emptyMap())).copy(seal = found, learnedAt = now),
+        )
+        return openWith(found, body, answer) ?: body
+    }
+
+    /** [body] opened with [rule], or null when it opened no line. */
+    private fun openWith(rule: SealRule, body: String, answer: org.json.JSONObject): String? {
         var seq = 0L
         var opened = 0
         val out = StringBuilder(body.length * 2)
@@ -2950,27 +3043,12 @@ class LiveStreamProxy(
                 out.append(line).append('\n')
                 continue
             }
-            val address = if (SEALED_LINE.matches(line)) runCatching {
-                val counter = java.nio.ByteBuffer.allocate(16).putLong(8, seq).array()
-                val cipher = javax.crypto.Cipher.getInstance("AES/CTR/NoPadding")
-                cipher.init(
-                    javax.crypto.Cipher.DECRYPT_MODE, aes,
-                    javax.crypto.spec.IvParameterSpec(counter),
-                )
-                String(
-                    cipher.doFinal(android.util.Base64.decode(line, android.util.Base64.URL_SAFE)),
-                    Charsets.UTF_8,
-                )
-            }.getOrNull()?.takeIf { it.startsWith("http") } else null
+            val address = if (Seal.looksSealed(line)) Seal.open(rule, line, seq, answer) else null
             if (address != null) opened++
             out.append(address ?: line).append('\n')
             seq++
         }
-        if (opened == 0) return body
-        if (unsealLogged.add(hostOf(sentUrl))) {
-            Log.i(DIAG, "PROXY ${hostOf(sentUrl)} seals its chunk lines — opening them with the token's key")
-        }
-        return out.toString()
+        return if (opened > 0) out.toString() else null
     }
 
     /** BANDWIDTH=... off a #EXT-X-STREAM-INF line; 0 when absent. */
@@ -2992,12 +3070,19 @@ class LiveStreamProxy(
         private val tokenHosts: MutableSet<String> = ConcurrentHashMap.newKeySet()
         private val playlistTokens = ConcurrentHashMap<String, PlaylistToken>()
         private val playlistTokenLock = Any()
-        /** Token -> (its key, kept until). See [unseal]. */
-        private val playKeys = ConcurrentHashMap<String, Pair<String, Long>>()
+        /** Token -> (the whole token answer, kept until). See [unseal]. */
+        private val tokenAnswers = ConcurrentHashMap<String, Pair<org.json.JSONObject, Long>>()
         /** Hosts already reported as sealing; one log line each. */
         private val unsealLogged: MutableSet<String> = ConcurrentHashMap.newKeySet()
-        /** A sealed chunk line: base64url only, too long to be a file name. */
-        private val SEALED_LINE = Regex("""[A-Za-z0-9_-]{40,}""")
+        /** When each host last had a lesson tried. */
+        private val lastLesson = ConcurrentHashMap<String, Long>()
+        private const val TEACH_EVERY_MS = 30 * 60_000L
+        /** When [Seal.search] last ran for each host. */
+        private val lastSealSearch = ConcurrentHashMap<String, Long>()
+        private const val SEAL_SEARCH_EVERY_MS = 60_000L
+        /** Test hook: forget the built-in seal rule, as if the source had
+         *  just changed to something new. */
+        @Volatile var debugNoBuiltInSeal = false
 
         /** See handleSegment: the channel whose next chunk is skipped. */
         @Volatile var debugSkipNext: String? = null

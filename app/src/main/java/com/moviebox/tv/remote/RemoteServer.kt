@@ -1095,8 +1095,39 @@ class RemoteServer(
                     p("missing")?.let {
                         com.moviebox.tv.data.live.LiveStreamProxy.debugMissingHost = it.ifBlank { null }
                     }
+                    // builtin=0: forget the built-in seal rule, as if the source
+                    // had just changed; forget=<host>: drop what it taught us.
+                    p("builtin")?.let {
+                        com.moviebox.tv.data.live.LiveStreamProxy.debugNoBuiltInSeal = it == "0"
+                    }
+                    p("forget")?.takeIf { it.isNotBlank() }?.let {
+                        com.moviebox.tv.data.live.Lessons.forget(it)
+                    }
                     ok()
                 }
+            }
+
+            // Run a lesson on a channel's source now (see SourceTeacher), or
+            // list what the sources have taught us.
+            uri == "/api/debug/teach" && method == Method.POST -> {
+                if (!RemoteAccess.isSuperuser(dev)) {
+                    newFixedLengthResponse(
+                        Response.Status.FORBIDDEN, "application/json",
+                        "{\"error\":\"Superuser only\"}",
+                    )
+                } else {
+                    val report = kotlinx.coroutines.runBlocking {
+                        RemoteController.teachChannel(p("ch").orEmpty())
+                    }
+                    json(JSONObject().put("report", report).toString())
+                }
+            }
+            uri == "/api/debug/lessons" -> {
+                val arr = org.json.JSONArray()
+                com.moviebox.tv.data.live.Lessons.all().forEach {
+                    arr.put(com.moviebox.tv.data.live.Lessons.toJson(it))
+                }
+                json(JSONObject().put("lessons", arr).toString())
             }
 
             // Measure one feed now, as ranking and auto-switch would. Playback

@@ -1568,6 +1568,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** Diagnostics: the same measurement of a given playlist. */
     fun probeMaster(channelId: String, master: String) = liveProxy.probeUrl(channelId, master)
 
+    /** Diagnostics: run a lesson on [channelId]'s source now (see SourceTeacher). */
+    suspend fun teachChannel(channelId: String): String {
+        val (host, page, referer) = liveProxy.lessonTargetFor(channelId)
+            ?: return "no player page known for ch=$channelId (play it first)"
+        return liveProxy.teachNow(channelId, host, page, referer).report
+    }
+
     /** Channels carrying the same fixture as [channelId]. */
     fun siblingFeeds(channelId: String): Map<String, String> =
         com.moviebox.tv.data.live.FeedRanker.siblingsOf(
@@ -1613,6 +1620,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     _state.value.play?.isLive == true
                 ) {
                     autoSwitchFeed("broken: $why", urgent = true, brokenWhy = why)
+                }
+            }
+        }
+        // The source's player taught us what changed: start the channel
+        // again now rather than at the end of its pause.
+        liveProxy.onLearned = { channelId ->
+            viewModelScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+                val ch = _state.value.currentLiveChannel
+                if (ch?.id == channelId && _state.value.play?.isLive == true) {
+                    android.util.Log.i("LiveDiag", "VM ch=$channelId restarting after a lesson")
+                    switchingAutomatically = true
+                    try { playChannel(ch) } finally { switchingAutomatically = false }
                 }
             }
         }
