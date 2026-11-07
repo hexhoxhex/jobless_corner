@@ -888,6 +888,7 @@ class LiveResolver(
                 val body = r.body?.string().orEmpty()
                 IFRAME_RE.find(body)?.groupValues?.get(1)
                     ?.takeIf { "dlhd." !in it && "dlive." !in it }
+                    ?.let(::withCdnLiveAccess)
             }
         }.getOrElse {
             logPath(channelId, path, t0, "wrapper ${it.javaClass.simpleName}")
@@ -960,6 +961,16 @@ class LiveResolver(
     }
 
     private val pageClient: OkHttpClient by lazy { playerClient() }
+
+    /** cdnlivetv's player now answers 401 without the account its public
+     *  directory names (`api.cdnlivetv.tv/api/v1/channels/?user=cdnlivetv&plan=free`
+     *  lists every player URL with them); the wrapper pages still link it
+     *  bare. Measured 2026-11-07: USA Network 401 bare, playable with. */
+    private fun withCdnLiveAccess(url: String): String {
+        val host = hostFromUrl(url).orEmpty()
+        if (!host.endsWith("cdnlivetv.tv") || "/channels/player" !in url || "user=" in url) return url
+        return url + (if ('?' in url) "&" else "?") + "user=cdnlivetv&plan=free"
+    }
 
     /**
      * Where every route for [channelId] leads right now, for the route
@@ -1529,6 +1540,7 @@ class LiveResolver(
         const val PROBE_RESOLVE_BUDGET_MS = 20_000L
 
         private fun playerClient(): OkHttpClient = OkHttpClient.Builder()
+            .addInterceptor(HostGate)
             // Measured against the live source on 2026-09-26: two redirects,
             // ttfb 4.1 s, body complete at 15.7 s (168 KB gzipped, 644 KB
             // raw), iframe at the very end so the whole body is required.
@@ -1546,6 +1558,7 @@ class LiveResolver(
             .build()
 
         private fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
+            .addInterceptor(HostGate)
             // Tight timeouts: the resolver now races 11 candidates (5 daddyN
             // + 6 PLAYER paths) via [awaitFirstNonNull], so total resolve time
             // is bounded by the FASTEST successful probe — not the slowest.

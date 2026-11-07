@@ -85,6 +85,15 @@ private const val HIDDEN_SEASON_PROBE_MAX: Int = 6
  *  ancient history. */
 private const val FAILURE_WINDOW_MS: Long = 5 * 60 * 1000L  // 5 minutes
 
+/** Wait before each in-place live retry, by how many troubles in a row. The
+ *  first is immediate, as before; after that the source is asked less and
+ *  less often instead of every few seconds. */
+private val LIVE_RETRY_STEPS_MS = longArrayOf(0L, 2_000L, 4_000L, 8_000L, 15_000L, 30_000L, 60_000L)
+
+/** While the source has asked us to wait (or can't be read), check back at
+ *  least this often. */
+private const val PAUSED_RETRY_MAX_MS: Long = 5 * 60 * 1000L
+
 /** Window after a content switch during which progress saves are dropped,
  *  to keep the previous item's stale tail position from corrupting the new
  *  item's resume point. Covers the resolve (~1-2s) + the player's media
@@ -968,14 +977,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (!switchingAutomatically) {
             lastManualPickAt = android.os.SystemClock.elapsedRealtime()
             autoSwitchTried.clear()
+            // The viewer's own pick gets quick retries again.
+            liveTroubles.clear()
         }
         // Reset the auto-failover tried-set when the user manually picks
-        // a channel. Auto-failover itself also calls playChannel, but that
-        // path preserves the set — we only want to reset on a fresh
-        // user-initiated tap. The distinction is made by comparing to the
-        // channel we last auto-swapped away from.
+        // a channel. Auto-failover itself also calls playChannel, and that
+        // path must preserve the set: comparing with the channel playing
+        // before used to clear it on the automatic switches too (the channel
+        // switched away from was never in the set), so the failover bounced
+        // between the same two channels for good, "1/23 tried" every time
+        // (TNT Sports 1 <-> USA Network, 2026-11-07).
         val prev = _state.value.currentLiveChannel?.id
-        if (prev != null && prev !in triedFailoverAlternates && ch.id != prev) {
+        if (!switchingAutomatically && prev != null && ch.id != prev) {
             // User tapped a different channel entirely — starting fresh.
             triedFailoverAlternates.clear()
         }
@@ -1131,6 +1144,39 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun refreshLiveStream(): Boolean {
         val now = System.currentTimeMillis()
         val chId = _state.value.currentLiveChannel?.id ?: "?"
+        // Troubles in the last few minutes, across automatic switches, set
+        // the wait before the next try: a feed that glitches now and then
+        // still retries at once, a source failing over and over is asked
+        // less and less often. Quiet for that long = a fresh start.
+        while (liveTroubles.isNotEmpty() && now - liveTroubles.first() > FAILURE_WINDOW_MS) {
+            liveTroubles.removeFirst()
+        }
+        if (liveTroubles.isEmpty()) triedFailoverAlternates.clear()
+        liveTroubles.addLast(now)
+        val trouble = liveTroubles.size
+        nextLiveRetryMs = LIVE_RETRY_STEPS_MS[
+            (trouble - 1).coerceAtMost(LIVE_RETRY_STEPS_MS.lastIndex)
+        ]
+        // The source asked us to wait, or changed its format: no retry and no
+        // failover can help before that is over (other channels come from the
+        // same server), and asking anyway is what stretches a ban. Try again
+        // when it's over, checking every few minutes.
+        val pause = runCatching { liveProxy.pauseFor(chId) }.getOrNull()
+        if (pause != null) {
+            lastErrorWasSourceDown = false
+            nextLiveRetryMs = pause.leftMs.coerceIn(5_000L, PAUSED_RETRY_MAX_MS)
+            val mins = (nextLiveRetryMs + 59_999L) / 60_000L
+            android.util.Log.w(
+                "LiveDiag",
+                "VM ch=$chId paused: ${pause.reason} — next try in ${nextLiveRetryMs / 1000}s, " +
+                    "no failover",
+            )
+            com.moviebox.tv.data.live.LiveStatus.note(
+                "${pause.reason}. Trying again in $mins min…",
+            )
+            runCatching { liveProxy.invalidate(chId) }
+            return true
+        }
         val window = now - lastResolveFailureAt
         // Rolling-window reset: if the last failure was a while ago, the
         // channel has been healthy enough that we shouldn't hold the
@@ -1146,7 +1192,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             "LiveDiag",
             "VM ch=$chId refreshLiveStream count=$liveResolveFailures " +
                 "/${MAX_RESOLVE_FAILURES_BEFORE_WEBVIEW} " +
-                "windowSinceLastFailMs=$window",
+                "windowSinceLastFailMs=$window troubles5min=${liveTroubles.size} " +
+                "nextTryIn=${nextLiveRetryMs}ms",
         )
         // User-visible: show which attempt we're on so a long loader
         // doesn't feel indefinite. Split the message by phase so the
@@ -1204,7 +1251,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     "AUTO_FAILOVER ch=$chId early — upstream returned 5xx",
                 )
             }
-            viewModelScope.launch { tryAutoFailoverLive(chId) }
+            // Paced like the retries: walking a long list of feeds that all
+            // fail at once (a source-wide outage) shouldn't be a burst of
+            // resolves either.
+            val wait = nextLiveRetryMs
+            viewModelScope.launch {
+                if (wait > 0) kotlinx.coroutines.delay(wait)
+                if (_state.value.currentLiveChannel?.id == chId) tryAutoFailoverLive(chId)
+            }
         }
         return true
     }
@@ -1212,6 +1266,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** Set by the player when the last live error was an upstream 5xx.
      *  Read and cleared by [refreshLiveStream]. */
     @Volatile private var lastErrorWasSourceDown = false
+
+    /** When recent live troubles happened, kept across automatic switches;
+     *  see [refreshLiveStream]. */
+    private val liveTroubles = ArrayDeque<Long>()
+    @Volatile private var nextLiveRetryMs = 0L
+
+    /** How long the player should wait before its next in-place retry. */
+    fun liveRetryDelayMs(): Long = nextLiveRetryMs
 
     /** The player saw the origin refuse with a 5xx. */
     fun noteLiveSourceDown() {
@@ -1239,6 +1301,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val failingName = channels.firstOrNull { it.id == failingChannelId }?.name
             ?: _state.value.currentLiveChannel?.takeIf { it.id == failingChannelId }?.name
         val myLang = com.moviebox.tv.data.live.ChannelLanguage.guess(failingName)
+        // The feed failing now is not one to come back to in this cycle.
+        triedFailoverAlternates.add(failingChannelId)
         val next = alternates.asSequence()
             .filter { it.id != failingChannelId && it.id !in triedFailoverAlternates }
             .filter {
@@ -1427,10 +1491,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         channelId: String,
         schedule: List<com.moviebox.tv.data.live.ScheduleEvent>,
     ): com.moviebox.tv.data.live.Channel? {
-        val ref = schedule.asSequence()
-            .flatMap { it.channels.asSequence() }
-            .firstOrNull { it.id == channelId }
-            ?: return null
+        // An event feed carries a different match through the day under a
+        // different name each time (27 was "Thmanyah" at noon, "Hub Premier"
+        // for Arsenal at 15:00 GMT, "Liga 1 Max Peru" at night): name it after
+        // the event on now, not the first one listed.
+        val nowSec = System.currentTimeMillis() / 1000
+        val listing = schedule.filter { ev -> ev.channels.any { it.id == channelId } }
+        val event = listing
+            .filter { (it.startUnix ?: Long.MAX_VALUE) <= nowSec + 15 * 60 }
+            .maxByOrNull { it.startUnix ?: Long.MIN_VALUE }
+            ?: listing.firstOrNull()
+        val ref = event?.channels?.firstOrNull { it.id == channelId } ?: return null
         com.moviebox.tv.data.live.LiveEventFeeds.mark(ref.id)
         android.util.Log.i(
             "LiveDiag",
@@ -1582,6 +1653,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (autoSwitchInFlight) {
             if (brokenWhy != null) brokenWhileInFlight = current to brokenWhy
             android.util.Log.i("LiveDiag", "AUTOSWITCH skipped (attempt in flight) reason=$reason")
+            return
+        }
+        // Probing other feeds means asking the same server for them.
+        runCatching { liveProxy.pauseFor(current) }.getOrNull()?.let { pause ->
+            android.util.Log.i("LiveDiag", "AUTOSWITCH skipped (${pause.reason}) reason=$reason")
             return
         }
         if (!force && !broken && lastManualPickAt != 0L && now - lastManualPickAt < MANUAL_PICK_GRACE_MS) {

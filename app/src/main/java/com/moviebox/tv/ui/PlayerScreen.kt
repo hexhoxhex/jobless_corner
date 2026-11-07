@@ -738,6 +738,7 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
                 isLive = play.isLive,
                 onFatalLiveError = { vm.forceFallbackToWebPlayer() },
                 onLiveSourceDown = { vm.noteLiveSourceDown() },
+                liveRetryDelayMs = { vm.liveRetryDelayMs() },
                 onLiveError = { msg ->
                     // Long-haul resilience cascade. Returns true if the
                     // caller should also call exo.prepare() to attempt
@@ -2087,6 +2088,10 @@ private fun VideoPlayer(
      *  Lets the caller fail over to another feed instead of re-preparing the
      *  same dead source three times first. */
     onLiveSourceDown: () -> Unit = {},
+    /** How long to wait before the next in-place retry, asked right after
+     *  [onLiveError]: retries that keep failing slow down instead of asking
+     *  the source again every few seconds. */
+    liveRetryDelayMs: () -> Long = { 0L },
     /** Permanent error that the native HLS path can never recover from
      *  for this specific stream (e.g. AUDIO_TRACK_INIT_FAILED on a
      *  channel whose audio sample-rate the device's AudioTrack rejects).
@@ -2138,6 +2143,8 @@ private fun VideoPlayer(
     val progressState = rememberUpdatedState(onProgress)
     val liveErrorState = rememberUpdatedState(onLiveError)
     val sourceDownState = rememberUpdatedState(onLiveSourceDown)
+    val liveRetryDelayState = rememberUpdatedState(liveRetryDelayMs)
+    val retryHandler = remember { android.os.Handler(android.os.Looper.getMainLooper()) }
     val fatalLiveState = rememberUpdatedState(onFatalLiveError)
     val stabilisingState = rememberUpdatedState(onStabilising)
     val feedBrokenState = rememberUpdatedState(onFeedBroken)
@@ -3826,9 +3833,30 @@ private fun VideoPlayer(
                     }
                     val shouldPrepare = liveErrorState.value(msg)
                     if (shouldPrepare) {
-                        runCatching {
-                            exo.seekTo(androidx.media3.common.C.TIME_UNSET)
-                            exo.prepare()
+                        // Retries that keep failing wait longer each time (see
+                        // MainViewModel.liveRetryDelayMs). Re-preparing at once
+                        // every time is what got the address banned on
+                        // 2026-11-07: a reload every 3.5 s for two minutes.
+                        val wait = liveRetryDelayState.value()
+                        if (wait <= 0L) {
+                            runCatching {
+                                exo.seekTo(androidx.media3.common.C.TIME_UNSET)
+                                exo.prepare()
+                            }
+                        } else {
+                            val item = exo.currentMediaItem
+                            retryHandler.postDelayed({
+                                // Only the same stream, still waiting: a switch
+                                // made meanwhile has its own start.
+                                runCatching {
+                                    if (exo.currentMediaItem == item &&
+                                        exo.playbackState == androidx.media3.common.Player.STATE_IDLE
+                                    ) {
+                                        exo.seekTo(androidx.media3.common.C.TIME_UNSET)
+                                        exo.prepare()
+                                    }
+                                }
+                            }, wait)
                         }
                     }
                     // If shouldPrepare == false the outer handler already
@@ -4182,6 +4210,7 @@ private fun VideoPlayer(
             }
             RemoteController.clearPlayback()
             freezeWatchdog.stop()
+            retryHandler.removeCallbacksAndMessages(null)
             VodPrefetch.stop()
             exo.removeListener(listener)
             exo.removeAnalyticsListener(analytics)

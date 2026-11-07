@@ -34,6 +34,9 @@ class ChunkPieces(
     val channelId: String,
     private val url: String,
     private val client: OkHttpClient,
+    /** Connections to start with; a chunk fetched ahead of the player starts
+     *  with a few and gets the rest from [boost] when it is wanted. */
+    private val startConnections: Int = connections,
     private val request: (String) -> Request.Builder,
 ) {
     /** [from] moves on as bytes arrive, so a request cut off partway only
@@ -56,6 +59,37 @@ class ChunkPieces(
     @Volatile private var tookMs = 0L
     @Volatile private var data: ByteArray? = null
     @Volatile private var arrived = false
+    /** The chunk being filled, once its size is known. */
+    @Volatile private var out: ByteArray? = null
+    private val workers = AtomicInteger(0)
+    /** Connections asked for by [boost] before the size was known. */
+    @Volatile private var wanted = 0
+
+    /** True once it has finished, whichever way. */
+    val isDone: Boolean get() = finished.count == 0L
+
+    /** How long it took, once [isDone]. */
+    val tookMillis: Long get() = tookMs
+
+    /** More connections for a chunk that is wanted now. */
+    fun boost(to: Int) {
+        wanted = maxOf(wanted, to)
+        val buffer = out ?: return
+        repeat(minOf(to - 1 - workers.get(), queue.size).coerceAtLeast(0)) {
+            spawn(buffer)
+        }
+    }
+
+    private fun spawn(buffer: ByteArray) {
+        workers.incrementAndGet()
+        pool.execute {
+            try {
+                worker(buffer)
+            } finally {
+                workers.decrementAndGet()
+            }
+        }
+    }
 
     /** The host answered with a refusal rather than slowly (a dead token, a
      *  file that has gone); the caller's usual handling of those applies. */
@@ -146,11 +180,13 @@ class ChunkPieces(
         }
         pieces = queue.size + 1
         left.set(pieces)
+        this.out = out
         // The headers gave the size, so the others start now. Waiting for
         // this piece first meant that on a very slow host it hit its time
         // limit over and over, and nothing else ever started.
-        repeat(minOf((connections - 1).coerceAtLeast(1), queue.size)) {
-            pool.execute { worker(out) }
+        val conns = maxOf(startConnections, wanted)
+        repeat(minOf((conns - 1).coerceAtLeast(1), queue.size)) {
+            spawn(out)
         }
         val whole = try {
             read(body.byteStream(), out, head)
@@ -162,7 +198,7 @@ class ChunkPieces(
         } else if (!stopped.get()) {
             retried.incrementAndGet()
             queue += head
-            pool.execute { worker(out) }
+            spawn(out)
         }
         return true
     }
@@ -228,6 +264,33 @@ class ChunkPieces(
          *  the same; 256 KB pieces were worse (buffer down to 2 s). */
         @Volatile var connections = 24
         @Volatile var pieceBytes = 128 * 1024
+
+        /** Bounds for [adapt]. 64 at most: past that more connections to the
+         *  same host stop adding speed (24 -> 64 on p19 on 2026-11-07 went
+         *  from ~300 to 400-700 KB/s, not 2.7x). */
+        private const val MIN_CONNECTIONS = 16
+        private const val MAX_CONNECTIONS = 64
+
+        /** After the player waited [waitedMs] for a [chunkMs] chunk: more
+         *  connections when it waited long, fewer when chunks are there before
+         *  they are wanted, so a quick host costs few sockets and a slow one
+         *  gets what it needs without anyone setting it by hand. */
+        fun adapt(waitedMs: Long, chunkMs: Long) {
+            val now = connections
+            if (now <= 0) return  // pieces turned off for a test
+            val next = when {
+                waitedMs > chunkMs / 2 -> (now + 8).coerceAtMost(MAX_CONNECTIONS)
+                waitedMs < chunkMs / 10 -> (now - 2).coerceAtLeast(MIN_CONNECTIONS)
+                else -> now
+            }
+            if (next != now) {
+                connections = next
+                android.util.Log.i(
+                    "LiveDiag",
+                    "PIECES connections $now -> $next (waited ${waitedMs}ms for a ${chunkMs}ms chunk)",
+                )
+            }
+        }
 
         private const val PIECE_TRIES = 4
         /** A sane chunk is a few MB; see DisguisedSegment. */

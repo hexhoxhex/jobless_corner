@@ -158,6 +158,7 @@ class LiveStreamProxy(
         .readTimeout(15, TimeUnit.SECONDS)
         .connectionPool(okhttp3.ConnectionPool(6, 5, TimeUnit.MINUTES))
         .protocols(listOf(okhttp3.Protocol.HTTP_1_1))
+        .addInterceptor(HostGate)
         .build()
 
     /**
@@ -174,6 +175,7 @@ class LiveStreamProxy(
         .connectTimeout(8, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
         .connectionPool(okhttp3.ConnectionPool(0, 1, TimeUnit.SECONDS))
+        .addInterceptor(HostGate)
         .build()
 
     /** Pooling by default; fresh connections only where a CDN demands them. */
@@ -771,6 +773,13 @@ class LiveStreamProxy(
         val segT0 = System.currentTimeMillis()
         chunkAskedAt = android.os.SystemClock.elapsedRealtime()
         noteAsked(channelId, originalUrl)
+        // Test hook (/api/debug/gate?missing=): this host's chunks are gone.
+        if (debugMissingHost != null && hostOf(originalUrl) == debugMissingHost) {
+            noteChunkMissing(channelId, segName, originalUrl)
+            return NanoHTTPD.newFixedLengthResponse(
+                NanoHTTPD.Response.Status.NOT_FOUND, "text/plain", "upstream 404 (test)",
+            )
+        }
         // A host known to be slow on one connection goes straight to pieces:
         // the first try would only spend 5 s finding that out again. If the
         // host refuses instead, the usual handling below deals with it.
@@ -884,6 +893,10 @@ class LiveStreamProxy(
         if (!resp.isSuccessful) {
             val code = resp.code
             resp.close()
+            // Was passed on without a trace; the 404s of 2026-11-07 left no
+            // line in the log at all.
+            if (code == 404) noteChunkMissing(channelId, segName, lastUrl)
+            else Log.w(DIAG, "PROXY ch=$channelId SEG HTTP $code on ${shortSeg(lastUrl)} host=${hostOf(lastUrl)}")
             return NanoHTTPD.newFixedLengthResponse(
                 NanoHTTPD.Response.Status.lookup(code) ?: NanoHTTPD.Response.Status.INTERNAL_ERROR,
                 "text/plain", "upstream $code",
@@ -1024,8 +1037,9 @@ class LiveStreamProxy(
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(5, TimeUnit.SECONDS)
         .callTimeout(8, TimeUnit.SECONDS)
-        .connectionPool(okhttp3.ConnectionPool(32, 30, TimeUnit.SECONDS))
+        .connectionPool(okhttp3.ConnectionPool(64, 30, TimeUnit.SECONDS))
         .protocols(listOf(okhttp3.Protocol.HTTP_1_1))
+        .addInterceptor(HostGate)
         .build()
 
     /**
@@ -1050,12 +1064,87 @@ class LiveStreamProxy(
                 PIECES_KEEP_MS, TimeUnit.MILLISECONDS,
             )
         }
+        val early = running != null && segName in prefetched
+        // Fetched ahead with a few connections: it is wanted now.
+        if (running != null) running.boost(ChunkPieces.connections)
         val wait = (PIECES_WAIT_MS - (System.currentTimeMillis() - askedAt)).coerceAtLeast(1_000L)
         val done = job.await(wait)
         if (done) pieceJobs.remove(segName, job)
+        prefetched.remove(segName)
+        val waited = System.currentTimeMillis() - askedAt
+        if (done) ChunkPieces.adapt(waited, segDurations[segName] ?: DEFAULT_CHUNK_MS)
         Log.i(DIAG, "PROXY ch=$channelId SEG ${shortSeg(url)} ${shortHost(url)} " +
-            "${if (done) "in pieces" else "pieces still coming"}: ${job.describe()}")
+            "${if (done) "in pieces" else "pieces still coming"}: ${job.describe()}" +
+            if (early) ", fetched ahead, player waited ${waited}ms" else "")
         return job
+    }
+
+    /** Chunks [prefetchSlowChunks] started, by name. */
+    private val prefetched: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /** Chunk lengths from the playlists' EXTINF, by name; for [ChunkPieces.adapt]. */
+    private val segDurations = ConcurrentHashMap<String, Long>()
+
+    /**
+     * Start the next chunks on a slow host as soon as a playlist lists them.
+     *
+     * The player sits ~30 s behind the live edge and asks for one chunk at a
+     * time, so a chunk on p19 used to start downloading only when it was
+     * already due: at 300-700 KB/s a 6-7 MB chunk took 10-20 s for 6 s of
+     * video and the buffer drained (Sky Sport 8 NZ, 2026-11-07). Listed
+     * chunks are known half a minute before they are needed. Fetching the
+     * next [PREFETCH_AHEAD] of them early, on a few connections each, turns
+     * that half minute into download time; when the player asks, the job is
+     * found running and gets the full connection count.
+     *
+     * Bounded: chunks after the last one asked for only, at most
+     * [PREFETCH_AHEAD] at once per channel, dropped after [PIECES_KEEP_MS] if
+     * nobody comes for them. Fast hosts are left alone.
+     */
+    private fun prefetchSlowChunks(channelId: String, body: String) {
+        if (ChunkPieces.connections <= 0 || slowHosts.isEmpty()) return
+        val lastAsked = askedChunks[channelId]?.let { synchronized(it) { it.lastOrNull() } }
+        var duration = DEFAULT_CHUNK_MS
+        val listed = ArrayList<String>()
+        for (raw in body.lineSequence()) {
+            val line = raw.trim()
+            if (line.startsWith("#EXTINF:")) {
+                line.substringAfter(':').substringBefore(',').trim().toDoubleOrNull()
+                    ?.let { duration = (it * 1000).toLong() }
+                continue
+            }
+            if (!line.startsWith("http")) continue
+            segDurations[line.substringAfterLast('/').substringBefore('?')] = duration
+            listed += line
+        }
+        while (segDurations.size > 64) segDurations.keys.firstOrNull()?.let { segDurations.remove(it) }
+        // Only what the player hasn't asked for yet. Before it has asked for
+        // anything, it will start near the beginning of the list.
+        val from = lastAsked?.let { a -> listed.indexOfFirst { shortSeg(it) == a } + 1 } ?: 0
+        if (from < 0 || from >= listed.size) return
+        // Fetched ahead and not yet taken, whether still coming or waiting.
+        var running = pieceJobs.entries.count { (name, job) ->
+            job.channelId == channelId && name in prefetched
+        }
+        for (url in listed.subList(from, minOf(listed.size, from + PREFETCH_AHEAD + 1))) {
+            if (running >= PREFETCH_AHEAD) break
+            if (hostOf(url) !in slowHosts) continue
+            val name = url.substringAfterLast('/').substringBefore('?')
+            if (pieceJobs.containsKey(name) || isSkippedSegment(channelId, name)) continue
+            val job = ChunkPieces(channelId, url, piecesClient, PREFETCH_CONNECTIONS) { buildCdnRequest(it) }
+            if (pieceJobs.putIfAbsent(name, job) != null) continue
+            prefetched += name
+            job.start()
+            segWatchdog.schedule(
+                {
+                    if (pieceJobs.remove(name, job)) job.cancel()
+                    prefetched.remove(name)
+                },
+                PIECES_KEEP_MS, TimeUnit.MILLISECONDS,
+            )
+            running++
+            Log.i(DIAG, "PROXY ch=$channelId SEG ${shortSeg(url)} ${shortHost(url)} fetching ahead")
+        }
     }
 
     private fun shortHost(url: String): String = hostOf(url).substringBefore('.')
@@ -1252,6 +1341,7 @@ class LiveStreamProxy(
         .callTimeout(SEG_RETRY_BUDGET_MS, TimeUnit.MILLISECONDS)
         .connectionPool(okhttp3.ConnectionPool(0, 1, TimeUnit.SECONDS))
         .protocols(listOf(okhttp3.Protocol.HTTP_1_1))
+        .addInterceptor(HostGate)
         .build()
 
     /** For the route survey: does [url] answer with a playlist, using the
@@ -1712,6 +1802,7 @@ class LiveStreamProxy(
                     ),
                 )
                 lastServed[channelId] = rewrittenBody
+                runCatching { prefetchSlowChunks(channelId, servedBody) }
                 return NanoHTTPD.newFixedLengthResponse(
                     NanoHTTPD.Response.Status.OK,
                     "application/vnd.apple.mpegurl",
@@ -2395,6 +2486,9 @@ class LiveStreamProxy(
         // resetting here wiped every inner-403 increment on the next call
         // and the back-off could never engage. The streak is cleared only
         // when an inner fetch actually succeeds (see "inner OK").
+        // Its server asked us to wait, or lists chunks we can't fetch: don't
+        // resolve (each resolve is several requests) until that is over.
+        pauseFor(channelId)?.let { return null }
         cache[channelId]?.let { return it }
         // A source that is genuinely down must not be retried forever.
         //
@@ -2462,6 +2556,66 @@ class LiveStreamProxy(
         return null
     }
 
+    /** Why a channel can't be tried just now, and for how long. */
+    data class Pause(val reason: String, val leftMs: Long)
+
+    /** Where each channel's playlist last came from; kept through
+     *  [invalidate], since that is when it is needed. */
+    private val lastHost = ConcurrentHashMap<String, String>()
+
+    /** Playlist hosts whose listed chunks we can't fetch, until when. */
+    private val unreadableUntil = ConcurrentHashMap<String, Long>()
+
+    /** Recent chunk 404s per channel: chunk name, when. */
+    private val missingChunks = ConcurrentHashMap<String, ArrayDeque<Pair<String, Long>>>()
+
+    /** Non-null while [channelId]'s server has asked us to wait, or lists
+     *  chunks we can't fetch. Null too when a held server is due a check, so
+     *  that one try goes through and finds out whether it lets us back in. */
+    fun pauseFor(channelId: String): Pause? {
+        val host = lastHost[channelId] ?: return null
+        val held = HostGate.heldForMs(host)
+        // A short wait ("Retry-After: 30" on a channel that is full) is a
+        // reason to try another feed, not to sit and wait.
+        if (held >= PAUSE_MIN_HOLD_MS && !HostGate.probeDue(host)) {
+            return Pause("The stream server asked us to wait", held)
+        }
+        val until = unreadableUntil[host] ?: return null
+        val left = until - System.currentTimeMillis()
+        if (left <= 0) {
+            unreadableUntil.remove(host, until)
+            return null
+        }
+        return Pause("This source's video isn't reaching us", left)
+    }
+
+    /** A chunk the playlist we just served lists came back 404. A few in a
+     *  minute is not a blip: it is what a format change looks like (the
+     *  edge sealed its chunk lines on 2026-11-07, and read the old way each
+     *  line pointed at a file that isn't there). Reloading can't fix that and
+     *  only asks the source again and again, so the host is paused instead. */
+    private fun noteChunkMissing(channelId: String, segName: String, url: String) {
+        val listed = innerState[channelId]?.lastGoodBody?.contains(segName) ?: false
+        if (!listed) return
+        val now = System.currentTimeMillis()
+        val seen = missingChunks.getOrPut(channelId) { ArrayDeque() }
+        val count = synchronized(seen) {
+            seen.removeAll { now - it.second > MISSING_WINDOW_MS || it.first == segName }
+            seen.addLast(segName to now)
+            seen.size
+        }
+        Log.w(DIAG, "PROXY ch=$channelId SEG 404 on ${shortSeg(url)} host=${hostOf(url)} — " +
+            "still listed ($count in ${MISSING_WINDOW_MS / 1000}s)")
+        if (count < MISSING_TO_UNREADABLE) return
+        val host = cache[channelId]?.innerUrl?.let(::hostOf) ?: lastHost[channelId] ?: return
+        unreadableUntil[host] = now + UNREADABLE_PAUSE_MS
+        synchronized(seen) { seen.clear() }
+        cache.remove(channelId)
+        Log.w(DIAG, "FORMAT ch=$channelId the chunks $host lists come back 404 — its format " +
+            "has changed; pausing it ${UNREADABLE_PAUSE_MS / 60_000} min instead of reloading")
+        LiveStatus.note("This source's video isn't reaching us")
+    }
+
     /** Give a channel's source a clean slate. Called when the USER picks
      *  the channel, so a deliberate retry is always honoured even while a
      *  back-off is active. */
@@ -2495,9 +2649,15 @@ class LiveStreamProxy(
             }
             val masterUrl = resolver.resolveStream(channelId, budgetMs, announce)
                 ?: return@withLock null
+            lastHost[channelId] = hostOf(masterUrl)
             // Fetch master once to learn the inner URL + STREAM-INF line.
             val failCode = IntArray(1)
             val parsed = parseMaster(masterUrl, failCode)
+            // The server asked us to wait: not the route's fault, and not a
+            // reason to try every other route on it.
+            if (parsed == null && HostGate.heldForMs(hostOf(masterUrl)) > 0) {
+                return@withLock null
+            }
             if (parsed == null) {
                 // 404/410 = this stream does not exist on the CDN (body:
                 // "unknown channel"). That is the ROUTE's fault, not a blip:
@@ -2843,6 +3003,8 @@ class LiveStreamProxy(
         @Volatile var debugSkipNext: String? = null
         /** Test hook: a server every fetch treats as refusing connections. */
         @Volatile var debugBlockedHost: String? = null
+        /** Test hook: a host whose chunks come back 404 (see noteChunkMissing). */
+        @Volatile var debugMissingHost: String? = null
         /** Test hook: treat this host as slow without waiting to find out. */
         @Volatile var debugSlowHost: String? = null
         /** Test hook: measure hosts on every probe instead of reusing a reading. */
@@ -3014,6 +3176,20 @@ class LiveStreamProxy(
         /** A download nobody came back for is dropped after this. Long enough
          *  for the player's retry (8 s at most) and a second full wait. */
         private const val PIECES_KEEP_MS: Long = 60_000L
+        /** See [noteChunkMissing]: this many listed chunks 404 within the
+         *  window and the host is paused for [UNREADABLE_PAUSE_MS]. */
+        private const val MISSING_TO_UNREADABLE: Int = 3
+        private const val MISSING_WINDOW_MS: Long = 60_000L
+        private const val UNREADABLE_PAUSE_MS: Long = 3 * 60_000L
+        /** A server's wait at least this long pauses its channels outright. */
+        private const val PAUSE_MIN_HOLD_MS: Long = 2 * 60_000L
+        /** Chunks on a slow host fetched ahead of the player (see
+         *  [prefetchSlowChunks]), at most, and with how many connections
+         *  each until the player asks for it. */
+        private const val PREFETCH_AHEAD: Int = 2
+        private const val PREFETCH_CONNECTIONS: Int = 8
+        /** A chunk's length when its playlist doesn't say. */
+        private const val DEFAULT_CHUNK_MS: Long = 6_000L
         private const val ASKED_CHUNKS_KEEP: Int = 32
         /** A chunk that arrives on the first try within this counts toward
          *  "the channel is fine" ([recentlyHealthy]). */

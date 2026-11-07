@@ -1077,6 +1077,28 @@ class RemoteServer(
                 }
             }
 
+            // Tests for the polite failure rules: hold= acts as if that server
+            // asked us to wait s seconds (s=0 releases it); missing= makes that
+            // host's chunks come back 404, as after a format change.
+            uri == "/api/debug/gate" && method == Method.POST -> {
+                if (!RemoteAccess.isSuperuser(dev)) {
+                    newFixedLengthResponse(
+                        Response.Status.FORBIDDEN, "application/json",
+                        "{\"error\":\"Superuser only\"}",
+                    )
+                } else {
+                    p("hold")?.takeIf { it.isNotBlank() }?.let { host ->
+                        com.moviebox.tv.data.live.HostGate.holdForTest(
+                            host, (p("s")?.toLongOrNull() ?: 120L) * 1000L,
+                        )
+                    }
+                    p("missing")?.let {
+                        com.moviebox.tv.data.live.LiveStreamProxy.debugMissingHost = it.ifBlank { null }
+                    }
+                    ok()
+                }
+            }
+
             // Measure one feed now, as ranking and auto-switch would. Playback
             // isn't touched. fresh=1 measures hosts again instead of reusing a
             // reading; url= measures that playlist instead of a channel's.

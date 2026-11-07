@@ -60,6 +60,12 @@ class HomeSweepWorker(
             Log.i(TAG, "skipped — something is playing")
             return Result.success()
         }
+        // A server has asked us to wait: checking channels now would only ask
+        // it again, and could not tell a dead channel from a refused one.
+        if (HostGate.anyHeld()) {
+            Log.i(TAG, "skipped — a stream server asked us to wait")
+            return Result.success()
+        }
         val channels = runCatching { LiveTvRepository().channels(includeAll = true) }
             .getOrNull()
         if (channels.isNullOrEmpty()) return Result.retry()
