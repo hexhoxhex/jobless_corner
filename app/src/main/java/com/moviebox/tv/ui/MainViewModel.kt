@@ -2531,8 +2531,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      *  next episode asks it first (see Repository.resolvePlayAnyProvider). */
     private var lastServed: Pair<String, Repository.Provider>? = null
 
-    fun changeQuality(label: String) { quality = label; resolve() }
-    fun changeDub(name: String) { dub = name; resolve() }
+    fun changeQuality(label: String) { keepPlayingIfUnavailable(); quality = label; resolve() }
+    fun changeDub(name: String) { keepPlayingIfUnavailable(); dub = name; resolve() }
+
+    /** What was playing before a language or quality change, to go back to
+     *  if no source has the new one. Such a change used to tear the playing
+     *  video down on failure ("No source has this title", back to the
+     *  details page): picking a language the title doesn't come in stopped
+     *  the movie. */
+    private class KeepOnFailure(val play: PlayInfo, val dub: String, val quality: String)
+    private var keepOnFailure: KeepOnFailure? = null
+
+    private fun keepPlayingIfUnavailable() {
+        keepOnFailure = _state.value.play?.takeIf { !it.isLive }?.let { KeepOnFailure(it, dub, quality) }
+    }
 
     /**
      * Player ran into a decoder error (e.g. 1080P HEVC on a soft decoder).
@@ -3006,6 +3018,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         // (2026-10-29). The newest request wins; an older result is dropped.
         val allowFirstEpisode = firstEpisodeFallbackNext
         firstEpisodeFallbackNext = false
+        // Only the language/quality change that asked for it.
+        val keep = keepOnFailure
+        keepOnFailure = null
         resolveJob?.cancel()
         resolveJob = viewModelScope.launch {
             val wantSubject = subjectId
@@ -3089,6 +3104,26 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 pendingTmdbId = null
                 quality = p.selected
+                // Asked for a language and got the original back (the sources
+                // that have no such copy answer with what they have): say so,
+                // and don't keep asking for it on every next episode.
+                val dubNote = if (keep != null && dub != keep.dub &&
+                    !dub.contains("original", true) &&
+                    !p.selectedDub.contains(dub, true) && !dub.contains(p.selectedDub, true)
+                ) {
+                    "$dub isn't available for this title".also { dub = keep.dub }
+                } else null
+                // Then nothing changes: what was playing (French, say) goes on,
+                // rather than being swapped for the original the source sent.
+                if (dubNote != null && keep != null &&
+                    _state.value.play?.mediaUrl == keep.play.mediaUrl
+                ) {
+                    quality = keep.quality
+                    android.util.Log.i("VodDiag", "$dubNote — kept what was playing")
+                    slowHint.cancel()
+                    _state.update { it.copy(playLoading = false, error = dubNote) }
+                    return@onSuccess
+                }
                 Repository.Provider.entries.firstOrNull { it.label == p.provider }
                     ?.let { lastServed = wantSubject to it }
                 val key = WatchHistoryEntity.keyOf(
@@ -3136,7 +3171,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 slowHint.cancel()
                 // Leave the overlay to the player: it clears on first frame.
                 _state.update {
-                    it.copy(play = p, playLoading = false, resumeMs = resume)
+                    it.copy(play = p, playLoading = false, resumeMs = resume, error = dubNote)
                 }
                 com.moviebox.tv.debug.Telemetry.onPlayStart(
                     kind = "vod", title = p.title,
@@ -3154,6 +3189,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 // If this play came from a TMDB-bridged item, the bridge picked
                 // an aoneroom title but the stream is broken/unavailable —
                 // remember the TMDB id is dead and bounce out gracefully.
+                // A language or quality change that no source could serve:
+                // go on with what was playing, as it was.
+                if (keep != null && _state.value.play?.mediaUrl == keep.play.mediaUrl) {
+                    val wanted = if (dub != keep.dub) dub else quality
+                    dub = keep.dub
+                    quality = keep.quality
+                    android.util.Log.w(
+                        "VodDiag",
+                        "no source has '$wanted' for this title — staying on what was playing " +
+                            "(${e.message})",
+                    )
+                    _state.update {
+                        it.copy(playLoading = false, error = "$wanted isn't available for this title")
+                    }
+                    return@onFailure
+                }
                 pendingTmdbId?.let { UnavailableCatalog.mark(it) }
                 pendingTmdbId = null
                 val cur = _state.value

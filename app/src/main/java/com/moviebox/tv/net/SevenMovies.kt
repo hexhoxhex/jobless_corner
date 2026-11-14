@@ -1,5 +1,6 @@
 package com.moviebox.tv.net
 
+import com.moviebox.tv.data.Dub
 import com.moviebox.tv.data.PlayInfo
 import com.moviebox.tv.data.Quality
 import kotlinx.coroutines.CoroutineScope
@@ -158,7 +159,25 @@ object SevenMovies {
         episode: Int,
         title: String,
         resolution: String = "best",
-    ): PlayInfo? = findStream(pathOf(tmdbId, season, episode), title, season, episode, resolution)
+        /** An audio language other than the original, when the viewer
+         *  picked one: Orion lists a copy per language. */
+        dub: String = "Original",
+    ): PlayInfo? {
+        val path = pathOf(tmdbId, season, episode)
+        val info = findStream(path, title, season, episode, resolution, dub) ?: return null
+        // The languages it comes in, for the player's audio menu: 7Movies
+        // never said, so the menu offered none and a pick asked for
+        // something that wasn't there.
+        val dubs = knownDubs[path].orEmpty()
+        if (dubs.isEmpty() || info.dubs.isNotEmpty()) return info
+        return info.copy(
+            dubs = listOf(Dub("Original", "original", true)) +
+                dubs.map { Dub(it, it.lowercase(), false) },
+        )
+    }
+
+    /** Languages Orion listed for each episode or film, by path. */
+    private val knownDubs = java.util.concurrent.ConcurrentHashMap<String, List<String>>()
 
     /** Ask for an episode's streams without playing it, so vidrift has
      *  them ready when the viewer gets there (the first lookup of an episode
@@ -186,6 +205,7 @@ object SevenMovies {
 
     private suspend fun findStream(
         path: String, title: String, season: Int, episode: Int, resolution: String,
+        dub: String = "Original",
     ): PlayInfo? = coroutineScope {
         val started = android.os.SystemClock.elapsedRealtime()
         fun spent() = android.os.SystemClock.elapsedRealtime() - started
@@ -195,6 +215,28 @@ object SevenMovies {
             return@coroutineScope null
         }
         var dubbed: PlayInfo? = null
+
+        // A language the viewer asked for: Orion's copy in it, when it has
+        // one and this TV plays Orion (HEVC). Otherwise the usual original,
+        // and the player says the language isn't there.
+        if (isDub(dub) && hevc) {
+            val list = fetchJson(sourceUrl(path, token, "orion"))
+            dubNames(list).takeIf { it.isNotEmpty() }?.let { knownDubs[path] = it }
+            val streams = list?.optJSONArray("streams")
+            val match = (0 until (streams?.length() ?: 0)).mapNotNull { streams?.optJSONObject(it) }
+                .firstOrNull { it.optString("name").substringAfter('·').trim().equals(dub, true) }
+            val raw = match?.let { it.optString("url").ifBlank { it.optString("proxyUrl") } }
+            if (!raw.isNullOrBlank()) {
+                val url = if (raw.startsWith("/")) BASE + raw else raw
+                if (withContext(Dispatchers.IO) { StreamProbe.check(url, STREAM_HEADERS) } != null) {
+                    android.util.Log.i(TAG, "$path via orion in $dub, as asked, in ${spent()} ms")
+                    return@coroutineScope playInfo(
+                        url, "Auto", listOf(Quality("Auto", url)), dub, title, season, episode,
+                    )
+                }
+            }
+            android.util.Log.i(TAG, "$path: no $dub copy that plays — the original instead")
+        }
 
         /** The server's stream if it plays and isn't a dub; a dub is kept
          *  aside in [dubbed] as a last resort. */
@@ -268,6 +310,7 @@ object SevenMovies {
         val orionList = withTimeoutOrNull(ORION_LIST_WAIT_MS) { orion.await() }
         val dubs = dubNames(orionList)
         if (dubs.isNotEmpty()) {
+            knownDubs[path] = dubs
             dubbedTitles.add(titleKey)
             android.util.Log.i(
                 TAG, "$path: dubs exist (${dubs.joinToString()}) — " +

@@ -2916,12 +2916,44 @@ class LiveStreamProxy(
     /** True (and the host remembered) when [code]/[body] is the edge's
      *  "token required" refusal. */
     private fun noteTokenRequired(url: String, code: Int, body: String): Boolean {
-        if (code != 403 || !body.contains("token required", ignoreCase = true)) return false
+        if (code != 403) return false
         val host = hostOf(url)
-        if (tokenHosts.add(host)) {
-            Log.w(DIAG, "PROXY $host wants a playlist token — asking for one per channel")
+        if (body.contains("token required", ignoreCase = true)) {
+            if (tokenHosts.add(host)) {
+                Log.w(DIAG, "PROXY $host wants a playlist token — asking for one per channel")
+                saveTokenHosts()
+            }
+            return true
         }
+        // 2026-11-14: the edge stopped saying so. A playlist asked for
+        // without a token got a bare "forbidden", a fresh start never learned
+        // it needed one, and asked without one until the address was banned
+        // (no token was asked for all day). So a plain refusal from a host
+        // not known to want tokens is checked once: if the host hands out a
+        // token for that playlist, it wants it. A ban answers the token call
+        // with a wait too, which HostGate keeps.
+        if (host in tokenHosts || HostGate.heldForMs(host) > 0) return false
+        if (body.contains("unknown channel", ignoreCase = true)) return false
+        val now = System.currentTimeMillis()
+        if (now - (tokenCheckAt[host] ?: 0L) < TOKEN_CHECK_EVERY_MS) return false
+        tokenCheckAt[host] = now
+        val slug = url.substringAfter("//").substringAfter('/', "")
+            .substringBefore('/').substringBefore('?')
+        if (slug.isBlank() || playlistToken(host, slug, url) == null) return false
+        tokenHosts.add(host)
+        saveTokenHosts()
+        Log.w(DIAG, "PROXY $host refused a playlist without a token and hands one out — asking for one per channel")
         return true
+    }
+
+    /** Hosts known to want tokens, kept across restarts: learning it again
+     *  costs a refused request each time the app starts. */
+    private fun saveTokenHosts() {
+        runCatching {
+            com.moviebox.tv.App.instance
+                .getSharedPreferences(TOKEN_PREFS, android.content.Context.MODE_PRIVATE)
+                .edit().putStringSet("hosts", tokenHosts.toSet()).apply()
+        }
     }
 
     /** [url] with a playlist token when its host wants one; [url] itself
@@ -3067,7 +3099,17 @@ class LiveStreamProxy(
     companion object {
         /** Hosts that answered "token required", and the tokens in hand —
          *  shared by every proxy (playback, the health sweep, the probes). */
-        private val tokenHosts: MutableSet<String> = ConcurrentHashMap.newKeySet()
+        private val tokenHosts: MutableSet<String> = ConcurrentHashMap.newKeySet<String>().also { set ->
+            runCatching {
+                com.moviebox.tv.App.instance
+                    .getSharedPreferences(TOKEN_PREFS, android.content.Context.MODE_PRIVATE)
+                    .getStringSet("hosts", null)?.let { set.addAll(it) }
+            }
+        }
+        private const val TOKEN_PREFS = "live_tokens"
+        /** When a host was last checked for tokens after a bare refusal. */
+        private val tokenCheckAt = ConcurrentHashMap<String, Long>()
+        private const val TOKEN_CHECK_EVERY_MS = 10 * 60_000L
         private val playlistTokens = ConcurrentHashMap<String, PlaylistToken>()
         private val playlistTokenLock = Any()
         /** Token -> (the whole token answer, kept until). See [unseal]. */

@@ -35,8 +35,34 @@ object HostGate : Interceptor {
     private const val MAX_HOLD_MS = 60 * 60_000L
     private val REFUSALS = setOf(403, 429, 503)
 
-    private val heldUntil = ConcurrentHashMap<String, Long>()
-    private val lastProbe = ConcurrentHashMap<String, Long>()
+    private val heldUntil = ConcurrentHashMap<String, Long>().also { held ->
+        // Kept across restarts: an app restarted mid-ban (an update, the TV
+        // freeing memory) asked again at once, and the hourly background
+        // check asked every hour, which can keep a one-hour ban going for
+        // good (2026-11-14: banned from at least 08:44, probed 08:44, 09:44).
+        runCatching {
+            val now = System.currentTimeMillis()
+            com.moviebox.tv.App.instance.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+                .all.forEach { (host, until) -> if (until is Long && until > now) held[host] = until }
+        }
+    }
+    /** A restart counts as a check just made, so the first real one waits
+     *  [PROBE_EVERY_MS] like any other. */
+    private val lastProbe = ConcurrentHashMap<String, Long>().also { lp ->
+        val now = System.currentTimeMillis()
+        heldUntil.keys.forEach { lp[it] = now }
+    }
+    private const val PREFS = "host_gate"
+
+    private fun save() {
+        runCatching {
+            val now = System.currentTimeMillis()
+            val edit = com.moviebox.tv.App.instance
+                .getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE).edit().clear()
+            heldUntil.forEach { (host, until) -> if (until > now) edit.putLong(host, until) }
+            edit.apply()
+        }
+    }
 
     /** How much longer [host] asked us to stay away; 0 when it didn't. */
     fun heldForMs(host: String): Long {
@@ -50,6 +76,7 @@ object HostGate : Interceptor {
         if (ms <= 0) {
             heldUntil.remove(host)
             lastProbe.remove(host)
+            save()
             Log.i(TAG, "GATE $host released for a test")
         } else {
             hold(host, ms, 0)
@@ -93,6 +120,7 @@ object HostGate : Interceptor {
             hold(host, wait, response.code)
         } else if (probing && response.code !in REFUSALS) {
             heldUntil.remove(host)
+            save()
             Log.i(TAG, "GATE $host answers again (HTTP ${response.code}) — released")
         }
         return response
@@ -103,6 +131,7 @@ object HostGate : Interceptor {
         val until = System.currentTimeMillis() + ms
         val before = heldUntil.put(host, until)
         lastProbe[host] = System.currentTimeMillis()
+        save()
         if (before == null) {
             Log.w(TAG, "GATE $host asked us to wait ${ms / 1000}s (HTTP $code) — " +
                 "holding every request to it until then")

@@ -1065,7 +1065,7 @@ class Repository(
             val subs = openSubtitlesAsync(tmdbId, isTv, titleHint.orEmpty(), se, ep, year)
             val info = com.moviebox.tv.net.SevenMovies.resolvePlay(
                 tmdbId = tmdbId, season = se, episode = ep,
-                title = titleHint.orEmpty(), resolution = resolution,
+                title = titleHint.orEmpty(), resolution = resolution, dub = dub,
             ) ?: run {
                 subs.cancel()
                 throw ApiException("This title isn't available right now.")

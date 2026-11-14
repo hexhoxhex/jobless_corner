@@ -340,7 +340,7 @@ object H5Client {
     /** Sign + POST a JSON body to the H5 origin. Used for search; the signing
      *  is identical to what we already do for the legacy mobile API and the
      *  H5 origin still accepts it. */
-    fun signedPost(path: String, jsonBody: String): String {
+    fun signedPost(path: String, jsonBody: String, retry: Boolean = true): String {
         ensureWarm()
         val ts = System.currentTimeMillis()
         val contentType = "application/json; charset=utf-8"
@@ -372,7 +372,15 @@ object H5Client {
                 // background so the next call works, instead of serving a
                 // half-empty catalog until the app is updated.
                 if (r.code == 400 && text.contains("invalid token", ignoreCase = true)) {
+                    val stale = bearer
                     onInvalidToken()
+                    // The new session takes a few seconds to mint; the search
+                    // that found the old one stale came back empty without
+                    // this (Spider-Man, 2026-11-14: new session 5 s later,
+                    // every search after it fine). Wait for it, once.
+                    if (retry && awaitNewBearer(stale, NEW_SESSION_WAIT_MS)) {
+                        return@use signedPost(path, jsonBody, retry = false)
+                    }
                 }
                 error("H5 ${r.code} on $path")
             }
@@ -406,6 +414,20 @@ object H5Client {
         builder.header("X-Client-Token", Crypto.clientToken(ts))
             .header("x-tr-signature", signature)
             .header("X-Client-Status", "0")
+    }
+
+    /** How long a request waits for a re-minted session before giving up. */
+    private const val NEW_SESSION_WAIT_MS = 8_000L
+
+    /** True once a session other than [stale] is in hand, within [ms]. */
+    private fun awaitNewBearer(stale: String?, ms: Long): Boolean {
+        val until = System.currentTimeMillis() + ms
+        while (System.currentTimeMillis() < until) {
+            val now = bearer
+            if (!now.isNullOrBlank() && now != stale) return true
+            Thread.sleep(250)
+        }
+        return false
     }
 
     /** At most one re-mint per this window; the WebView mint is not free. */
