@@ -418,13 +418,46 @@ object SevenMovies {
         hls = true,
     )
 
+    /**
+     * Who the API calls say they are, tried in turn. The site's firewall
+     * turns away requests that claim to be a browser without being one:
+     * on 2026-11-14 every boot call sent as Chrome 131 (and Chrome 142,
+     * WebView, Firefox) got its 403 block page, while OkHttp's own name got
+     * through — 7Movies had failed every title since the morning. A block
+     * page moves on to the next identity, and the one that got through is
+     * kept, so a later change of mind on the site's side heals the same way.
+     * The streams themselves are not behind that rule.
+     */
+    private val IDENTITIES = listOf<String?>(null /* OkHttp's own */, UA)
+    @Volatile private var identity = 0
+
     /** GET JSON; cancelling the coroutine cancels the request, so a server
      *  that loses the race doesn't keep the caller waiting. */
-    private suspend fun fetchJson(url: String, via: OkHttpClient = client): JSONObject? =
+    private suspend fun fetchJson(url: String, via: OkHttpClient = client): JSONObject? {
+        val start = identity
+        for (step in IDENTITIES.indices) {
+            val i = (start + step) % IDENTITIES.size
+            val (json, blocked) = fetchJsonAs(url, via, IDENTITIES[i])
+            if (blocked) continue
+            if (i != identity) {
+                identity = i
+                android.util.Log.i(
+                    TAG,
+                    "the site lets us in as ${IDENTITIES[i] ?: "the app itself"} now — keeping that",
+                )
+            }
+            return json
+        }
+        return null
+    }
+
+    /** One GET as [ua] (null: OkHttp's own name). The flag is true when the
+     *  answer was the site firewall's block page rather than the API's. */
+    private suspend fun fetchJsonAs(url: String, via: OkHttpClient, ua: String?): Pair<JSONObject?, Boolean> =
         suspendCancellableCoroutine { cont ->
             val call = via.newCall(
                 Request.Builder().url(url)
-                    .header("User-Agent", UA)
+                    .apply { if (ua != null) header("User-Agent", ua) }
                     .header("Referer", "$BASE/embed2/play")
                     .header("Accept", "application/json")
                     .get().build(),
@@ -432,27 +465,27 @@ object SevenMovies {
             cont.invokeOnCancellation { call.cancel() }
             call.enqueue(object : Callback {
                 override fun onFailure(call: Call, e: IOException) {
-                    if (cont.isActive) cont.resume(null)
+                    if (cont.isActive) cont.resume(null to false)
                 }
 
                 override fun onResponse(call: Call, response: Response) {
-                    val json = response.use { r ->
+                    val answer = response.use { r ->
                         if (!r.isSuccessful) {
                             // 451 "Playback is not available for this title"
                             // is how it refuses a title it has blocked
                             // (Breaking Bad, 2026-10-11).
+                            val peek = runCatching { r.peekBody(200).string() }.getOrDefault("")
                             android.util.Log.i(
                                 TAG,
                                 "${url.substringAfter("/api/").substringBefore('?')}: " +
-                                    "HTTP ${r.code} ${runCatching { r.peekBody(200).string() }
-                                        .getOrDefault("").take(120)}",
+                                    "HTTP ${r.code} ${peek.take(120)}",
                             )
-                            null
+                            null to (r.code == 403 && peek.trimStart().startsWith("<"))
                         } else {
-                            runCatching { JSONObject(r.body?.string().orEmpty()) }.getOrNull()
+                            runCatching { JSONObject(r.body?.string().orEmpty()) }.getOrNull() to false
                         }
                     }
-                    if (cont.isActive) cont.resume(json)
+                    if (cont.isActive) cont.resume(answer)
                 }
             })
         }

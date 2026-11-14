@@ -353,8 +353,15 @@ fun PlayerScreen(state: UiState, vm: MainViewModel) {
         if (!controlsVisible && isLiveContent) return@LaunchedEffect
         while (true) {
             exoRef?.let {
-                if (!scrubbing) positionMs = it.currentPosition
-                durationMs = it.duration.coerceAtLeast(0)
+                // For a moment after a new video is picked the player still
+                // holds the last one, and its numbers aren't this video's:
+                // Haunted Hotel's 25 minutes, read as Banshee S1E1's, had a
+                // working VixSrc stream thrown away as "the wrong video"
+                // (2026-11-14). Only the player's own item counts.
+                val current = isLiveContent ||
+                    it.currentMediaItem?.localConfiguration?.uri?.toString() == play?.mediaUrl
+                if (!scrubbing) positionMs = if (current) it.currentPosition else 0L
+                durationMs = if (current) it.duration.coerceAtLeast(0) else 0L
             }
             if (!isLiveContent && durationMs > 0) {
                 vm.subtitles.onDuration(durationMs)
