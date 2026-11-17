@@ -2492,6 +2492,12 @@ class LiveStreamProxy(
         // resolve (each resolve is several requests) until that is over.
         pauseFor(channelId)?.let { return null }
         cache[channelId]?.let { return it }
+        // Just failed: the player retries a failed playlist within a second
+        // or two, and each retry used to start a whole new lookup (8 in 17 s
+        // for one channel whose server said it was full, 2026-11-18).
+        lastResolveFail[channelId]?.let { at ->
+            if (System.currentTimeMillis() - at < RESOLVE_FAIL_HOLD_MS) return null
+        }
         // A source that is genuinely down must not be retried forever.
         //
         // Observed on Nicktoons: the CDN answered `503 Backend fetch failed`
@@ -2516,8 +2522,10 @@ class LiveStreamProxy(
         }
         if (entry != null) {
             sourceDownStreak.remove(channelId)
+            lastResolveFail.remove(channelId)
             return entry
         }
+        lastResolveFail[channelId] = System.currentTimeMillis()
         val streak = (sourceDownStreak[channelId] ?: 0) + 1
         sourceDownStreak[channelId] = streak
         if (streak >= SOURCE_DOWN_STREAK) {
@@ -2579,7 +2587,10 @@ class LiveStreamProxy(
         val held = HostGate.heldForMs(host)
         // A short wait ("Retry-After: 30" on a channel that is full) is a
         // reason to try another feed, not to sit and wait.
-        if (held >= PAUSE_MIN_HOLD_MS && !HostGate.probeDue(host)) {
+        // Waiting is all that is left only when no other route leads
+        // elsewhere: ESPN was paused for an hour on the main server's ban
+        // while hdm1 carried it (2026-11-18).
+        if (held >= PAUSE_MIN_HOLD_MS && !HostGate.probeDue(host) && LiveResolver.allRoutesRefused()) {
             return Pause("The stream server asked us to wait", held)
         }
         val until = unreadableUntil[host] ?: return null
@@ -2673,6 +2684,9 @@ class LiveStreamProxy(
         sourceDownUntil.remove(channelId)
     }
 
+    /** When each channel's last lookup failed; see [ensureCached]. */
+    private val lastResolveFail = ConcurrentHashMap<String, Long>()
+
     /** Consecutive resolve/master failures, per channel. */
     private val sourceDownStreak = ConcurrentHashMap<String, Int>()
 
@@ -2714,6 +2728,11 @@ class LiveStreamProxy(
             if (announce && parsed == null && failCode[0] in setOf(400, 401, 403)) {
                 teach(channelId, hostOf(masterUrl))
             }
+            // A server refusing channel after channel: other routes first.
+            if (parsed == null && failCode[0] in setOf(401, 403)) {
+                LiveResolver.noteRefused(hostOf(masterUrl), channelId)
+            }
+            if (parsed != null) LiveResolver.noteServed(hostOf(masterUrl))
             if (parsed == null) {
                 // 404/410 = this stream does not exist on the CDN (body:
                 // "unknown channel"). That is the ROUTE's fault, not a blip:
@@ -2988,10 +3007,17 @@ class LiveStreamProxy(
             val recipe = Lessons.forHost(host)?.token
             val tokenUrl = recipe?.url(slug) ?: ("https://$host/api/playlist-token?slug=" +
                 java.net.URLEncoder.encode(slug, "UTF-8"))
+            // Refused lately: asking again only adds to what got the
+            // address banned (the main server put its tokens behind a bot
+            // check on 2026-11-14 and refuses every token call since).
+            if (now - (tokenRefusedAt[host] ?: 0L) < TOKEN_REFUSED_PAUSE_MS) {
+                return playlistTokens[key]?.takeIf { now < it.validUntil }?.value
+            }
             val json = runCatching {
                 clientFor(refUrl).newCall(buildCdnRequest(tokenUrl).build()).execute().use { r ->
                     if (!r.isSuccessful) {
                         Log.w(DIAG, "PROXY token for $slug: HTTP ${r.code}")
+                        if (r.code in 401..403) tokenRefusedAt[host] = now
                         null
                     } else org.json.JSONObject(r.body?.string().orEmpty())
                 }
@@ -3110,6 +3136,9 @@ class LiveStreamProxy(
         /** When a host was last checked for tokens after a bare refusal. */
         private val tokenCheckAt = ConcurrentHashMap<String, Long>()
         private const val TOKEN_CHECK_EVERY_MS = 10 * 60_000L
+        /** After a token call is refused, no more to that host for this long. */
+        private val tokenRefusedAt = ConcurrentHashMap<String, Long>()
+        private const val TOKEN_REFUSED_PAUSE_MS = 10 * 60_000L
         private val playlistTokens = ConcurrentHashMap<String, PlaylistToken>()
         private val playlistTokenLock = Any()
         /** Token -> (the whole token answer, kept until). See [unseal]. */
@@ -3310,6 +3339,9 @@ class LiveStreamProxy(
         private const val UNREADABLE_PAUSE_MS: Long = 3 * 60_000L
         /** A server's wait at least this long pauses its channels outright. */
         private const val PAUSE_MIN_HOLD_MS: Long = 2 * 60_000L
+        /** A channel whose lookup just failed isn't looked up again for this
+         *  long; the player's own quick retries get the failure at once. */
+        private const val RESOLVE_FAIL_HOLD_MS: Long = 8_000L
         /** Chunks on a slow host fetched ahead of the player (see
          *  [prefetchSlowChunks]), at most, and with how many connections
          *  each until the player asks for it. */

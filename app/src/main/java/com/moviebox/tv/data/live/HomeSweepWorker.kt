@@ -66,6 +66,13 @@ class HomeSweepWorker(
             Log.i(TAG, "skipped — a stream server asked us to wait")
             return Result.success()
         }
+        // Or refuses channel after channel: the run would only ask it again,
+        // and can't tell a dead channel from a refused one (seven channels in
+        // two minutes at midnight, then an hour's ban, 2026-11-18).
+        if (LiveResolver.refusingHosts().isNotEmpty()) {
+            Log.i(TAG, "skipped — a stream server is refusing every channel")
+            return Result.success()
+        }
         val channels = runCatching { LiveTvRepository().channels(includeAll = true) }
             .getOrNull()
         if (channels.isNullOrEmpty()) return Result.retry()

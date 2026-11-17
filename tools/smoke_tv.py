@@ -10,6 +10,7 @@ Run with the app open and `adb forward tcp:8080 tcp:8080` in place:
     python tools/smoke_tv.py            # everything
     python tools/smoke_tv.py vod        # films and series only
     python tools/smoke_tv.py live       # live channels only
+    python tools/smoke_tv.py sources    # each source alone + the language switch
 Writes smoke_result.json next to where it is run. Test plays show up in the
 TV's watch history and move the saved place of the titles they play; what
 was on screen before the run, and where, is put back at the end.
@@ -35,10 +36,14 @@ TITLES = [
     ("The Office", 2, 1),
     ("Game of Thrones", 1, 1),
 ]
-# One title tried on each source by itself.
+# One title tried on each source by itself, by its catalogue id: a search
+# can rank another title first ("Banshee" once gave "The Banshees of
+# Inisherin", a film, for Season 1 Episode 1).
 PER_SOURCE_TITLE = ("Banshee", 1, 1)
+PER_SOURCE_ITEM = {"subjectId": "1076625875212323512", "title": "Banshee S4", "type": 2,
+                   "year": 2016, "isSeries": True}
 SOURCES = ["7Movies", "MovieBox", "VidNest", "VixSrc", "4KHDHub"]
-LIVE = [("38", "Sky Sports Main Event"), ("345", "CNN USA"), ("44", "ESPN USA"),
+LIVE = [("374", "Cinemax USA"), ("38", "Sky Sports Main Event"), ("345", "CNN USA"), ("44", "ESPN USA"),
         ("31", "TNT Sports 1 UK"), ("356", "BBC One UK"), ("130", "Sky Sports Premier League"),
         ("414", "SuperSport Premier League")]
 
@@ -97,8 +102,8 @@ def find(words, series):
     return hits[0] if hits else None
 
 
-def play_title(words, se, ep, pin=None):
-    h = find(words, se > 0)
+def play_title(words, se, ep, pin=None, item=None):
+    h = item or find(words, se > 0)
     if not h:
         return {"test": words, "ok": False, "note": "not found by search"}
     close()
@@ -129,7 +134,7 @@ def play_title(words, se, ep, pin=None):
 
 def dub_switch():
     """The language switch must never stop what is playing."""
-    r = play_title(*PER_SOURCE_TITLE)
+    r = play_title(*PER_SOURCE_TITLE, item=PER_SOURCE_ITEM)
     if not r["ok"]:
         return [dict(r, test="language switch (setup)")]
     out = []
@@ -205,8 +210,9 @@ def main():
     if which in ("all", "vod"):
         for t in TITLES:
             note(play_title(*t))
+    if which in ("all", "vod", "sources"):
         for src in SOURCES:
-            note(play_title(*PER_SOURCE_TITLE, pin=src))
+            note(play_title(*PER_SOURCE_TITLE, pin=src, item=PER_SOURCE_ITEM))
         for r in dub_switch():
             note(r)
     if which in ("all", "live"):

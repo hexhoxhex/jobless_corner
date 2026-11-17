@@ -517,7 +517,9 @@ class LiveResolver(
             // answers entirely, waiting for a vinix / other alternate to
             // succeed instead of immediately handing back a token that will
             // 403 on the very next hop.
-            val avoid = avoidCdnsFor(channelId)
+            // Plus any server refusing every channel right now (see
+            // [noteRefused]): its answer would only be refused again.
+            val avoid = avoidCdnsFor(channelId) + refusingHosts()
             if (avoid.isNotEmpty()) {
                 android.util.Log.w(
                     "LiveDiag",
@@ -600,10 +602,12 @@ class LiveResolver(
                             }
                         }
                     }
+                    val refusing = refusingHosts()
                     for (path in playerPathsFor(channelId, wide = true)) {
                         fallbackProbes += async {
                             runCatching { tryPlayerPath(channelId, path) }
                                 .getOrNull()
+                                ?.takeIf { hostFromUrl(it) !in refusing }
                                 ?.let { it to "dlhd:$path" }
                         }
                     }
@@ -865,6 +869,12 @@ class LiveResolver(
     private suspend fun tryPlayerPath(
         channelId: String,
         path: String,
+        allowJs: Boolean = true,
+    ): String? = tryPlayerPathOnce(channelId, path, allowJs)?.also { notePathHost(path, it) }
+
+    private suspend fun tryPlayerPathOnce(
+        channelId: String,
+        path: String,
         /** False skips the WebView step (JS-only players): for lookups that
          *  run while something is playing. */
         allowJs: Boolean = true,
@@ -1050,7 +1060,14 @@ class LiveResolver(
         // failed, try them all again rather than none.
         val dead = deadRoutesFor(channelId)
         val live = all.filter { it !in dead }
-        val usable = if (live.isEmpty()) all else live
+        // And paths that lead to a server refusing every channel go behind
+        // the rest (2026-11-14: the main stream server put its token behind
+        // a bot check; /watch, /stream and /hub all lead there, and a
+        // channel also carried elsewhere — ESPN on hdm1 via /player — was
+        // only reached after a minute of being refused there first).
+        val refusing = refusingHosts()
+        val usable = (if (live.isEmpty()) all else live)
+            .sortedBy { path -> if (pathHost[path]?.let { it in refusing } == true) 1 else 0 }
         return if (wide) usable else usable.take(PATHS_PER_FIRST_PASS)
     }
 
@@ -1369,6 +1386,85 @@ class LiveResolver(
                     .getSharedPreferences(WRAPPER_PREFS, android.content.Context.MODE_PRIVATE)
                     .edit().putString(LEADER_KEY, path).apply()
             }
+        }
+
+        /** Which stream server each wrapper path last led to; kept across
+         *  restarts, so a fresh start already knows which paths to put last. */
+        private val pathHost = java.util.concurrent.ConcurrentHashMap<String, String>().also { m ->
+            runCatching {
+                com.moviebox.tv.App.instance
+                    .getSharedPreferences(WRAPPER_PREFS, android.content.Context.MODE_PRIVATE)
+                    .getString(PATH_HOSTS_KEY, null)?.let { org.json.JSONObject(it) }
+                    ?.let { o -> o.keys().forEach { k -> m[k] = o.getString(k) } }
+            }
+        }
+        private const val PATH_HOSTS_KEY = "path_hosts"
+
+        private fun notePathHost(path: String, stream: String) {
+            val host = hostFromUrl(stream) ?: return
+            if (pathHost.put(path, host) == host) return
+            runCatching {
+                com.moviebox.tv.App.instance
+                    .getSharedPreferences(WRAPPER_PREFS, android.content.Context.MODE_PRIVATE)
+                    .edit().putString(PATH_HOSTS_KEY, org.json.JSONObject(pathHost as Map<*, *>).toString()).apply()
+            }
+        }
+
+        /** True when every path we know of leads to a server that is refusing
+         *  us or has us waiting: then no other route can help, and waiting is
+         *  all that is left. While one path still leads elsewhere (ESPN on
+         *  hdm1 when the main server refused, 2026-11-14), it is worth trying. */
+        fun allRoutesRefused(): Boolean {
+            // Most paths must be known first: a fresh start that has only
+            // been to the refusing server would otherwise call that "every
+            // route" (Cinemax was paused that way, 2026-11-18).
+            val known = PLAYER_PATHS.mapNotNull { pathHost[it] }
+            if (known.size < PLAYER_PATHS.size - 2) return false
+            val refusing = refusingHosts()
+            return known.all { it in refusing }
+        }
+
+        /** Server -> channel -> when it refused that channel's playlist. */
+        private val refusals =
+            java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.ConcurrentHashMap<String, Long>>()
+        /** Servers refusing every channel, until when. */
+        private val refusingUntil = java.util.concurrent.ConcurrentHashMap<String, Long>()
+        private const val REFUSALS_WINDOW_MS = 10 * 60_000L
+        private const val REFUSING_FOR_MS = 30 * 60_000L
+
+        /** [host] refused [channelId]'s playlist (401/403, not a "wait"). Two
+         *  different channels within [REFUSALS_WINDOW_MS] and the server is
+         *  taken to be refusing us as a whole: its paths go last for
+         *  [REFUSING_FOR_MS] (see [playerPathsFor]). */
+        fun noteRefused(host: String, channelId: String) {
+            val now = System.currentTimeMillis()
+            val seen = refusals.getOrPut(host) { java.util.concurrent.ConcurrentHashMap() }
+            seen[channelId] = now
+            seen.values.removeIf { now - it > REFUSALS_WINDOW_MS }
+            if (seen.size >= 2 && (refusingUntil[host] ?: 0L) < now) {
+                refusingUntil[host] = now + REFUSING_FOR_MS
+                android.util.Log.w(
+                    "LiveDiag",
+                    "RESOLVER $host refuses every channel — routes to it go last for " +
+                        "${REFUSING_FOR_MS / 60_000} min",
+                )
+            }
+        }
+
+        /** [host] served a playlist: whatever it was refusing, it isn't now. */
+        fun noteServed(host: String) {
+            refusals.remove(host)
+            if (refusingUntil.remove(host) != null) {
+                android.util.Log.i("LiveDiag", "RESOLVER $host serves again")
+            }
+        }
+
+        /** Servers refusing every channel, or having us wait: routes to them
+         *  go last and their answers are skipped while another can answer. */
+        fun refusingHosts(): Set<String> {
+            val now = System.currentTimeMillis()
+            refusingUntil.entries.removeIf { it.value < now }
+            return refusingUntil.keys.toSet() + HostGate.heldHosts()
         }
 
         /** How many wrapper paths the first pass may fetch. ONE.

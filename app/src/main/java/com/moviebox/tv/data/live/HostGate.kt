@@ -83,6 +83,12 @@ object HostGate : Interceptor {
         }
     }
 
+    /** Servers that have us waiting right now. */
+    fun heldHosts(): Set<String> {
+        val now = System.currentTimeMillis()
+        return heldUntil.filterValues { it > now }.keys
+    }
+
     /** True while any server has us waiting. */
     fun anyHeld(): Boolean {
         val now = System.currentTimeMillis()

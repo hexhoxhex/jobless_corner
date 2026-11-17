@@ -110,9 +110,23 @@ class LiveTvRepository {
                 category = decodeEntities(ev.category),
             )
         }
-        cachedSchedule = parsed
+        // The site's own page, when it can be read: as fresh as the site,
+        // where the published file can be hours behind (see SiteSchedule).
+        // Its events lead; anything the file still has that the page no
+        // longer lists (and hasn't started over 3 h ago) is kept.
+        val merged = runCatching { SiteSchedule.current() }.getOrNull()
+            ?.takeIf { it.size >= SITE_SCHEDULE_MIN }
+            ?.let { site ->
+                val keys = site.mapTo(HashSet()) { it.title.lowercase() to it.startUnix }
+                val nowS = now / 1000
+                site + parsed.filter { ev ->
+                    (ev.title.lowercase() to ev.startUnix) !in keys &&
+                        (ev.startUnix ?: Long.MAX_VALUE) > nowS - 3 * 3600
+                }
+            } ?: parsed
+        cachedSchedule = merged
         cachedScheduleAt = now
-        return parsed
+        return merged
     }
 
     /**
@@ -317,6 +331,9 @@ class LiveTvRepository {
 
         private const val CHANNELS_TTL_MS = 30 * 60 * 1000L   // 30 min
         private const val SCHEDULE_TTL_MS = 5 * 60 * 1000L    //  5 min
+        /** Fewer events than this off the site's page and it is taken to be
+         *  half-loaded or changed; the published file is used instead. */
+        private const val SITE_SCHEDULE_MIN = 10
         private const val HEALTH_TTL_MS = 20 * 60 * 1000L     // 20 min
     }
 }
