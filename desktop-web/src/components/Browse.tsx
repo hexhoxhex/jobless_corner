@@ -6,6 +6,7 @@ import { useEffect, useRef } from "react";
 import clsx from "clsx";
 import { tmdb, type Kind } from "@/lib/tmdb/client";
 import { PosterCard, PosterSkeleton } from "./PosterCard";
+import { SearchResults, SectionBar, useSectionQuery } from "./SectionSearch";
 
 const SORTS = [
   { id: "popularity.desc", label: "Popular" },
@@ -36,10 +37,11 @@ function Chip({ active, onClick, children }: { active: boolean; onClick: () => v
   );
 }
 
-/** Movies or Series: genre chips, a sort, and a grid that loads more as it nears the end. */
+/** Movies or Series: a search bar over the section, genre chips, a sort, and a grid that loads more as it nears the end. */
 export function Browse({ kind }: { kind: Kind }) {
   const params = useSearchParams();
   const router = useRouter();
+  const search = useSectionQuery();
   const genre = params.get("genre") ? Number(params.get("genre")) : undefined;
   const sort = params.get("sort") ?? "popularity.desc";
   const network = params.get("network") ?? undefined;
@@ -86,26 +88,37 @@ export function Browse({ kind }: { kind: Kind }) {
   const items = (q.data?.pages.flat() ?? []).filter((t) => (seen.has(t.id) ? false : (seen.add(t.id), true)));
   const heading = network ? NETWORK_NAMES[network] ?? "Series" : kind === "movie" ? "Movies" : "Series";
 
+  const sorter = (
+    <div className="flex gap-1 rounded-card border border-line p-1" role="group" aria-label="Sort">
+      {SORTS.map((s) => (
+        <button
+          key={s.id}
+          onClick={() => set("sort", s.id === "popularity.desc" ? undefined : s.id)}
+          aria-pressed={sort === s.id}
+          className={clsx(
+            "h-8 cursor-pointer rounded-md px-3 text-sm font-medium transition-colors duration-fast",
+            sort === s.id ? "bg-surface-4 text-ink" : "text-ink-3 hover:text-ink-2",
+          )}
+        >
+          {s.label}
+        </button>
+      ))}
+    </div>
+  );
+
   return (
-    <div className="px-10 pb-16 pt-8">
-      <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
-        <h1 className="font-display text-2xl font-extrabold tracking-tight text-ink">{heading}</h1>
-        <div className="flex gap-1 rounded-card border border-line p-1" role="group" aria-label="Sort">
-          {SORTS.map((s) => (
-            <button
-              key={s.id}
-              onClick={() => set("sort", s.id === "popularity.desc" ? undefined : s.id)}
-              aria-pressed={sort === s.id}
-              className={clsx(
-                "h-8 cursor-pointer rounded-md px-3 text-sm font-medium transition-colors duration-fast",
-                sort === s.id ? "bg-surface-4 text-ink" : "text-ink-3 hover:text-ink-2",
-              )}
-            >
-              {s.label}
-            </button>
-          ))}
-        </div>
-      </div>
+    <>
+      <SectionBar
+        value={search.text}
+        onChange={search.setText}
+        placeholder={kind === "movie" ? "Search films" : "Search series"}
+        right={search.searching ? undefined : sorter}
+      />
+      {search.searching ? (
+        <SearchResults q={search.q} kind={kind} />
+      ) : (
+    <div className="px-10 pb-16 pt-4">
+      <h1 className="mb-5 font-display text-[26px] font-extrabold tracking-tight text-ink">{heading}</h1>
       <div className="row-scroller -mx-10 mb-7 flex gap-2 px-10">
         <Chip active={!genre} onClick={() => set("genre")}>
           All
@@ -135,5 +148,7 @@ export function Browse({ kind }: { kind: Kind }) {
       )}
       <div ref={sentinel} className="h-4" />
     </div>
+      )}
+    </>
   );
 }

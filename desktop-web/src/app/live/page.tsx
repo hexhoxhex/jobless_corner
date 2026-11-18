@@ -5,7 +5,8 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import clsx from "clsx";
-import { CalendarClock, Radio, Search, Tv2 } from "lucide-react";
+import { CalendarClock, Radio, Tv2 } from "lucide-react";
+import { SectionBar, useSectionQuery } from "@/components/SectionSearch";
 import { loadChannels, mergeSchedule, publishedSchedule, siteSchedule, type Channel, type LiveEvent } from "@/lib/live/catalog";
 import { liveHref } from "@/lib/live/href";
 import { isPlaceholderChannel, plain } from "@/lib/text";
@@ -288,24 +289,23 @@ function LiveView() {
   const params = useSearchParams();
   const router = useRouter();
   const tab = params.get("tab") === "channels" ? "channels" : "schedule";
-  const [query, setQuery] = useState("");
-  const setTab = (t: string) => router.replace(t === "schedule" ? "/live" : `/live?tab=${t}`, { scroll: false });
+  const search = useSectionQuery();
+  const query = search.text;
+  const setTab = (t: string) => {
+    const next = new URLSearchParams(params.toString());
+    if (t === "schedule") next.delete("tab");
+    else next.set("tab", t);
+    const s = next.toString();
+    router.replace(s ? `/live?${s}` : "/live", { scroll: false });
+  };
 
   return (
-    <div className="px-10 pb-16 pt-8">
-      <div className="mb-6 flex flex-wrap items-center justify-between gap-4">
-        <h1 className="font-display text-2xl font-extrabold tracking-tight text-ink">Live TV</h1>
-        <div className="flex items-center gap-3">
-          <div className="relative">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-4" />
-            <input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder={tab === "schedule" ? "Team, league or channel" : "Channel name"}
-              aria-label={tab === "schedule" ? "Filter the schedule" : "Filter channels"}
-              className="h-9 w-64 rounded-card border border-line bg-surface-2 pl-9 pr-3 text-sm text-ink placeholder:text-ink-4 focus:border-accent/60 focus:outline-none"
-            />
-          </div>
+    <>
+      <SectionBar
+        value={search.text}
+        onChange={search.setText}
+        placeholder={tab === "schedule" ? "Search teams, leagues and channels" : "Search channels"}
+        right={
           <div className="flex gap-1 rounded-card border border-line p-1" role="tablist" aria-label="Live TV">
             <Tab active={tab === "schedule"} onClick={() => setTab("schedule")} icon={CalendarClock}>
               Schedule
@@ -314,10 +314,13 @@ function LiveView() {
               Channels
             </Tab>
           </div>
-        </div>
+        }
+      />
+      <div className="px-10 pb-16 pt-4">
+        <h1 className="mb-5 font-display text-[26px] font-extrabold tracking-tight text-ink">Live TV</h1>
+        {tab === "schedule" ? <ScheduleView query={query} /> : <ChannelsView query={query} />}
       </div>
-      {tab === "schedule" ? <ScheduleView query={query} /> : <ChannelsView query={query} />}
-    </div>
+    </>
   );
 }
 

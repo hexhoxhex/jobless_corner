@@ -1,20 +1,32 @@
 "use client";
 
 import Link from "next/link";
+import { Suspense } from "react";
 import { Bookmark } from "lucide-react";
 import { ContinueCard } from "@/components/ContinueCard";
 import { PosterCard } from "@/components/PosterCard";
 import { continueList, useLibrary } from "@/lib/store/library";
+import { SectionBar, useSectionQuery } from "@/components/SectionSearch";
 
-export default function LibraryPage() {
+function LibraryView() {
   const progress = useLibrary((s) => s.progress);
   const saved = useLibrary((s) => s.saved);
-  const resume = continueList(progress);
-  const list = Object.values(saved).sort((a, b) => b.addedAt - a.addedAt);
+  const search = useSectionQuery();
+  const words = search.text.trim().toLowerCase();
+  const hit = (title: string) => !words || title.toLowerCase().includes(words);
+  const resume = continueList(progress).filter((p) => hit(p.title));
+  const list = Object.values(saved)
+    .sort((a, b) => b.addedAt - a.addedAt)
+    .filter((s) => hit(s.title));
 
   return (
-    <div className="px-10 pb-16 pt-8">
-      <h1 className="mb-8 font-display text-2xl font-extrabold tracking-tight text-ink">My list</h1>
+    <>
+    <SectionBar value={search.text} onChange={search.setText} placeholder="Search my list" />
+    <div className="px-10 pb-16 pt-4">
+      <h1 className="mb-6 font-display text-[26px] font-extrabold tracking-tight text-ink">My list</h1>
+      {words && resume.length === 0 && list.length === 0 && (
+        <p className="text-sm text-ink-3">Nothing in your list called &ldquo;{search.text.trim()}&rdquo;.</p>
+      )}
       {resume.length > 0 && (
         <section className="mb-10">
           <h2 className="mb-3 font-display text-lg font-bold text-ink">Continue watching</h2>
@@ -26,8 +38,8 @@ export default function LibraryPage() {
         </section>
       )}
       <section>
-        <h2 className="mb-3 font-display text-lg font-bold text-ink">Saved</h2>
-        {list.length === 0 ? (
+        {(!words || list.length > 0) && <h2 className="mb-3 font-display text-lg font-bold text-ink">Saved</h2>}
+        {words && list.length === 0 ? null : list.length === 0 ? (
           <div className="flex max-w-lg items-start gap-4 rounded-panel border border-line p-6">
             <Bookmark className="mt-0.5 h-5 w-5 shrink-0 text-ink-4" />
             <div>
@@ -53,5 +65,14 @@ export default function LibraryPage() {
         )}
       </section>
     </div>
+    </>
+  );
+}
+
+export default function LibraryPage() {
+  return (
+    <Suspense>
+      <LibraryView />
+    </Suspense>
   );
 }

@@ -1,5 +1,6 @@
 "use client";
 
+import { Suspense } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Hero } from "@/components/Hero";
 import { HeroSkeleton } from "@/components/Hero";
@@ -9,6 +10,7 @@ import { ContinueCard } from "@/components/ContinueCard";
 import { LiveNowRow } from "@/components/LiveNowRow";
 import { Networks, tmdb, type Title } from "@/lib/tmdb/client";
 import { continueList, useLibrary } from "@/lib/store/library";
+import { SearchResults, SectionBar, useSectionQuery } from "@/components/SectionSearch";
 
 type RowDef = { key: string; title: string; seeAll?: string; load: () => Promise<Title[]>; ranked?: boolean };
 
@@ -36,12 +38,20 @@ function CatalogRow({ def }: { def: RowDef }) {
   );
 }
 
-export default function HomePage() {
+function HomeView() {
   const hero = useQuery({ queryKey: ["row", "trending"], queryFn: () => tmdb.trending("day") });
   const progress = useLibrary((s) => s.progress);
   const resume = continueList(progress);
+  const search = useSectionQuery();
 
   return (
+    <>
+      <SectionBar overlay value={search.text} onChange={search.setText} placeholder="Search films and series" />
+      {search.searching ? (
+        <div className="pt-16">
+          <SearchResults q={search.q} />
+        </div>
+      ) : (
     <div className="pb-16">
       {hero.isLoading ? <HeroSkeleton /> : <Hero items={(hero.data ?? []).filter((t) => t.backdrop)} />}
       <div className="relative -mt-6 flex flex-col gap-9">
@@ -58,5 +68,15 @@ export default function HomePage() {
         ))}
       </div>
     </div>
+      )}
+    </>
+  );
+}
+
+export default function HomePage() {
+  return (
+    <Suspense>
+      <HomeView />
+    </Suspense>
   );
 }

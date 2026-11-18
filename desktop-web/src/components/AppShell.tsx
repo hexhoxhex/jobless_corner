@@ -5,13 +5,14 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import clsx from "clsx";
 import { useQuery } from "@tanstack/react-query";
-import { Bookmark, Clapperboard, Home, PanelLeftClose, PanelLeftOpen, Radio, Search, Tv } from "lucide-react";
+import { Bookmark, Clapperboard, Home, PanelLeftClose, PanelLeftOpen, Radio, Tv } from "lucide-react";
 import { mergeSchedule, publishedSchedule, siteSchedule } from "@/lib/live/catalog";
 import { isLiveNow, playableChannels } from "@/lib/live/homeLive";
 import { continueList, useLibrary, type Progress } from "@/lib/store/library";
 import { watchHref } from "@/lib/watchHref";
 import { BrandMark } from "./BrandMark";
 import { TitleBar, usePlatform } from "./TitleBar";
+import { FOCUS_SEARCH, hasSectionBar } from "./SectionSearch";
 
 const NAV = [
   { href: "/", label: "Home", icon: Home },
@@ -112,11 +113,14 @@ function NavItem({
   );
 }
 
-function SectionLabel({ children, collapsed, action }: { children: React.ReactNode; collapsed: boolean; action?: React.ReactNode }) {
-  if (collapsed) return <div className="mx-auto my-3 h-px w-8 bg-line" />;
+function Divider({ collapsed }: { collapsed: boolean }) {
+  return <div className={clsx("my-3 h-px bg-line", collapsed ? "mx-auto w-8" : "mx-3")} />;
+}
+
+function SectionLabel({ children, action }: { children: React.ReactNode; action?: React.ReactNode }) {
   return (
-    <div className="mb-1.5 mt-5 flex items-center justify-between px-3">
-      <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-ink-4">{children}</p>
+    <div className="mb-1 flex items-center justify-between px-3">
+      <p className="text-[13px] font-semibold text-ink-3">{children}</p>
       {action}
     </div>
   );
@@ -183,40 +187,12 @@ function Sidebar({ path }: { path: string }) {
       <div data-tauri-drag-region className={clsx("flex shrink-0 items-center", platform === "mac" ? "h-[96px] pt-7" : "h-[72px]", collapsed ? "justify-center" : "px-4")}>
         <Link href="/" aria-label="Vijana BaruBaru home" className="flex min-w-0 items-center gap-3 rounded-[12px]">
           <BrandMark className="h-10 w-10 shrink-0" />
-          {!collapsed && (
-            <span className="min-w-0">
-              <span className="block truncate font-display text-[16px] font-extrabold leading-5 tracking-tight text-ink">Vijana BaruBaru</span>
-              <span className="block truncate text-[11px] font-medium leading-4 text-ink-4">Movies, series and live TV</span>
-            </span>
-          )}
-        </Link>
-      </div>
-
-      <div className={clsx("shrink-0 pb-1", collapsed ? "px-3" : "px-3")}>
-        <Link
-          href="/search"
-          title={collapsed ? "Search (Ctrl K)" : "Search (Ctrl K)"}
-          className={clsx(
-            "flex h-10 items-center rounded-[10px] border text-sm transition-colors duration-fast",
-            collapsed ? "justify-center" : "gap-2.5 px-3",
-            path === "/search"
-              ? "border-accent/40 bg-accent/[0.08] text-ink-2"
-              : "border-line bg-surface-2/60 text-ink-4 hover:border-line-strong hover:text-ink-3",
-          )}
-        >
-          <Search className="h-4 w-4 shrink-0" strokeWidth={2} />
-          {!collapsed && (
-            <>
-              <span className="flex-1 truncate">Search</span>
-              <kbd className="rounded border border-line px-1.5 font-sans text-[11px] font-medium text-ink-4">Ctrl K</kbd>
-            </>
-          )}
+          {!collapsed && <span className="truncate font-display text-[16px] font-extrabold tracking-tight text-ink">Vijana BaruBaru</span>}
         </Link>
       </div>
 
       <div className="scroll-area min-h-0 flex-1 px-3 pb-3">
-        <SectionLabel collapsed={collapsed}>Browse</SectionLabel>
-        <nav className="flex flex-col gap-0.5" aria-label="Browse">
+        <nav className="flex flex-col gap-0.5 pt-1" aria-label="Browse">
           {NAV.map((n) => (
             <NavItem
               key={n.href}
@@ -225,9 +201,9 @@ function Sidebar({ path }: { path: string }) {
               active={isActive(n.href)}
               badge={
                 n.href === "/live" && live > 0 ? (
-                  <span className="inline-flex items-center gap-1.5 rounded-full bg-live/15 px-2 py-0.5 text-[11px] font-semibold text-[#ff9a9d]" title={`${live} matches on now`}>
-                    <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-live" />
-                    {live} on now
+                  <span className="inline-flex items-center gap-1.5 tabular text-xs font-medium text-ink-3" title={`${live} matches on now`}>
+                    <span className="h-1.5 w-1.5 rounded-full bg-live" />
+                    {live}
                   </span>
                 ) : undefined
               }
@@ -235,7 +211,7 @@ function Sidebar({ path }: { path: string }) {
           ))}
         </nav>
 
-        <SectionLabel collapsed={collapsed}>Your library</SectionLabel>
+        <Divider collapsed={collapsed} />
         <nav className="flex flex-col gap-0.5" aria-label="Your library">
           <NavItem
             href="/library"
@@ -249,10 +225,10 @@ function Sidebar({ path }: { path: string }) {
 
         {mounted && !collapsed && recents.length > 0 && (
           <>
+            <Divider collapsed={collapsed} />
             <SectionLabel
-              collapsed={collapsed}
               action={
-                <Link href="/library" className="text-[11px] font-semibold text-ink-4 transition-colors hover:text-accent-soft">
+                <Link href="/library" className="text-xs font-medium text-ink-4 transition-colors hover:text-ink-2">
                   See all
                 </Link>
               }
@@ -268,8 +244,7 @@ function Sidebar({ path }: { path: string }) {
         )}
       </div>
 
-      <div className={clsx("flex h-12 shrink-0 items-center border-t border-line", collapsed ? "justify-center" : "justify-between pl-3 pr-2")}>
-        {!collapsed && <span className="tabular text-[11px] text-ink-4">Version 0.1.319</span>}
+      <div className={clsx("flex h-12 shrink-0 items-center", collapsed ? "justify-center" : "justify-end pr-2")}>
         <button
           onClick={toggle}
           aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
@@ -289,20 +264,19 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   const watching = path === "/watch" || path.startsWith("/live/watch");
 
-  // Ctrl+K or "/" opens search from anywhere outside a text field. On the
-  // watch pages they go to the side panel's own search instead.
+  // Ctrl+K or "/" (outside a text field) go to the search bar of the section
+  // in view; pages without one (a title's page) go to Home's. On the watch
+  // pages they go to the side panel's own search instead.
   useEffect(() => {
     if (watching) return;
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
       const typing = t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
-        e.preventDefault();
-        router.push("/search");
-      } else if (e.key === "/" && !typing) {
-        e.preventDefault();
-        router.push("/search");
-      }
+      const wants = ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") || (e.key === "/" && !typing);
+      if (!wants) return;
+      e.preventDefault();
+      if (hasSectionBar()) window.dispatchEvent(new Event(FOCUS_SEARCH));
+      else router.push("/?focus=1");
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
