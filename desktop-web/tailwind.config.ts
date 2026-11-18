@@ -1,39 +1,79 @@
 import type { Config } from "tailwindcss";
 
-// MovieWay-dark palette — matches Android :app's theme.kt + remote.css
-// so a user opening the desktop app feels the same brand they get on
-// the TV / phone. Single source of truth for color tokens here; CSS
-// vars below mirror them so non-Tailwind components can pick them up.
+// The TV app's palette (app/src/main/java/com/moviebox/tv/ui/theme/Theme.kt),
+// so the desktop app reads as the same product. Components use these names,
+// never raw hex.
 const config: Config = {
-  content: ["./src/**/*.{ts,tsx}"],
-  darkMode: "class",
+  // Relative to this file, not the folder the dev server was started from.
+  content: { relative: true, files: ["./src/**/*.{ts,tsx}"] },
   theme: {
     extend: {
       colors: {
-        bg:               "#101114", // deepest base
-        surface:          "#191F2B", // primary surface
-        "surface-2":      "#28292E", // elevated card
-        "surface-3":      "#383A40", // hover / focus tile
-        outline:          "#61656D",
-        accent:           "#07B84E", // brand green (CTA, focus)
-        "accent-soft":    "#2FF58B", // hover state of accent
-        "text-primary":   "#FFFFFF",
-        "text-secondary": "#EDF0F5",
-        "text-muted":     "#9BA0A8",
-        "text-hint":      "#767B85",
-        gold:             "#F5C518", // IMDb-style rating
-        danger:           "#E5484D",
+        bg: "#101114",
+        surface: "#191F2B",
+        "surface-2": "#22252D",
+        "surface-3": "#28292E",
+        "surface-4": "#383A40",
+        line: "rgba(255,255,255,0.08)",
+        "line-strong": "rgba(255,255,255,0.16)",
+        outline: "#61656D",
+        accent: "#07B84E",
+        "accent-hover": "#0AC957",
+        "accent-soft": "#2FF58B",
+        ink: "#FFFFFF",
+        "ink-2": "#EDF0F5",
+        "ink-3": "#9BA0A8",
+        "ink-4": "#767B85",
+        gold: "#F5C518",
+        danger: "#E5484D",
+        live: "#E5484D",
       },
       fontFamily: {
-        // System stack — matches Android default + macOS/Windows native.
-        // Custom brand font (if we add one) goes here later.
-        sans: ['system-ui', '-apple-system', 'BlinkMacSystemFont', '"Segoe UI"', 'Roboto', 'sans-serif'],
+        sans: ['"Inter Variable"', "system-ui", '"Segoe UI"', "Roboto", "sans-serif"],
+        display: ['"Manrope Variable"', '"Inter Variable"', "system-ui", "sans-serif"],
+      },
+      fontSize: {
+        // label / meta / body / title / headline / display
+        xs: ["12px", { lineHeight: "16px" }],
+        sm: ["13px", { lineHeight: "20px" }],
+        base: ["15px", { lineHeight: "24px" }],
+        lg: ["18px", { lineHeight: "26px" }],
+        xl: ["22px", { lineHeight: "30px" }],
+        "2xl": ["28px", { lineHeight: "34px" }],
+        "3xl": ["40px", { lineHeight: "44px" }],
+        "4xl": ["56px", { lineHeight: "58px" }],
       },
       borderRadius: {
-        // Cards/posters/buttons use the same radius scale across all
-        // surfaces. 12px is the Android default.
-        card: "12px",
-        pill: "999px",
+        card: "10px",
+        panel: "14px",
+      },
+      transitionTimingFunction: {
+        out: "cubic-bezier(.22,1,.36,1)",
+      },
+      transitionDuration: {
+        fast: "150ms",
+        base: "220ms",
+      },
+      zIndex: {
+        sidebar: "20",
+        header: "30",
+        overlay: "40",
+        player: "50",
+        toast: "60",
+      },
+      keyframes: {
+        rise: {
+          from: { opacity: "0", transform: "translateY(12px)" },
+          to: { opacity: "1", transform: "translateY(0)" },
+        },
+        shimmer: {
+          from: { backgroundPosition: "-400px 0" },
+          to: { backgroundPosition: "400px 0" },
+        },
+      },
+      animation: {
+        rise: "rise 320ms cubic-bezier(.22,1,.36,1) both",
+        shimmer: "shimmer 1.4s linear infinite",
       },
     },
   },

@@ -1,91 +1,62 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { home } from "@/lib/h5/api";
-import type { H5Row } from "@/lib/h5/types";
+import { useQuery } from "@tanstack/react-query";
+import { Hero } from "@/components/Hero";
+import { HeroSkeleton } from "@/components/Hero";
+import { Row } from "@/components/Row";
+import { PosterCard, PosterSkeleton } from "@/components/PosterCard";
+import { ContinueCard } from "@/components/ContinueCard";
+import { LiveNowRow } from "@/components/LiveNowRow";
+import { Networks, tmdb, type Title } from "@/lib/tmdb/client";
+import { continueList, useLibrary } from "@/lib/store/library";
 
-/**
- * Home screen — loads the H5 catalog rows (Popular Movie, Popular
- * Series, Trending, Premium VIP HD, etc.) and renders each as a
- * horizontal scroll of poster cards.
- *
- * v2.0 of this is the placeholder you see now. Tomorrow we wire the
- * components/ folder (AppShell + RowSection + PosterCard) so this
- * file shrinks to a clean composition.
- */
+type RowDef = { key: string; title: string; seeAll?: string; load: () => Promise<Title[]>; ranked?: boolean };
+
+const ROWS: RowDef[] = [
+  { key: "trending", title: "Trending now", load: () => tmdb.trending("day"), ranked: true },
+  { key: "pop-movie", title: "Popular movies", seeAll: "/movies", load: () => tmdb.popular("movie") },
+  { key: "pop-tv", title: "Popular series", seeAll: "/series", load: () => tmdb.popular("tv") },
+  { key: "now", title: "New in cinemas", load: () => tmdb.nowPlaying() },
+  { key: "netflix", title: "Netflix", seeAll: "/series?network=213", load: () => tmdb.discover("tv", { network: Networks.NETFLIX }) },
+  { key: "hbo", title: "HBO", seeAll: "/series?network=49", load: () => tmdb.discover("tv", { network: Networks.HBO }) },
+  { key: "disney", title: "Disney+", seeAll: "/series?network=2739", load: () => tmdb.discover("tv", { network: Networks.DISNEY_PLUS }) },
+  { key: "prime", title: "Prime Video", seeAll: "/series?network=1024", load: () => tmdb.discover("tv", { network: Networks.PRIME }) },
+  { key: "apple", title: "Apple TV+", seeAll: "/series?network=2552", load: () => tmdb.discover("tv", { network: Networks.APPLE_TV }) },
+  { key: "top-movie", title: "Top rated movies", load: () => tmdb.topRated("movie") },
+];
+
+function CatalogRow({ def }: { def: RowDef }) {
+  const q = useQuery({ queryKey: ["row", def.key], queryFn: def.load });
+  return (
+    <Row title={def.title} seeAll={def.seeAll} loading={q.isLoading} error={q.isError} onRetry={() => q.refetch()}>
+      {q.isLoading
+        ? Array.from({ length: 9 }, (_, n) => <PosterSkeleton key={n} />)
+        : (q.data ?? []).slice(0, 20).map((t, n) => <PosterCard key={`${t.kind}${t.id}`} t={t} rank={def.ranked ? n + 1 : undefined} />)}
+    </Row>
+  );
+}
+
 export default function HomePage() {
-  const [rows, setRows] = useState<H5Row[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    home()
-      .then((data) => {
-        setRows(data);
-        setLoading(false);
-      })
-      .catch((e: Error) => {
-        setError(e.message);
-        setLoading(false);
-      });
-  }, []);
+  const hero = useQuery({ queryKey: ["row", "trending"], queryFn: () => tmdb.trending("day") });
+  const progress = useLibrary((s) => s.progress);
+  const resume = continueList(progress);
 
   return (
-    <main className="px-6 py-6 max-w-[1400px] mx-auto">
-      <h1 className="text-2xl font-bold mb-6">Vijana BaruBaru</h1>
-      {loading && (
-        <div className="text-text-muted">Loading catalog…</div>
-      )}
-      {error && (
-        <div className="text-danger">Couldn't load: {error}</div>
-      )}
-      {!loading && !error && rows.length === 0 && (
-        <div className="text-text-muted">Empty catalog.</div>
-      )}
-      <div className="space-y-8">
-        {rows.map((row) => (
-          <section key={row.title}>
-            <h2 className="text-base font-semibold mb-3">{row.title}</h2>
-            <div className="flex gap-3 overflow-x-auto pb-2">
-              {row.items.map((item) => (
-                <a
-                  key={item.subjectId}
-                  href={`/title/${item.subjectId}`}
-                  className="w-[140px] flex-none group"
-                >
-                  <div className="w-[140px] h-[210px] rounded-card bg-surface-2 overflow-hidden group-hover:ring-2 group-hover:ring-accent transition">
-                    {item.coverUrl ? (
-                      // Next image optimization is disabled (static export),
-                      // plain <img> is fine for remote CDN URLs.
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img
-                        src={item.coverUrl}
-                        alt={item.title}
-                        className="w-full h-full object-cover"
-                      />
-                    ) : (
-                      <div className="w-full h-full grid place-items-center text-2xl font-bold text-text-hint">
-                        {item.title.slice(0, 2).toUpperCase()}
-                      </div>
-                    )}
-                  </div>
-                  <div className="mt-2 text-[13px] font-medium truncate">
-                    {item.title}
-                  </div>
-                  <div className="text-[11px] text-text-muted flex gap-2">
-                    {item.year && <span>{item.year}</span>}
-                    {item.rating && (
-                      <span className="text-gold font-semibold">
-                        ★ {item.rating.toFixed(1)}
-                      </span>
-                    )}
-                  </div>
-                </a>
-              ))}
-            </div>
-          </section>
+    <div className="pb-16">
+      {hero.isLoading ? <HeroSkeleton /> : <Hero items={(hero.data ?? []).filter((t) => t.backdrop)} />}
+      <div className="relative -mt-6 flex flex-col gap-9">
+        {resume.length > 0 && (
+          <Row title="Continue watching">
+            {resume.map((p) => (
+              <ContinueCard key={p.key} p={p} />
+            ))}
+          </Row>
+        )}
+        <LiveNowRow />
+        {ROWS.map((r) => (
+          <CatalogRow key={r.key} def={r} />
         ))}
       </div>
-    </main>
+    </div>
   );
 }

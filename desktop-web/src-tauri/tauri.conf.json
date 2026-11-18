@@ -1,26 +1,29 @@
 {
-  "$schema": "https://schema.tauri.app/config/2.0.0",
+  "$schema": "https://schema.tauri.app/config/2",
   "productName": "Vijana BaruBaru",
-  "version": "0.1.0",
-  "identifier": "com.moviebox.desktop",
+  "version": "0.1.319",
+  "identifier": "com.vijanabarubaru.desktop",
   "build": {
     "frontendDist": "../out",
-    "devUrl": "http://localhost:3000",
+    "devUrl": "http://localhost:3010",
     "beforeDevCommand": "bun run dev",
     "beforeBuildCommand": "bun run build"
   },
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Vijana BaruBaru",
-        "width": 1280,
-        "height": 800,
-        "minWidth": 900,
+        "width": 1360,
+        "height": 840,
+        "minWidth": 960,
         "minHeight": 600,
+        "center": true,
         "resizable": true,
-        "fullscreen": false,
-        "decorations": true,
-        "transparent": false
+        "backgroundColor": "#101114",
+        "create": false,
+        "theme": "Dark",
+        "decorations": false
       }
     ],
     "security": {
@@ -29,25 +32,43 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["msi", "dmg"],
+    "targets": "all",
     "icon": [
-      "icons/icon.ico",
-      "icons/icon.icns",
       "icons/32x32.png",
       "icons/128x128.png",
-      "icons/128x128@2x.png"
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
     ],
     "category": "Entertainment",
-    "shortDescription": "Live TV, movies, and series.",
-    "longDescription": "Vijana BaruBaru — live TV, movies, and series, on Windows and Mac.",
+    "shortDescription": "Movies, series and live TV.",
+    "longDescription": "Vijana BaruBaru: movies, series and live TV on Windows, macOS and Linux.",
     "publisher": "hexhoxhex",
+    "copyright": "hexhoxhex",
     "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "installMode": "currentUser"
+      },
       "wix": {
-        "language": "en-US"
-      }
+        "upgradeCode": "5a4dc8e3-d4b2-4c1f-9b9a-7c6e5f2a1b3d"
+      },
+      "allowDowngrades": true
     },
     "macOS": {
-      "minimumSystemVersion": "10.13"
+      "minimumSystemVersion": "10.15",
+      "signingIdentity": "-"
+    },
+    "linux": {
+      "deb": {
+        "depends": [
+          "gstreamer1.0-plugins-good",
+          "gstreamer1.0-plugins-bad",
+          "gstreamer1.0-libav"
+        ]
+      }
     }
   }
 }

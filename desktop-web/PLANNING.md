@@ -1,184 +1,95 @@
-# Vijana BaruBaru — desktop v2 (Next.js + Tauri)
+# Vijana BaruBaru desktop (Tauri 2 + Next.js)
 
-User asked for a pivot from Compose Desktop to a TS-first stack
-("the UI is awful... we will use nextjs and maybe tauri this will
-make our work simple and even testing simple cause backend can be ts
-with ui on tsx and we support both windows and mac clean ui supporting
-tv and movies and series clean UI layouts"). This doc captures the
-chosen architecture so tomorrow we just build features.
+Replaces the Compose Desktop app in `desktop/` (MovieBox-only, needs VLC
+installed, 98 MB MSI). One TypeScript code base for Windows, macOS and Linux.
+Decided 2026-11-18: full rewrite in TypeScript, not a wrapper around the TV
+app's Kotlin. Source and live-TV fixes are therefore made in two places; keep
+the TS modules shaped like their Kotlin counterparts (same names, same order
+of attempts) so a fix ports file-to-file.
 
-## Why this stack
-
-- **Next.js (App Router, static export)** — TSX components, fast
-  iteration, ecosystem of UI libraries (shadcn/ui, framer-motion, etc.)
-  for the "clean UI" the user wants. Static export so it runs inside
-  Tauri's WebView with no Node runtime.
-- **Tauri 2.x** — Rust shell, ~5 MB final binary (Electron is ~100 MB).
-  Native Windows + Mac + Linux builds from one codebase. Built-in
-  installer (.msi/.dmg) via `cargo tauri build`.
-- **TypeScript everywhere** — H5 client logic in `src/lib/h5/`,
-  components in `src/components/`. Easy to unit-test with vitest.
-
-## Layers
+## Architecture
 
 ```
 desktop-web/
-  src/
-    app/                      ← Next.js App Router pages
-      layout.tsx              ← root layout, theme, fonts
-      page.tsx                ← Home (catalog rows)
-      title/[id]/page.tsx     ← Detail page
-      watch/[id]/page.tsx     ← Player page (videojs / hls.js)
-      live/page.tsx           ← Live TV grid
-      search/page.tsx         ← Search
-      globals.css             ← Tailwind base
-    lib/
-      h5/
-        crypto.ts             ← HMAC-MD5 signing (port of shared/Crypto.kt)
-        constants.ts          ← H5_BASE, signing key, X-Client-Info
-        api.ts                ← search(), home(), detail(), play()
-        types.ts              ← H5Item, H5Row, H5Detail, H5Play
-      tauri/
-        commands.ts           ← invoke() wrappers for Rust commands
-    components/
-      PosterCard.tsx
-      RowSection.tsx
-      AppShell.tsx            ← left-rail nav (Home / Live / Search / Library)
-      Player.tsx              ← hls.js or videojs wrapped
-  src-tauri/                  ← Tauri Rust shell
-    Cargo.toml
-    tauri.conf.json
-    src/
-      main.rs                 ← entry point
-      lib.rs                  ← command handlers
-    icons/                    ← Mac .icns + Win .ico (reuse Android source)
-  package.json
-  next.config.js              ← output: 'export'
-  tailwind.config.ts          ← dark MovieWay palette
-  tsconfig.json
-  PLANNING.md                 ← this doc
+  src/app/            pages (static export: no dynamic segments, ids go in ?query)
+  src/components/     UI
+  src/lib/net/        relay client, HostGate (Retry-After), timeouts
+  src/lib/tmdb/       catalogue: home rows, browse, search, details, seasons
+  src/lib/providers/  7Movies (vidrift), VixSrc, VidNest, MovieBox, 4KHDHub
+  src/lib/player/     hls.js setup, custom loaders, prefetch, subtitles, skip
+  src/lib/live/       channels, schedule, resolver, playlist rewrite, unseal,
+                      disguised-chunk decode, failover
+  src/lib/store/      continue watching, list, settings (localStorage)
+  src-tauri/          Rust shell: window, relay, single instance, window state
+  tools/devrelay.mjs  the relay for `next dev` in a normal browser
 ```
 
-## H5 client architecture decision (revisit tomorrow)
+**Backend and UI.** The app is two parts: the Rust backend (the relay and
+the hidden player window) and the web UI. They talk only over HTTP on
+127.0.0.1, so the UI can be built and tested in an ordinary browser against
+the backend running on its own, without opening the app:
 
-Two options for where the HmacMD5 signing + HTTP calls live:
+    bun run engine     # the backend alone: relay + hidden window on :8797, secret "dev"
+    bun run dev        # the UI on http://localhost:3010
 
-### Option A — pure TypeScript in the WebView
-- Use `crypto-js` for HMAC-MD5 (Web Crypto doesn't support MD5)
-- `fetch()` directly to `h5-api.aoneroom.com`
-- Pros: single language; easy to share with the GitHub Pages site
-- Cons: signing key is in the bundle (already public in the Android app, so not a real secret), CORS on aoneroom (the H5 origin sets `Access-Control-Allow-Origin: *` for themoviebox.org — Tauri WebView may need a custom origin header to pass CORS)
+`--engine` exists in debug builds only. In the app the backend picks a random
+port and secret and hands them to the UI through the `relay_info` command.
+(`bun run relay` is a Node stand-in for the relay alone, without the hidden
+window, for machines without Rust.)
 
-### Option B — Tauri commands in Rust
-- Frontend invokes `invoke('h5_home')`, Rust signs + fetches via `reqwest`, returns JSON
-- Pros: mature crypto + HTTP libs; signing key in compiled Rust (slightly harder to extract); bypasses CORS entirely
-- Cons: two languages; more boilerplate
+**The relay.** Browsers can't set Referer/Origin/User-Agent and are bound by
+CORS; the stream sources need all three, and a `<video>` can't send headers
+at all. So every source request goes through the backend:
 
-**Recommendation for tomorrow**: **start with Option A** (pure TS).
-Drop to Rust later only if CORS or perf becomes an issue. Faster
-iteration is more valuable than a hypothetical security gain.
+`GET|POST http://127.0.0.1:<port>/r?s=<secret>&u=<url>&h=<base64url JSON headers>`
 
-## What does NOT change
+It forwards the request (and the player's Range and Accept-Encoding),
+streams the answer back untouched with CORS headers, and reports the final
+URL in `x-final-url`. hls.js keeps the original URLs (relative chunk paths
+resolve correctly) and only the request goes through the relay (`xhrSetup`
+opens the relayed URL; `RelayLoader` reports the real URL back).
 
-- `app/` — Android Kotlin app stays (it's working v0.1.108)
-- `shared/` — Kotlin shared module stays (Android still uses it)
-- `desktop/` — Compose Desktop stays IN-TREE for now but is
-  deprecated. Once `desktop-web` ships and the user signs off,
-  delete `desktop/` and remove the `:desktop` include in
-  `settings.gradle.kts`.
+**The hidden player window.** `GET /capture?s=<secret>&u=<page>&t=<ms>` opens
+the page in a hidden, muted window (no pop-ups, no leaving the site), and
+answers with the first playlist its player requests, the page that asked
+and the browser's user agent. It is used only for players that need their
+own script, after every plain route has failed, and never on a page that
+shows a bot check.
 
-## What we'll build first (tomorrow)
+TMDB and its images allow CORS and go direct.
 
-Order matters — each builds on the prior:
+## Phases
 
-1. **Scaffold runs**: `bun run dev` opens Next.js in the browser at
-   localhost:3000 with the MovieWay dark theme + a placeholder Home.
-2. **H5 client port** (`src/lib/h5/`): `clientToken`, `trSignature`,
-   `home()`, `search()`, `detail()`, `play()`. Verified by a unit
-   test against the live H5 endpoint.
-3. **Home page** (`src/app/page.tsx`): real rows + posters via
-   AsyncImage equivalent (`<Image>` from next/image or a `<img>` with
-   the H5 cover URL).
-4. **AppShell**: left rail with Home / Live TV / Search / Library
-   icons. Same dark gradient + brand-green accent as Android.
-5. **Detail page** (`src/app/title/[id]/page.tsx`): hero, summary,
-   season/episode picker for series, Play CTA.
-6. **Player** (`src/app/watch/[id]/page.tsx`): hls.js for HLS/MP4.
-   Plays movies from the H5 play endpoint.
-7. **Tauri shell**: `cargo tauri dev` opens the same UI in a native
-   window. `cargo tauri build` produces the .msi + .dmg.
-8. **GitHub Actions**: extend the release.yml's `msi` job to use
-   `cargo tauri build` instead of the Compose `packageMsi`. Add a
-   `dmg` job on macOS runner once Mac is in scope.
+1. **Foundation** - scaffold, relay (Rust + dev), app shell and design system,
+   window behaviour (remembered size/position, fullscreen, keyboard), installers
+   for all three systems.
+2. **Catalogue** - home (hero + rows), Movies, Series, search, detail page with
+   seasons and episodes.
+3. **Watching** - 7Movies, VixSrc, VidNest with failover; hls.js player with own
+   controls (quality, audio language, subtitles, skip intro, next episode);
+   continue watching with resume; parallel prefetch for cold CDNs.
+4. **Live TV** - channels and schedule (published file + the site's page),
+   resolver for the working servers, playlist token, unsealing, disguised
+   chunks, polite failure (Retry-After), feed failover.
+5. **Ship** - MovieBox and 4KHDHub sources, OpenSubtitles, update notice,
+   release workflow builds `.exe/.msi`, `.dmg`, `.AppImage/.deb`; then remove
+   `desktop/` and the `:desktop` Gradle module.
 
-## Live TV (Phase 2)
+## Rules carried over from the TV app
 
-Same approach as Android: a local HLS resolver that proxies the
-`dlhd.pk` → `daddy.php` token mint. On desktop, this can live in
-the Tauri Rust backend (reqwest + tokio for the per-segment refresh)
-so the frontend just plays a `localhost:port/master/<id>` URL through
-hls.js. Same shape as the Android NanoHTTPD `LiveStreamProxy`,
-re-implemented in Rust for the desktop runtime.
+- No emoji anywhere in the UI; icons are vectors (lucide).
+- A failed fetch is not "there is nothing" (never cache an empty list from an
+  error).
+- Obey Retry-After; never retry in a tight loop; pace bursts.
+- Never switch what is playing without the viewer asking.
+- Never bypass bot checks (Cloudflare Turnstile etc.).
+- The TMDB token comes from the environment at build time (`TMDB_TOKEN`; in
+  development read from `../local.properties`), never from the repo.
 
-Defer until after Phase 1 (movies/series) is solid.
+## Codecs per system
 
-## What's on disk now (tonight)
-
-Scaffold-only — no `bun install` yet, no `cargo build` yet, no
-running app. All ready for tomorrow's `bun install && bun run dev`.
-
-```
-desktop-web/
-  package.json                  ← deps pinned (next 15, react 19, tauri 2.1, tailwind 3.4)
-  tsconfig.json
-  next.config.js                ← output: 'export' for Tauri WebView
-  tailwind.config.ts            ← MovieWay-dark palette
-  postcss.config.js
-  .gitignore
-  PLANNING.md                   ← this doc
-  src/
-    app/
-      globals.css               ← Tailwind base + CSS vars
-      layout.tsx                ← root layout, dark theme
-      page.tsx                  ← Home (placeholder; loads H5 home rows)
-    lib/h5/
-      constants.ts              ← H5_BASE, signing key, X-Client-Info
-      crypto.ts                 ← clientToken + trSignature (crypto-js)
-      types.ts                  ← H5Item, H5Row, H5Detail, H5Play
-      api.ts                    ← home(), search(), detail(), play()
-    components/                 ← (empty — to fill tomorrow)
-  src-tauri/
-    Cargo.toml                  ← tauri 2.1.1, tauri-plugin-opener
-    tauri.conf.json             ← productName, identifier, msi+dmg targets
-    build.rs
-    src/
-      main.rs
-      lib.rs
-    capabilities/default.json   ← min permissions
-    icons/
-      32x32.png  128x128.png  128x128@2x.png  icon.ico  icon.icns
-```
-
-## Tomorrow's first commands
-
-```bash
-cd desktop-web
-bun install                    # one-time; pulls Next.js + Tauri deps
-bun run dev                    # opens http://localhost:3000
-# (in another terminal)
-bun run tauri:dev              # opens the Tauri native window pointing at localhost:3000
-```
-
-If `bun run dev` shows the dark Home with real H5 rows, the TS H5
-client port is verified end-to-end. Then we build components.
-
-## Out-of-scope for desktop v2 (intentional)
-
-- Downloads (Android does this with WorkManager + the Storage Access
-  Framework; on desktop you'd just write to ~/Downloads/. Add when
-  asked.)
-- Casting to a TV from the desktop app (Chromecast / DLNA). Big
-  surface; defer.
-- Remote-control SPA (already exists at `app/src/main/assets/`; the
-  Android app serves it via NanoHTTPD. Desktop doesn't need it
-  because the desktop IS the UI.)
+- Windows: WebView2 (Chromium) - H.264/AAC via MSE everywhere; HEVC only with
+  the system HEVC extension. Prefer H.264 renditions.
+- macOS: WKWebView - native HLS plus MSE; HEVC supported.
+- Linux: WebKitGTK - needs GStreamer `gst-plugins-good/bad` + `gst-libav`
+  (the .deb declares them).

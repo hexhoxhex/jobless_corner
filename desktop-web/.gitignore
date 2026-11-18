@@ -1,5 +1,6 @@
 # Next.js
 .next
+.next-dev
 out
 node_modules
 *.log
@@ -11,3 +12,6 @@ src-tauri/Cargo.lock.tmp
 # Editor
 .vscode
 .idea
+
+# TypeScript build cache
+tsconfig.tsbuildinfo

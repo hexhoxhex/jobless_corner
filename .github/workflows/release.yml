@@ -1,17 +1,14 @@
-name: Release APK + Windows MSI
+name: Release APK, desktop and iPhone apps
 
-# Cuts a GitHub release whenever a `v*.*.*` tag is pushed. Three jobs:
-#   - apk:    Ubuntu runner, signs with the hexhoxhex keystore.
-#   - msi:    Windows runner, packages the :desktop module via
-#             Compose's nativeDistributions packager. Unsigned for now
-#             (Windows will SmartScreen-warn on first launch; user
-#             clicks "More info" → "Run anyway" once).
-#   - ipa:    macOS runner, the iPhone/iPad app (ios/), unsigned for
-#             Sideloadly. Runs after the other two so the release notes
-#             are edited one job at a time; skipped for tags from before
-#             the iOS app existed.
-# All three attach their artifact to the same GitHub release for the tag.
-# Mac .dmg is a planned future job once we add a macOS runner step.
+# Cuts a GitHub release whenever a `v*.*.*` tag is pushed. Jobs:
+#   - apk:             Ubuntu runner, signs with the hexhoxhex keystore.
+#   - desktop:         the desktop app (desktop-web/, Tauri) on Windows,
+#                      macOS and Linux; unsigned (SmartScreen / Gatekeeper
+#                      warn once).
+#   - desktop-release: attaches every desktop installer in one go.
+#   - ipa:             macOS runner, the iPhone/iPad app (ios/), unsigned
+#                      for Sideloadly; skipped for tags from before it existed.
+# The release notes are edited by one job at a time (each waits for the last).
 
 on:
   push:
@@ -134,19 +131,35 @@ jobs:
             adb install -r vijanabarubaru-${{ steps.tag.outputs.tag }}.apk
             ```
 
-  msi:
-    # Windows desktop installer. Depends on the apk job so the release
-    # already exists when this attaches the MSI — avoids the race where
-    # both softprops/action-gh-release calls try to CREATE the release
-    # at the same time and one fails. Sequential adds ~3 min to the
-    # total release time; acceptable for safety. Mac .dmg job will
-    # mirror this shape once we add a macos-latest runner step.
+  desktop:
+    # The desktop app (desktop-web/: Tauri 2 + Next.js), one build per
+    # system. Each uploads its installers as a workflow artifact; the
+    # desktop-release job attaches them all at once, so the release notes
+    # are edited by one job at a time.
     needs: [apk]
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows
+            args: ""
+          - os: macos-15
+            name: macos
+            args: "--target universal-apple-darwin"
+          - os: ubuntu-22.04
+            name: linux
+            args: ""
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+        working-directory: desktop-web
     steps:
       - name: Resolve tag
         id: tag
-        shell: bash
+        working-directory: .
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
@@ -158,64 +171,121 @@ jobs:
         with:
           ref: ${{ steps.tag.outputs.tag }}
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v6
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Set up Gradle
-        # v5, not v6: v6 moved caching into a closed-source component
-        # whose separate Terms of Use the upgrade would accept. v5 is
-        # already Node 24 and MIT throughout.
-        uses: gradle/actions/setup-gradle@v5
-
-      - name: Build Windows MSI
-        shell: bash
-        # packageMsi runs Compose Desktop's nativeDistributions packager,
-        # which calls jpackage under the hood. Output: a Windows .msi
-        # installer that drops the app into Program Files with a Start
-        # menu shortcut.
-        run: ./gradlew :desktop:packageMsi --no-daemon --stacktrace
-
-      - name: Rename MSI to include version
-        id: msi
-        shell: bash
+      - name: Linux build libraries
+        if: matrix.name == 'linux'
+        working-directory: .
         run: |
-          src=$(ls desktop/build/compose/binaries/main/msi/*.msi | head -1)
-          dst="vijanabarubaru-${{ steps.tag.outputs.tag }}.msi"
-          cp "$src" "$dst"
-          echo "path=$dst" >> "$GITHUB_OUTPUT"
-          echo "sha256=$(sha256sum "$dst" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf
 
-      - name: Attach MSI to GitHub release
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.name == 'macos' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop-web/src-tauri
+
+      - name: Version from the tag
+        run: |
+          v="${{ steps.tag.outputs.tag }}"; v="${v#v}"
+          node -e "const f='src-tauri/tauri.conf.json';const c=JSON.parse(require('fs').readFileSync(f));c.version='$v';require('fs').writeFileSync(f,JSON.stringify(c,null,2))"
+
+      - name: Build installers
+        env:
+          TMDB_TOKEN: ${{ secrets.TMDB_TOKEN }}
+        run: |
+          if [ -z "$TMDB_TOKEN" ]; then
+            echo "::error::TMDB_TOKEN secret is empty: the catalogue would not load"
+            exit 1
+          fi
+          bun install --frozen-lockfile
+          bun run tauri build ${{ matrix.args }}
+
+      - name: Collect installers
+        run: |
+          tag="${{ steps.tag.outputs.tag }}"
+          mkdir -p ../dist-desktop
+          b=src-tauri/target
+          case "${{ matrix.name }}" in
+            windows)
+              cp $b/release/bundle/nsis/*.exe "../dist-desktop/vijanabarubaru-$tag-windows-setup.exe"
+              cp $b/release/bundle/msi/*.msi "../dist-desktop/vijanabarubaru-$tag-windows.msi" ;;
+            macos)
+              cp $b/universal-apple-darwin/release/bundle/dmg/*.dmg "../dist-desktop/vijanabarubaru-$tag-macos.dmg"
+              # The bare .app as well, for signing and notarising on a Mac
+              # (ditto keeps the bundle's links and attributes intact).
+              app=$(ls -d $b/universal-apple-darwin/release/bundle/macos/*.app | head -1)
+              ditto -c -k --keepParent "$app" "../dist-desktop/vijanabarubaru-$tag-macos-app.zip" ;;
+            linux)
+              cp $b/release/bundle/appimage/*.AppImage "../dist-desktop/vijanabarubaru-$tag-linux.AppImage"
+              cp $b/release/bundle/deb/*.deb "../dist-desktop/vijanabarubaru-$tag-linux.deb" ;;
+          esac
+          ls -la ../dist-desktop
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.name }}
+          path: dist-desktop/*
+          if-no-files-found: error
+
+  desktop-release:
+    needs: [desktop]
+    if: always() && needs.desktop.result != 'cancelled'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: desktop-*
+          path: dist-desktop
+          merge-multiple: true
+
+      - name: Checksums
+        id: sums
+        run: |
+          cd dist-desktop
+          ls -la
+          {
+            echo "list<<EOF"
+            for f in *; do echo "- $f: $(sha256sum "$f" | cut -d' ' -f1)"; done
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Attach desktop installers to the release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
-          fail_on_unmatched_files: true
-          # append_body: don't overwrite the APK section the apk job
-          # posted — append our MSI section below it. Same release,
-          # both assets visible, both checksums in the notes.
+          fail_on_unmatched_files: false
           append_body: true
-          files: ${{ steps.msi.outputs.path }}
+          files: dist-desktop/*
           body: |
-            Windows desktop installer (.msi).
 
-            **SHA-256:** `${{ steps.msi.outputs.sha256 }}`
+            **Desktop app** (Windows, macOS, Linux):
+            - Windows: `-windows-setup.exe` (installs for you only, no admin needed) or `-windows.msi`. Had the old desktop app? Use the `.msi`: it replaces it.
+            - macOS: `-macos.dmg` (Apple silicon and Intel). The build isn't notarised: the first time, right-click the app and choose Open. `-macos-app.zip` is the same app unpacked, for signing.
+            - Linux: `-linux.AppImage` (make it executable and run it) or `-linux.deb`.
 
-            Install: double-click the MSI. Windows SmartScreen may warn
-            ("Windows protected your PC") because the build isn't
-            code-signed yet — click *More info* → *Run anyway* once.
+            Windows SmartScreen may warn because the build isn't code-signed: *More info*, then *Run anyway*.
 
-            **Requirement**: VLC media player (videolan.org). libvlc
-            isn't bundled in the v1 MSI; tomorrow's build will include
-            it so this step goes away.
+            SHA-256:
+            ${{ steps.sums.outputs.list }}
 
   ipa:
-    # iPhone/iPad app. After msi as well as apk: each job edits the release
-    # notes, and two editing at once would lose one's section. Still runs
-    # when only the msi job failed.
-    needs: [apk, msi]
+    # iPhone/iPad app. After the desktop installers as well as the apk: each
+    # job edits the release notes, and two editing at once would lose one's
+    # section. Still runs when only the desktop builds failed.
+    needs: [apk, desktop-release]
     if: always() && needs.apk.result == 'success'
     runs-on: macos-15
     timeout-minutes: 45
