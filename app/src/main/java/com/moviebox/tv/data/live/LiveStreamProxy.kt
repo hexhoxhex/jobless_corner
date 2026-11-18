@@ -890,6 +890,23 @@ class LiveStreamProxy(
                 }
             }
         }
+        // Gone because the source dropped it from its list: a chunk we kept
+        // after the source moved on (see history), or one the player asked
+        // for again after a seek. A 404 here is fatal to the player once its
+        // two quick retries are spent, and it restarted the channel: TNT
+        // Sports 1 on cdn.hdm1.net, 2 s after a back-edge seek re-asked for a
+        // kept chunk the server had already deleted (2026-11-18). An empty
+        // chunk skips that stretch and the picture carries on.
+        if (resp.code == 404 &&
+            innerState[channelId]?.lastGoodBody?.contains(segName) == false
+        ) {
+            resp.close()
+            markSkippedSegment(channelId, segName)
+            notePrunesDropped(channelId)
+            Log.w(DIAG, "PROXY ch=$channelId SEG 404 on ${shortSeg(lastUrl)} host=${hostOf(lastUrl)} — " +
+                "no longer listed and deleted at the source; skipped instead of failing the player")
+            return emptySegment()
+        }
         if (!resp.isSuccessful) {
             val code = resp.code
             resp.close()
@@ -1799,6 +1816,7 @@ class LiveStreamProxy(
                             body = servedBody, channelId = channelId,
                             baseUrl = entry.innerUrl,
                         ),
+                        host = hostOf(entry.innerUrl),
                     ),
                 )
                 lastServed[channelId] = rewrittenBody
@@ -2048,9 +2066,16 @@ class LiveStreamProxy(
 
     /** [body] with up to [EXTRA_WINDOW_S] of this channel's earlier chunks in
      *  front. Left as it is (and the history dropped) for anything this
-     *  can't carry safely: discontinuities, keys, init segments, an end. */
-    private fun extendWindow(channelId: String, body: String): String {
+     *  can't carry safely: discontinuities, keys, init segments, an end —
+     *  or a [host] that deletes chunks once they leave its list, where a
+     *  kept chunk is only a 404 waiting to happen. */
+    private fun extendWindow(channelId: String, body: String, host: String? = null): String {
         if (!body.startsWith("#EXTM3U")) return body
+        if (host != null && prunesDropped(host)) {
+            history.remove(channelId)
+            noteServedStart(channelId, body)
+            return body
+        }
         if (body.contains("#EXT-X-DISCONTINUITY") || body.contains("#EXT-X-KEY") ||
             body.contains("#EXT-X-MAP") || body.contains("#EXT-X-ENDLIST") ||
             body.contains("#EXT-X-DATERANGE")
@@ -2149,6 +2174,28 @@ class LiveStreamProxy(
     }
 
     private val extendLogged: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /** [channelId]'s server deleted a chunk that had left its list: keeping
+     *  chunks behind its window does it no good, so stop for a while. */
+    private fun notePrunesDropped(channelId: String) {
+        val host = cache[channelId]?.innerUrl?.let(::hostOf) ?: lastHost[channelId] ?: return
+        history.remove(channelId)
+        val now = System.currentTimeMillis()
+        val before = prunedAt.put(host, now)
+        if (before != null && now - before < PRUNES_DROPPED_FOR_MS) return
+        Log.w(DIAG, "PROXY $host deletes chunks as soon as they leave its list — " +
+            "not keeping old chunks for it for ${PRUNES_DROPPED_FOR_MS / 86_400_000} days")
+        runCatching {
+            com.moviebox.tv.App.instance
+                .getSharedPreferences(KEEP_PREFS, android.content.Context.MODE_PRIVATE)
+                .edit().putStringSet("pruned", prunedAt.map { "${it.key}|${it.value}" }.toSet()).apply()
+        }
+    }
+
+    private fun prunesDropped(host: String): Boolean {
+        val at = prunedAt[host] ?: return false
+        return System.currentTimeMillis() - at < PRUNES_DROPPED_FOR_MS
+    }
 
     /** The last playlist the main path handed the player, per channel. */
     private val lastServed = ConcurrentHashMap<String, String>()
@@ -3133,6 +3180,23 @@ class LiveStreamProxy(
             }
         }
         private const val TOKEN_PREFS = "live_tokens"
+
+        /** Servers seen deleting chunks as they leave their list (see
+         *  [notePrunesDropped]), and when. Forgotten after
+         *  [PRUNES_DROPPED_FOR_MS], so one stray 404 can't switch the extra
+         *  cushion off for good on a server that keeps them. */
+        private val prunedAt = ConcurrentHashMap<String, Long>().also { map ->
+            runCatching {
+                com.moviebox.tv.App.instance
+                    .getSharedPreferences(KEEP_PREFS, android.content.Context.MODE_PRIVATE)
+                    .getStringSet("pruned", null)?.forEach { e ->
+                        val host = e.substringBefore('|')
+                        e.substringAfter('|').toLongOrNull()?.let { map[host] = it }
+                    }
+            }
+        }
+        private const val KEEP_PREFS = "live_keep"
+        private const val PRUNES_DROPPED_FOR_MS = 3 * 86_400_000L
         /** When a host was last checked for tokens after a bare refusal. */
         private val tokenCheckAt = ConcurrentHashMap<String, Long>()
         private const val TOKEN_CHECK_EVERY_MS = 10 * 60_000L
