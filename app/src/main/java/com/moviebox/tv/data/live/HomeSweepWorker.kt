@@ -223,16 +223,21 @@ class HomeSweepWorker(
         private const val PERIODIC = "home-sweep"
         private const val NOW = "home-sweep-now"
 
-        /** Channels per run. ~600 a day at the hourly cadence, so the whole
-         *  catalogue is covered in about a day and a half, and the 126 with
-         *  no verdict — which go first — within the first several hours. */
-        private const val MAX_PER_RUN = 25
+        /** Channels per run, and runs every [PERIOD_HOURS]. Was 25 an hour:
+         *  2026-11-24 a run woke with the TV, tried 9 channels in under four
+         *  minutes (each up to seven of the site's pages plus hidden players,
+         *  as the main server now refuses most channels), and the site
+         *  stopped answering this address mid-run, which is what the viewer
+         *  then sees as "most channels offline". 8 every 3 hours is about a
+         *  ninth of the load and still refreshes ~64 verdicts a day. */
+        private const val MAX_PER_RUN = 8
+        private const val PERIOD_HOURS = 3L
 
         /** Under WorkManager's ten-minute ceiling, with room for the one
          *  probe still in flight when the budget runs out. */
         private const val RUN_BUDGET_MS = 8 * 60_000L
 
-        private const val SPACING_MS = 15_000L
+        private const val SPACING_MS = 45_000L
 
         /** How often a running probe checks whether the viewer started watching. */
         private const val WATCH_POLL_MS = 1_000L
@@ -248,7 +253,7 @@ class HomeSweepWorker(
             .setRequiredNetworkType(NetworkType.CONNECTED)
             .build()
 
-        /** Idempotent: safe on every app start. KEEP, so a restart does not
+        /** Idempotent: safe on every app start. UPDATE, so a restart does not
          *  push the next run out; the initial delay keeps it clear of the
          *  first minutes after launch, when someone is likely starting to
          *  watch. */
@@ -256,8 +261,10 @@ class HomeSweepWorker(
             runCatching {
                 WorkManager.getInstance(context).enqueueUniquePeriodicWork(
                     PERIODIC,
-                    ExistingPeriodicWorkPolicy.KEEP,
-                    PeriodicWorkRequestBuilder<HomeSweepWorker>(1, TimeUnit.HOURS)
+                    // UPDATE, not KEEP: KEEP would leave TVs on the old hourly
+                    // schedule. UPDATE keeps the current period's timing.
+                    ExistingPeriodicWorkPolicy.UPDATE,
+                    PeriodicWorkRequestBuilder<HomeSweepWorker>(PERIOD_HOURS, TimeUnit.HOURS)
                         .setConstraints(NETWORK)
                         .setInitialDelay(10, TimeUnit.MINUTES)
                         .build(),

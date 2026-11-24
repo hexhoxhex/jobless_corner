@@ -570,6 +570,15 @@ class LiveResolver(
                 // resolved them all in 4-11 s. Walk the rest, one at a time.
                 walkRemainingPaths(channelId)
             } else {
+                // 2026-11-24: the main server (edge) refuses every channel
+                // since 2026-11-14, so for most channels its routes were the
+                // only ones avoided, the first pass (one route) failed, and
+                // the race below fetched all seven of the site's pages at
+                // once, which is what gets this address refused by the site
+                // (see PATHS_PER_FIRST_PASS). Walk the other routes one at a
+                // time first, skipping answers from avoided servers; the
+                // race stays as the last resort.
+                walkRemainingPaths(channelId, avoid) ?: run {
                 // Blacklist-hit dead end: we filtered every candidate and
                 // ended up with nothing. Without this escape hatch the
                 // channel stays stuck for the full FAILURE_TTL_MS window
@@ -616,6 +625,7 @@ class LiveResolver(
                     r
                 }
                 second
+                }
             }
         }
         if (winner != null) {
@@ -1019,11 +1029,16 @@ class LiveResolver(
      *  AT A TIME — sequential on purpose: these pages share the source's
      *  trickle, so racing them starves all of them. Stops at the first that
      *  resolves; the caller's budget bounds the whole walk. */
-    private suspend fun walkRemainingPaths(channelId: String): Pair<String, String>? {
+    private suspend fun walkRemainingPaths(
+        channelId: String,
+        avoid: Set<String> = emptySet(),
+    ): Pair<String, String>? {
         val tried = playerPathsFor(channelId).toSet()
         for (path in playerPathsFor(channelId, wide = true)) {
             if (path in tried) continue
             val url = runCatching { tryPlayerPath(channelId, path) }.getOrNull() ?: continue
+            val host = hostFromUrl(url).orEmpty()
+            if (avoid.any { bad -> host.endsWith(bad) }) continue
             return url to "dlhd:$path"
         }
         return null
@@ -1429,6 +1444,44 @@ class LiveResolver(
             java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.ConcurrentHashMap<String, Long>>()
         /** Servers refusing every channel, until when. */
         private val refusingUntil = java.util.concurrent.ConcurrentHashMap<String, Long>()
+        /** How many times in a row each server was found refusing: the hold
+         *  doubles each time (30 min, 1 h, 2 h, 4 h, 8 h). */
+        private val refusingStreak = java.util.concurrent.ConcurrentHashMap<String, Int>()
+        private const val KEY_REFUSING = "refusing_hosts"
+        private const val REFUSING_MAX_MS = 8 * 3600_000L
+
+        /** Kept across restarts: the TV is switched off and on all day, and
+         *  each start learned again, by being refused on two channels, that
+         *  the main server refuses everything (it has since 2026-11-14). */
+        private val refusingLoaded = java.util.concurrent.atomic.AtomicBoolean(false)
+
+        private fun loadRefusing() {
+            if (!refusingLoaded.compareAndSet(false, true)) return
+            runCatching {
+                val now = System.currentTimeMillis()
+                App.instance.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                    .getString(KEY_REFUSING, "").orEmpty()
+                    .split(';').forEach { e ->
+                        val f = e.split('|')
+                        if (f.size == 3 && f[0].isNotBlank()) {
+                            val until = f[1].toLongOrNull() ?: return@forEach
+                            f[2].toIntOrNull()?.let { refusingStreak[f[0]] = it }
+                            if (until > now) refusingUntil[f[0]] = until
+                        }
+                    }
+            }
+        }
+
+        private fun saveRefusing() {
+            runCatching {
+                val hosts = refusingStreak.keys + refusingUntil.keys
+                val value = hosts.joinToString(";") { h ->
+                    "$h|${refusingUntil[h] ?: 0L}|${refusingStreak[h] ?: 0}"
+                }
+                App.instance.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                    .edit().putString(KEY_REFUSING, value).apply()
+            }
+        }
         private const val REFUSALS_WINDOW_MS = 10 * 60_000L
         private const val REFUSING_FOR_MS = 30 * 60_000L
 
@@ -1441,27 +1494,34 @@ class LiveResolver(
             val seen = refusals.getOrPut(host) { java.util.concurrent.ConcurrentHashMap() }
             seen[channelId] = now
             seen.values.removeIf { now - it > REFUSALS_WINDOW_MS }
+            loadRefusing()
             if (seen.size >= 2 && (refusingUntil[host] ?: 0L) < now) {
-                refusingUntil[host] = now + REFUSING_FOR_MS
+                val streak = (refusingStreak[host] ?: 0) + 1
+                refusingStreak[host] = streak
+                val forMs = (REFUSING_FOR_MS shl (streak - 1).coerceAtMost(4)).coerceAtMost(REFUSING_MAX_MS)
+                refusingUntil[host] = now + forMs
+                saveRefusing()
                 android.util.Log.w(
                     "LiveDiag",
                     "RESOLVER $host refuses every channel — routes to it go last for " +
-                        "${REFUSING_FOR_MS / 60_000} min",
+                        "${forMs / 60_000} min (refusing $streak time(s) in a row)",
                 )
             }
         }
 
         /** [host] served a playlist: whatever it was refusing, it isn't now. */
         fun noteServed(host: String) {
+            loadRefusing()
             refusals.remove(host)
-            if (refusingUntil.remove(host) != null) {
-                android.util.Log.i("LiveDiag", "RESOLVER $host serves again")
-            }
+            val was = refusingUntil.remove(host) != null
+            if (refusingStreak.remove(host) != null || was) saveRefusing()
+            if (was) android.util.Log.i("LiveDiag", "RESOLVER $host serves again")
         }
 
         /** Servers refusing every channel, or having us wait: routes to them
          *  go last and their answers are skipped while another can answer. */
         fun refusingHosts(): Set<String> {
+            loadRefusing()
             val now = System.currentTimeMillis()
             refusingUntil.entries.removeIf { it.value < now }
             return refusingUntil.keys.toSet() + HostGate.heldHosts()

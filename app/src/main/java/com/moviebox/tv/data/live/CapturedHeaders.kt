@@ -64,6 +64,9 @@ object CapturedHeaders {
      *  Filter them out of the WebView-captured set so we don't collide. */
     private val FORBIDDEN = setOf(
         "content-length", "host", "connection",
+        // Android's WebView marks its requests with the app's id; servers
+        // that refuse app WebViews (waterera.net, 2026-11-24) refuse it too.
+        "x-requested-with",
         // Accept-Encoding: OkHttp defaults to gzip; overriding to
         // "identity" (what WebView often sends for a video fetch) can
         // regress unrelated fetches. Let OkHttp own this.

@@ -1160,6 +1160,36 @@ class RemoteServer(
                 }
             }
 
+            // Run the hidden player loader on one player page, as the live
+            // resolver does for players that need their own script: url= the
+            // player (the wrapper's iframe), referer= the wrapper. Answers the
+            // playlist it asked for, or none. Lets the loader be tested while
+            // the site itself is refusing this address. mode=embed|page tries
+            // one way only; wait= overrides its time limit (ms).
+            uri == "/api/debug/jsiframe" && method == Method.POST -> {
+                if (!RemoteAccess.isSuperuser(dev)) {
+                    newFixedLengthResponse(
+                        Response.Status.FORBIDDEN, "application/json",
+                        "{\"error\":\"Superuser only\"}",
+                    )
+                } else {
+                    val t0 = System.currentTimeMillis()
+                    val m3u8 = kotlinx.coroutines.runBlocking {
+                        com.moviebox.tv.data.live.JsIframeResolver.resolve(
+                            p("url").orEmpty(), p("referer").orEmpty(),
+                            only = p("mode")?.takeIf { it.isNotBlank() },
+                            waitMs = p("wait")?.toLongOrNull(),
+                        )
+                    }
+                    json(
+                        JSONObject()
+                            .put("m3u8", m3u8 ?: JSONObject.NULL)
+                            .put("ms", System.currentTimeMillis() - t0)
+                            .toString()
+                    )
+                }
+            }
+
             // How live chunks from a slow host are fetched: connections and
             // piece size, to compare on the TV. conns=0 is one connection only;
             // slow=<host> treats that host as slow from now on (empty clears it).
