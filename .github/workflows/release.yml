@@ -1,14 +1,18 @@
 name: Release APK, desktop and iPhone apps
 
 # Cuts a GitHub release whenever a `v*.*.*` tag is pushed. Jobs:
-#   - apk:             Ubuntu runner, signs with the hexhoxhex keystore.
-#   - desktop:         the desktop app (desktop-web/, Tauri) on Windows,
-#                      macOS and Linux; unsigned (SmartScreen / Gatekeeper
-#                      warn once).
-#   - desktop-release: attaches every desktop installer in one go.
-#   - ipa:             macOS runner, the iPhone/iPad app (ios/), unsigned
-#                      for Sideloadly; skipped for tags from before it existed.
+#   - apk:               Ubuntu runner, signs with the hexhoxhex keystore.
+#   - desktop:           the desktop app (desktop-web/, Tauri) for Windows
+#                        and Linux (desktop-build.yml); unsigned.
+#   - desktop-mac:       the same for macOS on Apple silicon, and
+#     desktop-mac-intel: again on an Intel Mac when no Apple silicon runner
+#                        could be had (GitHub often has none free).
+#   - desktop-release:   attaches every desktop installer and writes the
+#                        desktop section of the notes (replaced on a re-run).
+#   - ipa, ipa-intel:    the iPhone/iPad app (ipa-build.yml), unsigned for
+#                        Sideloadly, with the same Intel fallback.
 # The release notes are edited by one job at a time (each waits for the last).
+# A failed run can be repeated with "Re-run failed jobs" on its page.
 
 on:
   push:
@@ -131,11 +135,16 @@ jobs:
             adb install -r vijanabarubaru-${{ steps.tag.outputs.tag }}.apk
             ```
 
+  # ---- desktop app (desktop-web/, Tauri), built by desktop-build.yml ----
+  #
+  # GitHub's Apple silicon Macs are often all taken: three releases lost
+  # their macOS job to "The job was not acquired by Runner of type hosted
+  # even after multiple attempts" after 15 minutes in the queue (v0.1.311,
+  # v0.1.318, v0.1.320). Every macOS job therefore has a second try on an
+  # Intel Mac (macos-15-intel, a separate pool), which makes the same
+  # universal app and the same .ipa.
+
   desktop:
-    # The desktop app (desktop-web/: Tauri 2 + Next.js), one build per
-    # system. Each uploads its installers as a workflow artifact; the
-    # desktop-release job attaches them all at once, so the release notes
-    # are edited by one job at a time.
     needs: [apk]
     strategy:
       fail-fast: false
@@ -143,107 +152,47 @@ jobs:
         include:
           - os: windows-latest
             name: windows
-            args: ""
-          - os: macos-15
-            name: macos
-            args: "--target universal-apple-darwin"
           - os: ubuntu-22.04
             name: linux
-            args: ""
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
-    defaults:
-      run:
-        shell: bash
-        working-directory: desktop-web
-    steps:
-      - name: Resolve tag
-        id: tag
-        working-directory: .
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
-          fi
+    uses: ./.github/workflows/desktop-build.yml
+    with:
+      os: ${{ matrix.os }}
+      name: ${{ matrix.name }}
+      tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    secrets: inherit
 
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ steps.tag.outputs.tag }}
+  desktop-mac:
+    needs: [apk]
+    uses: ./.github/workflows/desktop-build.yml
+    with:
+      os: macos-15
+      name: macos
+      args: "--target universal-apple-darwin"
+      tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    secrets: inherit
 
-      - name: Linux build libraries
-        if: matrix.name == 'linux'
-        working-directory: .
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf
-
-      - uses: oven-sh/setup-bun@v2
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.name == 'macos' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: desktop-web/src-tauri
-
-      - name: Version from the tag
-        run: |
-          v="${{ steps.tag.outputs.tag }}"; v="${v#v}"
-          node -e "const f='src-tauri/tauri.conf.json';const c=JSON.parse(require('fs').readFileSync(f));c.version='$v';require('fs').writeFileSync(f,JSON.stringify(c,null,2))"
-
-      - name: Build installers
-        env:
-          TMDB_TOKEN: ${{ secrets.TMDB_TOKEN }}
-        run: |
-          if [ -z "$TMDB_TOKEN" ]; then
-            echo "::error::TMDB_TOKEN secret is empty: the catalogue would not load"
-            exit 1
-          fi
-          bun install --frozen-lockfile
-          bun run tauri build ${{ matrix.args }}
-
-      - name: Collect installers
-        run: |
-          tag="${{ steps.tag.outputs.tag }}"
-          mkdir -p ../dist-desktop
-          b=src-tauri/target
-          case "${{ matrix.name }}" in
-            windows)
-              cp $b/release/bundle/nsis/*.exe "../dist-desktop/vijanabarubaru-$tag-windows-setup.exe"
-              cp $b/release/bundle/msi/*.msi "../dist-desktop/vijanabarubaru-$tag-windows.msi" ;;
-            macos)
-              cp $b/universal-apple-darwin/release/bundle/dmg/*.dmg "../dist-desktop/vijanabarubaru-$tag-macos.dmg"
-              # The bare .app as well, for signing and notarising on a Mac
-              # (ditto keeps the bundle's links and attributes intact).
-              app=$(ls -d $b/universal-apple-darwin/release/bundle/macos/*.app | head -1)
-              ditto -c -k --keepParent "$app" "../dist-desktop/vijanabarubaru-$tag-macos-app.zip" ;;
-            linux)
-              cp $b/release/bundle/appimage/*.AppImage "../dist-desktop/vijanabarubaru-$tag-linux.AppImage"
-              cp $b/release/bundle/deb/*.deb "../dist-desktop/vijanabarubaru-$tag-linux.deb" ;;
-          esac
-          ls -la ../dist-desktop
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: desktop-${{ matrix.name }}
-          path: dist-desktop/*
-          if-no-files-found: error
+  desktop-mac-intel:
+    # Only when the Apple silicon try didn't make it.
+    needs: [desktop-mac]
+    if: ${{ !cancelled() && needs.desktop-mac.result != 'success' && needs.desktop-mac.result != 'skipped' }}
+    uses: ./.github/workflows/desktop-build.yml
+    with:
+      os: macos-15-intel
+      name: macos
+      args: "--target universal-apple-darwin"
+      tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    secrets: inherit
 
   desktop-release:
-    needs: [desktop]
-    if: always() && needs.desktop.result != 'cancelled'
+    # Attaches whatever was built, and writes (or rewrites, on a re-run) the
+    # desktop section of the notes.
+    needs: [desktop, desktop-mac, desktop-mac-intel]
+    if: ${{ !cancelled() && (needs.desktop.result == 'success' || needs.desktop-mac.result == 'success' || needs.desktop-mac-intel.result == 'success') }}
     runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     steps:
-      - name: Resolve tag
-        id: tag
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
-          fi
+      - uses: actions/checkout@v5
 
       - uses: actions/download-artifact@v4
         with:
@@ -251,98 +200,36 @@ jobs:
           path: dist-desktop
           merge-multiple: true
 
-      - name: Checksums
-        id: sums
-        run: |
-          cd dist-desktop
-          ls -la
-          {
-            echo "list<<EOF"
-            for f in *; do echo "- $f: $(sha256sum "$f" | cut -d' ' -f1)"; done
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
       - name: Attach desktop installers to the release
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          fail_on_unmatched_files: false
-          append_body: true
-          files: dist-desktop/*
-          body: |
-
-            **Desktop app** (Windows, macOS, Linux):
-            - Windows: `-windows-setup.exe` (installs for you only, no admin needed) or `-windows.msi`. Had the old desktop app? Use the `.msi`: it replaces it.
-            - macOS: `-macos.dmg` (Apple silicon and Intel). The build isn't notarised: the first time, right-click the app and choose Open. `-macos-app.zip` is the same app unpacked, for signing.
-            - Linux: `-linux.AppImage` (make it executable and run it) or `-linux.deb`.
-
-            Windows SmartScreen may warn because the build isn't code-signed: *More info*, then *Run anyway*.
-
-            SHA-256:
-            ${{ steps.sums.outputs.list }}
-
-  ipa:
-    # iPhone/iPad app. After the desktop installers as well as the apk: each
-    # job edits the release notes, and two editing at once would lose one's
-    # section. Still runs when only the desktop builds failed.
-    needs: [apk, desktop-release]
-    if: always() && needs.apk.result == 'success'
-    runs-on: macos-15
-    timeout-minutes: 45
-    steps:
-      - name: Resolve tag
-        id: tag
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ steps.tag.outputs.tag }}
-
-      - name: Build the .ipa (unsigned)
-        id: ipa
-        env:
-          TMDB_TOKEN: ${{ secrets.TMDB_TOKEN }}
-          TAG: ${{ steps.tag.outputs.tag }}
-        run: |
-          if [ ! -f ios/project.yml ]; then
-            echo "this tag has no iOS app"
-            echo "path=" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          brew install xcodegen
-          cd ios
-          xcodegen generate
-          status=0
-          xcodebuild build \
-            -project VijanaBaruBaru.xcodeproj -scheme VijanaBaruBaru \
-            -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
-            -derivedDataPath build \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-            MARKETING_VERSION="${TAG#v}" CURRENT_PROJECT_VERSION=${{ github.run_number }} \
-            TMDB_TOKEN="$TMDB_TOKEN" > ipa.log 2>&1 || status=$?
-          grep -E "error:|\*\* " ipa.log || true
-          [ $status -eq 0 ] || exit $status
-          mkdir Payload
-          cp -R build/Build/Products/Release-iphoneos/VijanaBaruBaru.app Payload/
-          name="vijanabarubaru-$TAG.ipa"
-          zip -qry "../$name" Payload
-          echo "path=$name" >> "$GITHUB_OUTPUT"
-          echo "sha256=$(shasum -a 256 "../$name" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-
-      - name: Attach the .ipa to the release
-        if: steps.ipa.outputs.path != ''
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.tag.outputs.tag }}
-          NAME: ${{ steps.ipa.outputs.path }}
-          SHA: ${{ steps.ipa.outputs.sha256 }}
         run: |
-          gh release upload "$TAG" "$NAME" --clobber -R "$GITHUB_REPOSITORY"
+          ls -la dist-desktop
+          gh release upload "$TAG" dist-desktop/* --clobber -R "$GITHUB_REPOSITORY"
           gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json body -q .body > body.md
-          BUILT="for $TAG" python3 .github/scripts/ios_release_notes.py body.md
+          python3 .github/scripts/desktop_release_notes.py body.md dist-desktop
           gh release edit "$TAG" -R "$GITHUB_REPOSITORY" --notes-file body.md
+
+  # ---- iPhone/iPad app, built by ipa-build.yml ----
+
+  ipa:
+    # After the desktop installers as well as the apk: each job edits the
+    # release notes, and two editing at once would lose one's section. Still
+    # runs when the desktop builds failed.
+    needs: [apk, desktop-release]
+    if: ${{ !cancelled() && needs.apk.result == 'success' }}
+    uses: ./.github/workflows/ipa-build.yml
+    with:
+      os: macos-15
+      tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    secrets: inherit
+
+  ipa-intel:
+    # Only when the Apple silicon try didn't make it.
+    needs: [apk, ipa]
+    if: ${{ !cancelled() && needs.apk.result == 'success' && needs.ipa.result != 'success' && needs.ipa.result != 'skipped' }}
+    uses: ./.github/workflows/ipa-build.yml
+    with:
+      os: macos-15-intel
+      tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    secrets: inherit

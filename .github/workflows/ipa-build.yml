@@ -1,0 +1,73 @@
+name: iPhone release build (called by release.yml)
+
+# The iPhone/iPad app (ios/), unsigned for Sideloadly, attached to the
+# release with its section of the notes. Called by release.yml on an Apple
+# silicon runner, and again on an Intel one when none could be had.
+
+on:
+  workflow_call:
+    inputs:
+      os:
+        description: Runner label
+        required: true
+        type: string
+      tag:
+        required: true
+        type: string
+    secrets:
+      TMDB_TOKEN:
+        required: true
+
+jobs:
+  build:
+    runs-on: ${{ inputs.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Build the .ipa (unsigned)
+        id: ipa
+        env:
+          TMDB_TOKEN: ${{ secrets.TMDB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          if [ ! -f ios/project.yml ]; then
+            echo "this tag has no iOS app"
+            echo "path=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "runner: ${{ inputs.os }} ($(uname -m))"
+          brew install xcodegen
+          cd ios
+          xcodegen generate
+          status=0
+          xcodebuild build \
+            -project VijanaBaruBaru.xcodeproj -scheme VijanaBaruBaru \
+            -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            MARKETING_VERSION="${TAG#v}" CURRENT_PROJECT_VERSION=${{ github.run_number }} \
+            TMDB_TOKEN="$TMDB_TOKEN" > ipa.log 2>&1 || status=$?
+          grep -E "error:|\*\* " ipa.log || true
+          [ $status -eq 0 ] || exit $status
+          mkdir Payload
+          cp -R build/Build/Products/Release-iphoneos/VijanaBaruBaru.app Payload/
+          name="vijanabarubaru-$TAG.ipa"
+          zip -qry "../$name" Payload
+          echo "path=$name" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(shasum -a 256 "../$name" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Attach the .ipa to the release
+        if: steps.ipa.outputs.path != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          NAME: ${{ steps.ipa.outputs.path }}
+          SHA: ${{ steps.ipa.outputs.sha256 }}
+        run: |
+          gh release upload "$TAG" "$NAME" --clobber -R "$GITHUB_REPOSITORY"
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json body -q .body > body.md
+          BUILT="for $TAG" python3 .github/scripts/ios_release_notes.py body.md
+          gh release edit "$TAG" -R "$GITHUB_REPOSITORY" --notes-file body.md
