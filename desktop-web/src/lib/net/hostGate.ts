@@ -83,6 +83,13 @@ export const HostGate = {
     save();
   },
 
+  /** Hold [host] for [ms] on our own judgement (it stopped answering). */
+  hold(host: string, ms: number) {
+    const now = Date.now();
+    holds.set(host, { until: now + Math.min(ms, MAX_HOLD_MS), lastProbe: now });
+    save();
+  },
+
   heldForMs(host: string): number {
     const h = holds.get(host);
     return h ? Math.max(0, h.until - Date.now()) : 0;

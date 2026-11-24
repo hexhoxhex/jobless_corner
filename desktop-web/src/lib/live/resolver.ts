@@ -54,6 +54,14 @@ export type LiveStream = {
 
 export class LiveError extends Error {}
 
+/** The site itself stopped answering this address: it limits how much one
+ *  address may ask, and walking on only prolongs it. Says nothing about the
+ *  channel, so it isn't recorded against it. */
+export class SiteSilentError extends LiveError {}
+
+/** Back off the site this long once it stops answering. */
+const SITE_REST_MS = 3 * 60_000;
+
 // ---- what we have learned, kept on this computer ----
 
 type Embed = { iframe: string; ref: string; at: number };
@@ -149,17 +157,23 @@ function routeOrder(channelId: string): string[] {
 
 // ---- page walking ----
 
-async function page(url: string, referer: string, signal?: AbortSignal): Promise<{ body: string; finalUrl: string } | null> {
+type Page = { body: string; finalUrl: string };
+
+/** [url]'s page; null when it answered with an error; "silent" when it didn't
+ *  answer at all (no connection, timed out, or held back by [HostGate]). */
+async function page(url: string, referer: string, signal?: AbortSignal): Promise<Page | "silent" | null> {
   try {
     const r = await rfetch(url, { headers: { "User-Agent": PAGE_UA, Referer: referer }, timeoutMs: 30_000, signal, whole: true });
     if (!r.ok) {
+      // The relay's own 502/504: the server never answered.
+      const silent = (r.status === 502 || r.status === 504) && !!r.headers.get("x-relay-error");
       await r.body?.cancel().catch(() => undefined);
-      return null;
+      return silent ? "silent" : null;
     }
     return { body: await r.text(), finalUrl: r.finalUrl };
   } catch (e) {
     if (signal?.aborted) throw e;
-    return null;
+    return "silent";
   }
 }
 
@@ -187,7 +201,7 @@ async function walkEmbed(
   seen?: { unreachable?: boolean },
 ): Promise<Found | null> {
   const p = await page(pageUrl, referer, signal);
-  if (!p) {
+  if (!p || p === "silent") {
     if (seen && depth === 0) seen.unreachable = true;
     return null;
   }
@@ -265,7 +279,7 @@ async function tryRoute(
   route: string,
   signal?: AbortSignal,
   log?: (m: string) => void,
-): Promise<LiveStream | Deferred | null> {
+): Promise<LiveStream | Deferred | "silent" | null> {
   const base = await wrapperBase();
   const wrapper = `${base}/${route}/stream-${channelId}.php`;
   const key = embedKey(channelId, route);
@@ -289,8 +303,12 @@ async function tryRoute(
 
   if (!found) {
     const w = await page(wrapper, `${base}/watch.php?id=${channelId}`, signal);
+    if (w === "silent") {
+      log?.(`${route}: the site didn't answer`);
+      return "silent";
+    }
     if (!w) {
-      log?.(`${route}: wrapper didn't answer`);
+      log?.(`${route}: wrapper answered with an error`);
       return null;
     }
     const iframe = IFRAME_RE.exec(w.body)?.[1];
@@ -410,6 +428,24 @@ export async function resolveChannel(
   const started = Date.now();
   const deferred: Deferred[] = [];
   const slowOnes: string[] = [];
+  const siteHost = hostOf(await wrapperBase());
+  const resting = HostGate.heldForMs(siteHost);
+  if (resting > 0) {
+    throw new SiteSilentError(`The live site stopped answering this connection; trying again in about ${Math.ceil(resting / 60_000)} min`);
+  }
+  let silentInARow = 0;
+  /** Two of the site's pages in a row unanswered: the site is limiting this
+   *  address, not missing this channel. Stop asking for a while. */
+  const noteSilent = (r: unknown) => {
+    if (r !== "silent") {
+      silentInARow = 0;
+      return;
+    }
+    if (++silentInARow < 2) return;
+    HostGate.hold(siteHost, SITE_REST_MS);
+    opts.log?.(`${siteHost} stopped answering; leaving it alone for ${SITE_REST_MS / 60_000} min`);
+    throw new SiteSilentError("The live site stopped answering this connection; it usually lets us back in within a few minutes");
+  };
   const won = (s: LiveStream) => {
     mem.winner[channelId] = s.route;
     // The route tried first for channels never played here: only one that
@@ -446,6 +482,8 @@ export async function resolveChannel(
     }
     opts.onRoute?.(route);
     const r = await tryRoute(channelId, route, opts.signal, opts.log);
+    noteSilent(r);
+    if (r === "silent") continue;
     if (r && "url" in r) return won(r);
     if (r && route === mem.winner[channelId] && capCost(r) <= 1) {
       // The hidden window played this channel last time: straight there.
@@ -480,6 +518,8 @@ export async function resolveChannel(
     opts.log?.(`${route}: its server was slow earlier; trying it anyway`);
     opts.onRoute?.(route);
     const r = await tryRoute(channelId, route, opts.signal, opts.log);
+    noteSilent(r);
+    if (r === "silent") continue;
     if (r && "url" in r) return won(r);
     if (r && !deferred.some((d) => d.route === r.route)) deferred.push(r);
   }

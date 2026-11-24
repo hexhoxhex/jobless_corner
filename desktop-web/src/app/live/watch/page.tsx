@@ -4,7 +4,7 @@ import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import clsx from "clsx";
 import { ArrowLeft, Loader2, Maximize, Maximize2, Minimize, Minimize2, Pause, Play, Radio, RotateCw, Volume1, Volume2, VolumeX } from "lucide-react";
-import { resolveChannel, type LiveStream } from "@/lib/live/resolver";
+import { SiteSilentError, resolveChannel, type LiveStream } from "@/lib/live/resolver";
 import { hostOf } from "@/lib/net/relay";
 import { attachLive, type LiveAttached } from "@/lib/live/attachLive";
 import { isFullscreen, setFullscreen } from "@/lib/player/fullscreen";
@@ -127,6 +127,13 @@ function LiveWatch() {
         video.current!.play().catch(() => setPaused(true));
       } catch (e) {
         if (ac.signal.aborted) return;
+        if (e instanceof SiteSilentError) {
+          // Not this channel's fault: don't mark it as not reachable.
+          triedRoutes.current = [];
+          deaths.current = {};
+          setPhase({ kind: "failed", reason: e.message });
+          return;
+        }
         // Every route tried once this time round: start over next time.
         const reason = triedRoutes.current.length
           ? "The stream stopped and no other route to this channel answers."
